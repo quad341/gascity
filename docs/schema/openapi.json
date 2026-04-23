@@ -12692,6 +12692,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -13231,6 +13238,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -13773,6 +13787,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -13986,6 +14007,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -14161,6 +14189,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -14304,6 +14339,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -14612,6 +14654,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -14700,6 +14749,13 @@
             },
             "description": "Created",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -14770,6 +14826,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -14850,6 +14913,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -14910,6 +14980,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -14970,6 +15047,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -15163,6 +15247,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -15316,6 +15407,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -15574,6 +15672,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -15653,6 +15758,13 @@
             },
             "description": "Created",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -15785,6 +15897,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -16190,6 +16309,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -16404,6 +16530,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -16987,6 +17120,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -17926,6 +18066,13 @@
             },
             "description": "Created",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -18239,6 +18386,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -18589,6 +18743,13 @@
             },
             "description": "Created",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -19346,6 +19507,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -19507,6 +19675,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -19567,6 +19742,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -19779,6 +19961,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -19839,6 +20028,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -20051,6 +20247,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -20111,6 +20314,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -20395,6 +20605,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -20536,6 +20753,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -20890,6 +21114,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -21144,6 +21375,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -21285,6 +21523,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -21418,6 +21663,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -21498,6 +21750,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -21587,6 +21846,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -21657,6 +21923,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -21737,6 +22010,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -22046,6 +22326,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -22137,6 +22424,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -22781,6 +23075,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -22966,6 +23267,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -23190,6 +23498,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",
@@ -23442,6 +23757,13 @@
             },
             "description": "OK",
             "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "Latest event sequence number.",

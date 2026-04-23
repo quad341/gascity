@@ -1,111 +1,139 @@
 # Release Gate — ga-gdc6 (rollup-ship)
 
-**Bead:** ga-gdc6 — `[ga-d5y] Ship ADR 0002 — dolt store maintenance (rollup)`
-**Evaluated:** 2026-04-23 (third attempt, EXCLUDES=issues.jsonl)
-**Result:** **FAIL** — genuine content conflict on ga-zn8 (`internal/api/client.go`, `internal/api/types_read.go`). Source branch has diverged from `origin/main`.
+**Bead:** ga-gdc6 — `[ga-h6w + ga-d5y] Ship ADR 0001 + ADR 0002 (mega rollup)`
+**Evaluated:** 2026-04-23 (fourth attempt, new SHAs from ga-tazy rebase)
+**Result:** **FAIL** — cherry-picks apply cleanly but the assembled branch introduces new test failures (stale generated artifacts + broken markdown links).
 
-## Source branch
-`gc-builder-1-01561d4fb9ea` (visible as `fork/gc-builder-1-01561d4fb9ea`)
+## Source
+
+`feat/h6w-d5y-rebased` @ `fork/feat/h6w-d5y-rebased` (produced by ga-tazy).
+18 commits cherry-picked onto a fresh branch off `origin/main`
+(`release/ga-gdc6`) with `EXCLUDES: issues.jsonl`.
 
 ## What passed
 
-- All 9 child beads (`ga-zol`, `ga-8km`, `ga-8cq`, `ga-zoj`, `ga-p5n`, `ga-74d`,
-  `ga-zn8`, `ga-sec`, `ga-e3s`) are CLOSED.
-- All 9 declared SHAs resolve in the object graph (`git cat-file -e`).
-- Review beads under single-pass reviewer gate:
+- All 18 declared SHAs resolve in the object graph (`git cat-file -e`).
+- All 18 child beads CLOSED.
+- All 17 non-docs children have a reviewer PASS verdict; ga-sec is covered
+  by the `DOCS_ONLY` carve-out (commit `193e94c6` touches only
+  `docs/runbooks/dolt-maintenance.md`).
+- Cherry-pick: **all 18 applied cleanly** with the `EXCLUDES: issues.jsonl`
+  recipe. No conflicts. Branch is clean.
+- `go vet ./...` — clean.
+- `go build ./...` — clean.
 
-  | Child | Commit | Review bead | Reviewer verdict |
-  |-------|--------|-------------|------------------|
-  | ga-zol | `67cdfb34` | `ga-i24` | PASS |
-  | ga-8km | `04b929c4` | `ga-5tb` | PASS |
-  | ga-8cq | `51e6581a` | `ga-0awq` | PASS |
-  | ga-zoj | `5fd4dbf2` | `ga-yhbi` | PASS |
-  | ga-p5n | `86bc6259` | `ga-4xqa` | PASS |
-  | ga-74d | `4a847942` | `ga-0ydz` | PASS |
-  | ga-zn8 | `81a39f48` | `ga-7mah` | PASS |
-  | ga-sec | `f67ed540` | *(DOCS_ONLY carve-out)* | n/a (docs/runbooks/) |
-  | ga-e3s | `cf4d9ba1` | `ga-4nh2` | PASS |
+### Reviewer verdicts
 
-- Cherry-picks 1-6 (ga-zol → ga-74d) applied cleanly with `EXCLUDES: issues.jsonl`.
-  The EXCLUDES recipe from the prompt works — second-attempt blocker is resolved.
+| Child | Commit | Review bead | Reviewer verdict |
+|-------|--------|-------------|------------------|
+| ga-zol | `a257a692` | `ga-i24` | PASS |
+| ga-8km | `35f2f4c9` | `ga-5tb` | PASS |
+| ga-8cq | `ec71b17e` | `ga-0awq` | PASS |
+| ga-zoj | `72e4bc18` | `ga-yhbi` | PASS |
+| ga-p5n | `19818d49` | `ga-4xqa` | PASS |
+| ga-71l | `2452afab` | `ga-yaqp` | PASS |
+| ga-e3s | `da60f000` | `ga-4nh2` | PASS |
+| ga-2o9 | `540460eb` | `ga-sooy` | PASS |
+| ga-6q1 | `76dc58c2` | `ga-0ly6` | PASS |
+| ga-idc | `e0546140` | `ga-gys0` | PASS |
+| ga-06g | `e97d86e7` | `ga-sk12` | PASS |
+| ga-6s5 | `a7a5ea30` | `ga-sxx5` | PASS |
+| ga-74d | `bc393010` | `ga-0ydz` | PASS |
+| ga-zn8 | `0b09a6e3` | `ga-7mah` | PASS |
+| ga-sec | `193e94c6` | *(DOCS_ONLY)* | n/a |
+| ga-gti | `1dc12385` | `ga-ut5z` | PASS |
+| ga-69s | `e1b3392c` | `ga-dbrk` | PASS |
+| ga-2fr | `910407ca` | `ga-djbd` | PASS |
 
-## What failed
+## What failed — Criterion 3 (tests pass)
 
-**Criterion 6 (Branch diverges cleanly from main) — FAIL on ga-zn8.**
+`go test ./...` on the assembled branch produces **new** failures that do
+not reproduce on `origin/main` (verified in a disposable worktree at
+`99742e36`).
 
-Cherry-picking `81a39f48` (ga-zn8: `gc maintenance CLI + API handlers`)
-onto the release branch produced two non-excluded conflicts:
+### Regressions introduced by this rollup
 
-```
-CONFLICT (content): Merge conflict in internal/api/client.go
-CONFLICT (modify/delete): internal/api/types_read.go deleted in HEAD and
-    modified in 81a39f48
-```
+1. **`test/docsync.TestSchemaFreshness/city-schema.json`** — FAIL
+2. **`test/docsync.TestSchemaFreshness/config.md`** — FAIL
+   Both fail with `... is stale. Run: go run ./cmd/genschema`. Root cause:
+   `ga-zol` (`a257a692`) adds a new `[maintenance.dolt]` section to the
+   config surface. The generated schema (`city-schema.json`) and docs
+   (`config.md`) were not regenerated before the rollup was routed.
 
-Root cause — the source branch `gc-builder-1-01561d4fb9ea` predates changes
-already landed on `origin/main`:
+3. **`test/docsync.TestLocalMarkdownLinks`** — FAIL
+   ```
+   docs/runbooks/dolt-maintenance.md -> ../adr/0002-dolt-store-maintenance-runbook.md
+   docs/runbooks/dolt-maintenance.md -> ../architecture/gc-read-path.md
+   docs/runbooks/dolt-maintenance.md -> ../rules/dolt-store-maintenance.md
+   ```
+   The runbook (ga-sec, `193e94c6`) links to ADR/architecture/rule docs
+   that the rollup description explicitly flags as UNTRACKED. The rollup
+   expects a human to commit those docs to the PR before merge, but the
+   test suite breaks in the interim — a human cannot merge a red build.
 
-1. **`internal/api/types_read.go` was DELETED on `origin/main`.**
-   `git cat-file -e origin/main:internal/api/types_read.go` → `path does not
-   exist`. The file is no longer on main; ga-zn8 still edits it.
+### Pre-existing failures (unrelated; also fail on `origin/main`)
 
-2. **`internal/api/client.go` was modified on `origin/main`** in a region
-   that ga-zn8 also modifies. `git diff origin/main...81a39f48 --
-   internal/api/client.go` shows ga-zn8 adds new imports + a
-   `cacheNotLiveError` type; origin/main has diverged in the same file.
+These were verified against a disposable `origin/main` worktree and fail
+there as well. They are **not** caused by this rollup and are not this
+gate's remediation.
 
-Deployer aborted per directive: *"If a genuine conflict (outside excluded
-paths) occurs, FAIL the gate — route back to the builder for rebase. Never
-resolve genuine content conflicts from the deployer seat."* The release
-branch was reset to origin/main (6 staged picks discarded).
+- `internal/runtime/k8s.TestControllerScriptDeployUsesResolvedConfigPrefixesForBootstrap`
+- `internal/runtime/k8s.TestControllerScriptDeployBootstrapsAfterStartSignalAndLogProbe`
+- `internal/runtime/k8s.TestControllerScriptDeployBootstrapsWhenLogsNeverMatch`
+- `internal/runtime/k8s.TestControllerScriptDeployFailsWhenBootstrapFails`
 
-## Criteria results
+Common signal: `controller bootstrap requires both GC_DOLT_HOST and
+GC_DOLT_PORT when either is set` (k8s bootstrap env guard).
+
+## Criteria table
 
 | # | Criterion | Result |
 |---|-----------|--------|
-| 1 | Review PASS present (single-pass) | PASS (8 review beads PASS, ga-sec DOCS_ONLY) |
-| 2 | Acceptance criteria met (per child) | not re-evaluated — gated on #6 |
-| 3 | Tests pass on assembled branch | not evaluated — branch not fully assembled |
-| 4 | No high-severity review findings open | PASS (findings in review beads are LOW/INFO) |
-| 5 | Final branch is clean | n/a — no final branch assembled |
-| 6 | Branch diverges cleanly from main | **FAIL** — `internal/api/client.go` + `internal/api/types_read.go` conflicts on ga-zn8 (81a39f48) |
-
-## Additional known gap (not the blocker this run)
-
-Rollup description flags `docs/adr/0002-dolt-store-maintenance-runbook.md`,
-`docs/architecture/gc-read-path.md`, and `docs/rules/dolt-store-maintenance.md`
-as UNTRACKED on the source branch. The declared CHERRY_PICKS do not include
-commits creating them. This is a separate remediation the mayor/builder must
-resolve before a human can merge.
+| 1 | Review PASS present (single-pass) | PASS (17 review beads PASS, ga-sec DOCS_ONLY) |
+| 2 | Acceptance criteria met (per child) | PASS (checked in review beads) |
+| 3 | Tests pass on assembled branch | **FAIL** — 3 new failures in `test/docsync` |
+| 4 | No high-severity review findings open | PASS |
+| 5 | Final branch is clean | PASS (`git status` clean after cherry-picks) |
+| 6 | Branch diverges cleanly from main | PASS (no conflicts; 18/18 applied) |
 
 ## Action taken
 
-- Aborted the cherry-pick and reset the release branch to `origin/main`.
-- Did NOT push, did NOT open PR.
-- Did NOT touch the source branch or any child bead status.
-- Left `rollup-ship` label on ga-gdc6. Removed `needs-deploy` so the deployer
-  formula does not re-fire on unchanged state.
-- Appended findings to ga-gdc6 notes.
-- Mailed the mayor.
+- Cut a fresh `release/ga-gdc6` branch off `origin/main` and cherry-picked
+  all 18 SHAs with `EXCLUDES: issues.jsonl`.
+- Ran `go vet ./...` (clean), `go build ./...` (clean), `go test ./...` (3
+  new failures, above).
+- Verified the 4 k8s failures reproduce on `origin/main` — not regressions.
+- Did NOT push `release/ga-gdc6`, did NOT open a PR.
+- Did NOT touch source branch or child bead status.
+- Removed `needs-deploy` label on ga-gdc6 so the deployer formula stops
+  firing.
+- Appending findings to ga-gdc6 notes and mailing the mayor.
 
-## Routing rationale
+## Routing rationale & remediation (mayor's call)
 
-Root cause: the source branch `gc-builder-1-01561d4fb9ea` predates changes
-that have since landed on `origin/main` — specifically the deletion of
-`internal/api/types_read.go` and modifications to `internal/api/client.go`.
-This is a stale-source-branch problem, not a reviewer miss.
+Root cause is builder/source-branch hygiene, not reviewer miss. Two
+distinct artifacts need committing before the rollup is green:
 
-Options for remediation (mayor's call):
+1. **Regenerated schema/docs.** `go run ./cmd/genschema` needs to run on
+   the source branch and the diff committed. This would have been caught
+   by CI on the source branch too; route to builder (or PM if a
+   follow-up bead is preferred). Suggested path: a tiny child bead
+   (`ga-h6w`/`ga-d5y` scope) committing the regen output, then prepend
+   its SHA to `CHERRY_PICKS`.
 
-1. **Builder rebases `gc-builder-1-01561d4fb9ea` onto latest `origin/main`**
-   and updates ga-zn8's changes to not reference the deleted
-   `internal/api/types_read.go`. This may require the reviewer to re-check
-   ga-zn8 since API-layer code is touched. Then PM amends the rollup with
-   the new ga-zn8 SHA and re-routes `needs-deploy`.
+2. **Missing ADR / architecture / rule docs.** ga-sec's runbook links to
+   three untracked docs. Either the mayor pre-commits them to the source
+   branch before re-routing, or ga-sec's links are softened (e.g.,
+   removed or replaced with a TODO note) until the docs land. The
+   rollup description already states the mayor owns this step.
 
-2. **Builder creates a new ga-zn8-redux commit** that replays the intent of
-   `81a39f48` against current main, and replaces it in CHERRY_PICKS.
+Re-route with `needs-deploy` once both are resolved. Cherry-picks apply
+cleanly — everything upstream of Criterion 3 is green this run.
 
-Per deployer prompt this is routed back via mail to the mayor (not
-`ready-to-build`) because the failure is pipeline hygiene (stale source
-branch) the mayor should triage.
+## Evidence
+
+- Assembled branch HEAD: `0666a3fa` (local `release/ga-gdc6`; not pushed).
+- `go test ./...` output: 3 new `test/docsync` failures + 4 pre-existing
+  `internal/runtime/k8s` failures (identical on `origin/main`).
+- Baseline comparison worktree: `/tmp/main-test-ga-gdc6` @ `origin/main`
+  `99742e36` (cleaned up).

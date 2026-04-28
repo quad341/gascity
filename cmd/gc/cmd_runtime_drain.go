@@ -98,9 +98,6 @@ func (o *providerDrainOps) setRestartRequested(sessionName string) error {
 func (o *providerDrainOps) isRestartRequested(sessionName string) (bool, error) {
 	val, err := o.sp.GetMeta(sessionName, "GC_RESTART_REQUESTED")
 	if err != nil {
-		if runtime.IsSessionGone(err) {
-			return false, nil
-		}
 		return false, fmt.Errorf("reading GC_RESTART_REQUESTED: %w", err)
 	}
 	return val != "", nil
@@ -372,28 +369,21 @@ func cmdRuntimeDrainAck(args []string, stdout, stderr io.Writer) int {
 func newRuntimeRequestRestartCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "request-restart",
-		Short: "Request controller restart this session (waits to be killed)",
+		Short: "Request controller restart this session (blocks until killed)",
 		Long: `Signal the controller to stop and restart this session.
 
-Sets GC_RESTART_REQUESTED metadata on the session, then waits while the
-controller stops the session on its next reconcile tick and restarts it
-fresh. The wait keeps the agent idle so it does not consume more context
-in the interim.
+Sets GC_RESTART_REQUESTED metadata on the session, then blocks forever.
+The controller will stop the session on its next reconcile tick and
+restart it fresh. The blocking prevents the agent from consuming more
+context while waiting.
 
-Under normal operation the controller SIGKILLs the process tree before
-this command returns. If the controller accepts the stop handoff, the
-runtime is already gone, or a SIGINT/SIGTERM is received, the command
-exits 0 cleanly. If the controller has not acted within a bounded
-timeout (max(5*PatrolInterval, 5min), capped at 30min) the command exits
-1 with a diagnostic pointing at controller health.
-
-For on-demand configured named sessions, the controller cannot restart
-the user-attended process. In that case this command reports that
-restart was skipped and returns immediately. No session.draining event
-is emitted when restart is skipped.
+For on-demand configured named sessions, the controller cannot restart the
+user-attended process. In that case this command reports that restart was
+skipped and returns without blocking. No session.draining event is emitted
+when restart is skipped.
 
 This command is designed to be called from within a session context.
-It emits a session.draining event before waiting.`,
+It emits a session.draining event before blocking.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdRuntimeRequestRestart(stdout, stderr) != 0 {
@@ -472,8 +462,8 @@ func controllerRestartTimeout(cfg *config.City) time.Duration {
 }
 
 // doRuntimeRequestRestart sets the restart-requested flag then polls until the
-// controller accepts the stop handoff (exit 0), the context is canceled by a
-// signal (exit 0), or the bounded timeout expires (exit 1 with diagnostic).
+// controller clears it (exit 0), the context is cancelled by a signal (exit 0),
+// or the bounded timeout expires (exit 1 with diagnostic).
 func doRuntimeRequestRestart(ctx context.Context, dops drainOps, persistRestart func() error, rec events.Recorder,
 	targetName, sn string, pollInterval, timeout time.Duration, stdout, stderr io.Writer,
 ) int {
@@ -494,36 +484,25 @@ func doRuntimeRequestRestart(ctx context.Context, dops drainOps, persistRestart 
 		Subject: targetName,
 		Message: "restart requested by session",
 	})
-	fmt.Fprintf(stdout, "Restart requested. Waiting up to %s for controller to stop this session...\n", timeout) //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "Restart requested. Blocking until controller kills this session...") //nolint:errcheck // best-effort stdout
 
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
-	var lastPollErr error
 
 	for {
 		select {
 		case <-ctx.Done():
 			// Signal received; leave the flag set so the controller still acts on its next tick.
-			fmt.Fprintln(stderr, "gc runtime request-restart: signal received; restart request remains set; controller will stop this session on its next reconcile tick") //nolint:errcheck // best-effort stderr
 			return 0
 		case <-ticker.C:
 			requested, err := dops.isRestartRequested(sn)
-			switch {
-			case err != nil:
-				lastPollErr = err
-			case !requested:
-				// The controller accepted the stop handoff or the runtime is already gone.
+			if err == nil && !requested {
+				// Reconciler cleared the flag; restart is in flight.
 				return 0
-			default:
-				lastPollErr = nil
 			}
 			if time.Now().After(deadline) {
-				if lastPollErr != nil {
-					fmt.Fprintf(stderr, "gc runtime request-restart: controller did not act within %s; last poll error: %v; check `gc dashboard` or `gc trace`\n", timeout, lastPollErr) //nolint:errcheck // best-effort stderr
-				} else {
-					fmt.Fprintf(stderr, "gc runtime request-restart: controller did not act within %s; check `gc dashboard` or `gc trace`\n", timeout) //nolint:errcheck // best-effort stderr
-				}
+				fmt.Fprintf(stderr, "gc runtime request-restart: controller did not act within %s; check `gc dashboard` or `gc trace`\n", timeout) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 		}

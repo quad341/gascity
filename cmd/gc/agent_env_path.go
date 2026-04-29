@@ -31,18 +31,19 @@ func prependGCBinDirToPATH(env map[string]string, gcBin string) {
 	if !ok {
 		base = os.Getenv("PATH")
 	}
-	if base == "" {
-		env["PATH"] = dir
-		return
-	}
-
 	parts := strings.Split(base, sep)
-	entries := []string{dir}
+	// Drop any existing occurrences of dir; we'll re-insert at the front.
+	filtered := parts[:0]
 	for _, p := range parts {
 		if p == dir {
 			continue
 		}
-		entries = append(entries, p)
+		filtered = append(filtered, p)
 	}
-	env["PATH"] = strings.Join(entries, sep)
+	if len(filtered) == 0 || filtered[0] != "" {
+		// Standard case: prepend dir + sep + remaining.
+		env["PATH"] = dir + sep + strings.Join(filtered, sep)
+		return
+	}
+	env["PATH"] = dir + sep + strings.Join(filtered, sep)
 }

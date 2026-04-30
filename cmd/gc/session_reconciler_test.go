@@ -2590,6 +2590,113 @@ func TestReconcileSessionBeads_DefersPendingCreateRecoveryWhileStartInFlight(t *
 	}
 }
 
+func TestPendingCreateSessionStillLeased_StaleBeadWithoutLeaseIsOrphan(t *testing.T) {
+	// Regression test: a bead that has pending_create_claim=true but
+	// last_woke_at empty AND was created more than the never-started lease
+	// window ago must NOT be considered leased. Otherwise the bead lives
+	// forever, holding its alias and blocking new spawn attempts. (This was
+	// the symptom: "alias already belongs to gm-XXXX" errors with a
+	// gm-XXXX bead stuck in state=creating that never advanced.)
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	now := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	bead := beads.Bead{
+		CreatedAt: now.Add(-(pendingCreateNeverStartedTimeout + time.Second)),
+		Metadata: map[string]string{
+			"template":             "worker",
+			"state":                "creating",
+			"pending_create_claim": "true",
+			// last_woke_at deliberately empty — preWakeCommit never fired.
+		},
+	}
+	if pendingCreateSessionStillLeased(bead, cfg, clk) {
+		t.Fatal("bead with no last_woke_at lease and old CreatedAt must not be considered leased")
+	}
+}
+
+func TestPendingCreateSessionStillLeased_RecentBeadWithoutLeaseIsLeased(t *testing.T) {
+	// Defensive: a bead just written with pcc=true but no last_woke_at yet
+	// (e.g., manual sessions or the gap between bead-create and the next
+	// reconciler tick that runs preWakeCommit) must still be considered
+	// leased while CreatedAt is within the never-started lease window.
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	now := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	bead := beads.Bead{
+		CreatedAt: now.Add(-5 * time.Second), // well within staleCreatingState window
+		Metadata: map[string]string{
+			"template":             "worker",
+			"state":                "creating",
+			"pending_create_claim": "true",
+		},
+	}
+	if !pendingCreateSessionStillLeased(bead, cfg, clk) {
+		t.Fatal("recently-created pending-create bead must be considered leased even without last_woke_at")
+	}
+}
+
+func TestPendingCreateSessionStillLeased_FreshLeaseIsLeased(t *testing.T) {
+	// A bead with last_woke_at within the startup window is leased,
+	// regardless of CreatedAt.
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	now := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	bead := beads.Bead{
+		CreatedAt: now.Add(-1 * time.Hour), // very old, but lease is fresh
+		Metadata: map[string]string{
+			"template":             "worker",
+			"state":                "creating",
+			"pending_create_claim": "true",
+			"last_woke_at":         now.Add(-10 * time.Second).Format(time.RFC3339),
+		},
+	}
+	if !pendingCreateSessionStillLeased(bead, cfg, clk) {
+		t.Fatal("fresh last_woke_at lease must keep the bead leased even if CreatedAt is old")
+	}
+}
+
+func TestPendingCreateSessionStillLeased_ConfigCatchUpGracePreservesFreshBead(t *testing.T) {
+	// Coexistence pin: a config-catch-up scenario (agent template not yet
+	// visible in the loaded config because an API mutation and the next
+	// reconciler tick race) must NOT get orphaned by the lease-evidence
+	// requirement. The active pending-create lease protects the bead until
+	// the config snapshot catches up.
+	cfg := &config.City{Agents: []config.Agent{{Name: "other-template"}}}
+	now := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	bead := beads.Bead{
+		CreatedAt: now.Add(-5 * time.Second), // within staleCreatingState window
+		Metadata: map[string]string{
+			"template":             "worker",
+			"state":                "creating",
+			"pending_create_claim": "true",
+		},
+	}
+	if !pendingCreateSessionStillLeased(bead, cfg, clk) {
+		t.Fatal("fresh pending-create bead with agent missing from config must remain leased via catch-up grace")
+	}
+}
+
+func TestPendingCreateSessionStillLeased_ConfigCatchUpExpiresWhenStale(t *testing.T) {
+	// The catch-up grace is bounded by the active pending-create lease. Once
+	// that lease expires without the agent appearing, the bead is
+	// orphan-eligible.
+	cfg := &config.City{Agents: []config.Agent{{Name: "other-template"}}}
+	now := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	bead := beads.Bead{
+		CreatedAt: now.Add(-(pendingCreateNeverStartedTimeout + time.Second)),
+		Metadata: map[string]string{
+			"template":             "worker",
+			"state":                "creating",
+			"pending_create_claim": "true",
+		},
+	}
+	if pendingCreateSessionStillLeased(bead, cfg, clk) {
+		t.Fatal("stale pending-create bead with missing agent must orphan after grace window")
+	}
+}
+
 func TestReconcileSessionBeads_PendingCreateLeasePreventsOrphanClose(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}

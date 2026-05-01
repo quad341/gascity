@@ -1590,6 +1590,9 @@ func TestSyncSessionBeads_PreservesConfiguredNamedSessionWithoutDesiredEntry(t *
 		},
 	}
 	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "refinery")
+	// state=stopped + sleep_reason=city-stop is the deliberate-sleep marker
+	// path (Q1 of ga-qfgu): the runtime is gone but `gc start` should resume
+	// the same bead, so the alias must stay pinned even with no desired entry.
 	bead, err := store.Create(beads.Bead{
 		Title:  "refinery",
 		Type:   sessionBeadType,
@@ -1599,6 +1602,7 @@ func TestSyncSessionBeads_PreservesConfiguredNamedSessionWithoutDesiredEntry(t *
 			"alias":                      "refinery",
 			"template":                   "refinery",
 			"state":                      "stopped",
+			"sleep_reason":               "city-stop",
 			namedSessionMetadataKey:      "true",
 			namedSessionIdentityMetadata: "refinery",
 			namedSessionModeMetadata:     "on_demand",

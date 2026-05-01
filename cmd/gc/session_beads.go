@@ -219,7 +219,38 @@ func preserveConfiguredNamedSessionBead(b beads.Bead, cfg *config.City, cityName
 	if !ok {
 		return false
 	}
-	return strings.TrimSpace(b.Metadata["session_name"]) == spec.SessionName
+	if strings.TrimSpace(b.Metadata["session_name"]) != spec.SessionName {
+		return false
+	}
+	// Identity match. Gate on terminal-ish state so a dead bead releases its
+	// alias instead of holding it forever (ga-ue1r / gm-0fl34g5 incident).
+	switch strings.TrimSpace(b.Metadata["state"]) {
+	case "stopped":
+		// Any non-empty sleep_reason marks a deliberate-sleep state
+		// (city-stop, idle-timeout, drained, user-hold, wait-hold,
+		// context-churn, quarantine, no-wake-reason, config-drift): the
+		// runtime is gone but we plan to resume this bead — hold the alias.
+		if strings.TrimSpace(b.Metadata["sleep_reason"]) != "" {
+			return true
+		}
+		// Race guard: preWakeCommit writes last_woke_at atomically before
+		// the runtime confirms started; state stays "stopped" until
+		// ConfirmStartedPatch lands state="active". Mirror the precedent at
+		// city_runtime.go:1530 (creation_complete_at age check).
+		if lastWoke, ok := parseRFC3339Metadata(b.Metadata["last_woke_at"]); ok {
+			if time.Since(lastWoke) < staleCreatingStateTimeout {
+				return true
+			}
+		}
+		return false
+	case "failed-create":
+		// rollbackPendingCreate sets state="failed-create" only with
+		// Status=closed atomically. A Status=open + state="failed-create"
+		// combination means a write failed mid-rollback — release the alias
+		// so the next spawn can recover via close→reopen.
+		return false
+	}
+	return true
 }
 
 func reopenClosedConfiguredNamedSessionBead(

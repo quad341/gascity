@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // fakeIdleTracker is a test double for idleTracker.
@@ -2020,6 +2021,94 @@ func TestReconcileSessionBeads_PreservesConfiguredNamedSessionOutsideDesiredStat
 	}
 	if ds := env.dt.get(session.ID); ds != nil {
 		t.Fatalf("unexpected drain for configured named session: %+v", ds)
+	}
+}
+
+// TestSyncReconcileSessionBeads_StoppedNamedSessionReleasesAndReopens pins the
+// close→reopen continuity that justifies the ga-qfgu fix: a configured-named-
+// session bead stuck at state="stopped" with no sleep_reason and no fresh
+// wake claim must release its alias on the next sync+reconcile tick
+// (close_reason="suspended"), and a subsequent tick with fresh demand must
+// reopen the SAME bead ID via reopenClosedConfiguredNamedSessionBead.
+//
+// The close path runs through syncSessionBeads (which does NOT heal state
+// before checking preserveConfiguredNamedSessionBead, so the raw "stopped"
+// reaches the predicate) → closeSessionBeadIfRuntimeStoppedAndUnassigned with
+// reason="suspended" because configuredNames[name]=true. The reopen path runs
+// through syncSessionBeads' reopenClosedConfiguredNamedSessionBead branch.
+func TestSyncReconcileSessionBeads_StoppedNamedSessionReleasesAndReopens(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	bead := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&bead, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"state":                      "stopped",
+		"sleep_reason":               "",
+		"last_woke_at":               "",
+	})
+
+	// No demand — syncSessionBeads with an empty desiredState should release
+	// the alias by closing the bead (configuredNames[sn]=true → "suspended").
+	emptyDesired := map[string]TemplateParams{}
+	syncSessionBeads(".", env.store, emptyDesired, env.sp, configuredSessionNames(env.cfg, "", env.store), env.cfg, env.clk, &env.stderr, false)
+
+	closed, _ := env.store.Get(bead.ID)
+	if closed.Status != "closed" {
+		t.Fatalf("after sync (no demand): status = %q, want closed", closed.Status)
+	}
+	if got := closed.Metadata["close_reason"]; got != "suspended" {
+		t.Fatalf("close_reason = %q, want suspended", got)
+	}
+	if got := closed.Metadata["session_name"]; got != sessionName {
+		t.Fatalf("session_name = %q, want %q (preserved for reopen)", got, sessionName)
+	}
+	if got := closed.Metadata[namedSessionIdentityMetadata]; got != "worker" {
+		t.Fatalf("identity metadata = %q, want %q (preserved for reopen)", got, "worker")
+	}
+	// EnsureAliasAvailable (without config) checks bead-side conflicts only;
+	// the closed bead must not pin the alias against a fresh spawn.
+	if err := session.EnsureAliasAvailable(env.store, "worker", ""); err != nil {
+		t.Fatalf("EnsureAliasAvailable after close: %v, want nil (alias released)", err)
+	}
+
+	// Fresh demand for the same identity — reopen path takes over and rebinds
+	// the same bead ID. This is the close→reopen continuity contract that
+	// makes Q2 (release on bare stopped) safe.
+	desired := map[string]TemplateParams{
+		sessionName: {
+			TemplateName:            "worker",
+			InstanceName:            "worker",
+			Alias:                   "worker",
+			Command:                 "true",
+			SessionName:             sessionName,
+			ConfiguredNamedIdentity: "worker",
+			ConfiguredNamedMode:     "on_demand",
+		},
+	}
+	syncSessionBeads(".", env.store, desired, env.sp, allConfiguredDS(desired), env.cfg, env.clk, &env.stderr, false)
+
+	all, err := env.store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing beads after reopen: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("session bead count after reopen = %d, want 1 (reopen, no fresh bead)", len(all))
+	}
+	if all[0].ID != bead.ID {
+		t.Fatalf("reopened bead ID = %q, want original %q", all[0].ID, bead.ID)
+	}
+	if all[0].Status != "open" {
+		t.Fatalf("reopened status = %q, want open", all[0].Status)
+	}
+	if got := all[0].Metadata["close_reason"]; got != "" {
+		t.Fatalf("close_reason after reopen = %q, want empty", got)
 	}
 }
 

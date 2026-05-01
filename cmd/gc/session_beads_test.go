@@ -4494,3 +4494,67 @@ func TestSyncSessionBeadsWithSnapshotAndRigStoresLeavesOrphanedSessionBeadOpenWh
 		t.Fatalf("session bead status = %q, want open because rig-store work still owns it", got.Status)
 	}
 }
+
+// TestPreserveConfiguredNamedSessionBead covers the state gating contract added
+// for ga-ue1r / ga-qfgu: a configured named-session bead with no live runtime
+// (state="stopped" with no deliberate sleep_reason and no fresh wake claim)
+// must release its alias instead of pinning it forever; a state="failed-create"
+// bead must release; and the existing live/asleep/sleep_reason/race-guard cases
+// must still preserve.
+func TestPreserveConfiguredNamedSessionBead(t *testing.T) {
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	cityName := cfg.Workspace.Name
+	sessionName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, "worker")
+	now := time.Now().UTC()
+	freshWake := now.Add(-30 * time.Second).Format(time.RFC3339)
+	staleWake := now.Add(-2 * time.Minute).Format(time.RFC3339)
+
+	cases := []struct {
+		name         string
+		state        string
+		sleepReason  string
+		lastWokeAt   string
+		wantPreserve bool
+	}{
+		{name: "live active bead", state: "active", wantPreserve: true},
+		{name: "asleep with reason", state: "asleep", sleepReason: "idle", wantPreserve: true},
+		{name: "stopped + city-stop", state: "stopped", sleepReason: "city-stop", wantPreserve: true},
+		{name: "stopped + idle-timeout fresh wake", state: "stopped", sleepReason: "idle-timeout", lastWokeAt: freshWake, wantPreserve: true},
+		{name: "stopped + drained", state: "stopped", sleepReason: "drained", wantPreserve: true},
+		{name: "stopped + user-hold", state: "stopped", sleepReason: "user-hold", wantPreserve: true},
+		{name: "stopped + wait-hold", state: "stopped", sleepReason: "wait-hold", wantPreserve: true},
+		{name: "stopped + context-churn", state: "stopped", sleepReason: "context-churn", wantPreserve: true},
+		{name: "stopped + quarantine", state: "stopped", sleepReason: "quarantine", wantPreserve: true},
+		{name: "stopped + no-wake-reason", state: "stopped", sleepReason: "no-wake-reason", wantPreserve: true},
+		{name: "stopped + config-drift", state: "stopped", sleepReason: "config-drift", wantPreserve: true},
+		{name: "stopped + no reason, fresh wake (race guard)", state: "stopped", lastWokeAt: freshWake, wantPreserve: true},
+		{name: "stopped + no reason, stale wake (release)", state: "stopped", lastWokeAt: staleWake, wantPreserve: false},
+		{name: "stopped + no reason, never woke (release)", state: "stopped", wantPreserve: false},
+		{name: "failed-create (always release)", state: "failed-create", wantPreserve: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := map[string]string{
+				namedSessionMetadataKey:      "true",
+				namedSessionIdentityMetadata: "worker",
+				"session_name":               sessionName,
+				"state":                      tc.state,
+			}
+			if tc.sleepReason != "" {
+				meta["sleep_reason"] = tc.sleepReason
+			}
+			if tc.lastWokeAt != "" {
+				meta["last_woke_at"] = tc.lastWokeAt
+			}
+			b := beads.Bead{ID: "bead-1", Metadata: meta}
+			if got := preserveConfiguredNamedSessionBead(b, cfg, cityName); got != tc.wantPreserve {
+				t.Fatalf("preserveConfiguredNamedSessionBead(state=%q sleep_reason=%q last_woke_at=%q) = %v, want %v",
+					tc.state, tc.sleepReason, tc.lastWokeAt, got, tc.wantPreserve)
+			}
+		})
+	}
+}

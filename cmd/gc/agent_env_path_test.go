@@ -34,6 +34,25 @@ func TestPrependGCBinDirToPATH_FallsBackToOSPATH(t *testing.T) {
 	}
 }
 
+func TestPrependGCBinDirToPATH_ExplicitEmptyPATHUsesOnlyGCBinDir(t *testing.T) {
+	dir := "/opt/gc/bin"
+	env := map[string]string{"PATH": ""}
+	prependGCBinDirToPATH(env, filepath.Join(dir, "gc"))
+	if env["PATH"] != dir {
+		t.Fatalf("PATH=%q, want only gc bin dir %q", env["PATH"], dir)
+	}
+}
+
+func TestPrependGCBinDirToPATH_UnsetPATHWithEmptyOSPATHUsesOnlyGCBinDir(t *testing.T) {
+	dir := "/opt/gc/bin"
+	env := map[string]string{}
+	t.Setenv("PATH", "")
+	prependGCBinDirToPATH(env, filepath.Join(dir, "gc"))
+	if env["PATH"] != dir {
+		t.Fatalf("PATH=%q, want only gc bin dir %q", env["PATH"], dir)
+	}
+}
+
 func TestPrependGCBinDirToPATH_AlreadyFirst_NoDuplicate(t *testing.T) {
 	dir := "/Users/jbb/go/bin"
 	env := map[string]string{"PATH": dir + string(os.PathListSeparator) + "/usr/bin"}
@@ -69,6 +88,17 @@ func TestPrependGCBinDirToPATH_PresentNotFirst_MovesToFront(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("dir %q should appear exactly once, found %d times in %q", dir, count, env["PATH"])
+	}
+}
+
+func TestPrependGCBinDirToPATH_PreservesLeadingEmptyEntry(t *testing.T) {
+	dir := "/Users/jbb/go/bin"
+	sep := string(os.PathListSeparator)
+	env := map[string]string{"PATH": sep + "/usr/bin"}
+	prependGCBinDirToPATH(env, filepath.Join(dir, "gc"))
+	want := dir + sep + sep + "/usr/bin"
+	if env["PATH"] != want {
+		t.Fatalf("PATH=%q, want %q", env["PATH"], want)
 	}
 }
 

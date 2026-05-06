@@ -7184,7 +7184,7 @@ func TestCliBeadRouter_BuiltinPathSetsAssigneeAndMetadata(t *testing.T) {
 			{Name: "deep-investigator"},
 		},
 	}
-	router := cliBeadRouter{deps: &slingDeps{Cfg: cfg, Store: store, Stderr: io.Discard}}
+	router := cliBeadRouter{deps: &slingDeps{Cfg: cfg, Store: store}}
 	if err := router.Route(context.Background(), sling.RouteRequest{
 		BeadID: bead.ID,
 		Target: "deep-investigator",

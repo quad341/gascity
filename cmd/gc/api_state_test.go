@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,6 +71,51 @@ func TestControllerStateReadAccess(t *testing.T) {
 	}
 	if cs.MailProvider("rig1") == nil {
 		t.Error("MailProvider(rig1) = nil")
+	}
+}
+
+func TestWrapWithCachingStoreStaggerUsesCanonicalAgentIdentity(t *testing.T) {
+	t.Setenv("GC_ALIAS", "gascity/builder")
+	t.Setenv("GC_SESSION_ID", "ga-session")
+	t.Setenv("GC_AGENT", "gascity--builder-session")
+
+	var logs bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+	})
+
+	backing := beads.NewBdStore(t.TempDir(), func(string, string, ...string) ([]byte, error) {
+		return []byte("[]"), nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := wrapWithCachingStore(ctx, backing, nil)
+	cache, ok := store.(*beads.CachingStore)
+	if !ok {
+		t.Fatalf("wrapWithCachingStore returned %T, want *beads.CachingStore", store)
+	}
+	defer cache.StopReconciler()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(logs.String(), "beads cache: stagger=") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	got := logs.String()
+	if !strings.Contains(got, "agent=gascity/builder") {
+		t.Fatalf("stagger log = %q, want canonical GC_ALIAS identity", got)
+	}
+	if strings.Contains(got, "agent=gascity--builder-session") {
+		t.Fatalf("stagger log = %q, used runtime GC_AGENT session name", got)
 	}
 }
 

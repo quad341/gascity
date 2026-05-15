@@ -104,16 +104,31 @@ func checkCooldown(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult 
 func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 	fields := strings.Fields(a.Schedule)
 	if len(fields) != 5 {
-		return TriggerResult{Due: false, Reason: fmt.Sprintf("bad cron schedule: want 5 fields, got %d", len(fields))}
+		return TriggerResult{Due: false, Reason: fmt.Sprintf("invalid cron schedule: want 5 fields, got %d", len(fields))}
 	}
 
-	minute, hour, dom, month, dow := fields[0], fields[1], fields[2], fields[3], fields[4]
-
-	if !cronFieldMatches(minute, now.Minute()) ||
-		!cronFieldMatches(hour, now.Hour()) ||
-		!cronFieldMatches(dom, now.Day()) ||
-		!cronFieldMatches(month, int(now.Month())) ||
-		!cronFieldMatches(dow, int(now.Weekday())) {
+	specs := []cronFieldSpec{
+		{name: "minute", field: fields[0], value: now.Minute(), min: 0, max: 59},
+		{name: "hour", field: fields[1], value: now.Hour(), min: 0, max: 23},
+		{name: "day-of-month", field: fields[2], value: now.Day(), min: 1, max: 31},
+		{name: "month", field: fields[3], value: int(now.Month()), min: 1, max: 12},
+		{name: "day-of-week", field: fields[4], value: int(now.Weekday()), min: 0, max: 6},
+	}
+	allMatched := true
+	var invalid cronFieldSpec
+	for _, spec := range specs {
+		matched, parseOK := cronFieldMatches(spec.field, spec.value, spec.min, spec.max)
+		if !parseOK && invalid.name == "" {
+			invalid = spec
+		}
+		if !matched {
+			allMatched = false
+		}
+	}
+	if invalid.name != "" {
+		return TriggerResult{Due: false, Reason: fmt.Sprintf("invalid cron schedule: cannot parse %s field %q", invalid.name, invalid.field)}
+	}
+	if !allMatched {
 		return TriggerResult{Due: false, Reason: "cron: schedule not matched"}
 	}
 
@@ -129,19 +144,91 @@ func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 	return TriggerResult{Due: true, Reason: "cron: schedule matched", LastRun: last}
 }
 
-// cronFieldMatches checks if a single cron field matches a value.
-// Supports: "*" (any), exact integer, or comma-separated values.
-func cronFieldMatches(field string, value int) bool {
-	if field == "*" {
-		return true
+type cronFieldSpec struct {
+	name  string
+	field string
+	value int
+	min   int
+	max   int
+}
+
+// cronFieldMatches reports whether a single cron field matches a value.
+// The second return is false when the field is syntactically invalid.
+func cronFieldMatches(field string, value, lower, upper int) (matched, parseOK bool) {
+	if value < lower || value > upper {
+		return false, false
 	}
 	for _, part := range strings.Split(field, ",") {
-		n, err := strconv.Atoi(strings.TrimSpace(part))
-		if err == nil && n == value {
-			return true
+		partMatched, ok := parseCronPart(strings.TrimSpace(part), value, lower, upper)
+		if !ok {
+			return false, false
+		}
+		if partMatched {
+			matched = true
 		}
 	}
-	return false
+	return matched, true
+}
+
+func parseCronPart(part string, value, lower, upper int) (matched, parseOK bool) {
+	if part == "" {
+		return false, false
+	}
+	if part == "*" {
+		return true, true
+	}
+
+	if base, stepText, hasStep := strings.Cut(part, "/"); hasStep {
+		step, err := strconv.Atoi(stepText)
+		if err != nil || step <= 0 {
+			return false, false
+		}
+		start, end, ok := cronPartRange(base, lower, upper, true)
+		if !ok {
+			return false, false
+		}
+		return value >= start && value <= end && (value-start)%step == 0, true
+	}
+
+	if strings.Contains(part, "-") {
+		start, end, ok := cronPartRange(part, lower, upper, false)
+		if !ok {
+			return false, false
+		}
+		return value >= start && value <= end, true
+	}
+
+	n, err := strconv.Atoi(part)
+	if err != nil || n < lower || n > upper {
+		return false, false
+	}
+	return n == value, true
+}
+
+func cronPartRange(part string, lower, upper int, allowWildcard bool) (start, end int, parseOK bool) {
+	if part == "*" {
+		if !allowWildcard {
+			return 0, 0, false
+		}
+		return lower, upper, true
+	}
+
+	startText, endText, ok := strings.Cut(part, "-")
+	if !ok {
+		return 0, 0, false
+	}
+	start, err := strconv.Atoi(startText)
+	if err != nil {
+		return 0, 0, false
+	}
+	end, err = strconv.Atoi(endText)
+	if err != nil {
+		return 0, 0, false
+	}
+	if start < lower || start > upper || end < lower || end > upper || start > end {
+		return 0, 0, false
+	}
+	return start, end, true
 }
 
 // checkCondition runs the check command and returns due if exit code is 0.

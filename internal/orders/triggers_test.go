@@ -131,21 +131,112 @@ func TestCheckTriggerConditionFails(t *testing.T) {
 
 func TestCronFieldMatches(t *testing.T) {
 	tests := []struct {
-		field string
-		value int
-		want  bool
+		field       string
+		value       int
+		min         int
+		max         int
+		wantMatched bool
+		wantParseOK bool
 	}{
-		{"*", 5, true},
-		{"5", 5, true},
-		{"5", 3, false},
-		{"1,3,5", 3, true},
-		{"1,3,5", 2, false},
+		{"*", 5, 0, 59, true, true},
+		{"5", 5, 0, 59, true, true},
+		{"5", 3, 0, 59, false, true},
+		{"1,3,5", 3, 0, 59, true, true},
+		{"1,3,5", 2, 0, 59, false, true},
+		{"*/4", 8, 0, 23, true, true},
+		{"*/4", 9, 0, 23, false, true},
+		{"5-10", 7, 0, 23, true, true},
+		{"5-10", 11, 0, 23, false, true},
+		{"5-10/2", 9, 0, 23, true, true},
+		{"5-10/2", 8, 0, 23, false, true},
+		{"1,3,*/10", 20, 0, 59, true, true},
+		{"*/0", 0, 0, 59, false, false},
+		{"*/-1", 0, 0, 59, false, false},
+		{"5-3", 4, 0, 23, false, false},
+		{"24", 0, 0, 23, false, false},
+		{"4-24", 4, 0, 23, false, false},
+		{"abc", 0, 0, 59, false, false},
 	}
 	for _, tt := range tests {
-		got := cronFieldMatches(tt.field, tt.value)
-		if got != tt.want {
-			t.Errorf("cronFieldMatches(%q, %d) = %v, want %v", tt.field, tt.value, got, tt.want)
+		gotMatched, gotParseOK := cronFieldMatches(tt.field, tt.value, tt.min, tt.max)
+		if gotMatched != tt.wantMatched || gotParseOK != tt.wantParseOK {
+			t.Errorf("cronFieldMatches(%q, %d, %d, %d) = (%v, %v), want (%v, %v)",
+				tt.field, tt.value, tt.min, tt.max,
+				gotMatched, gotParseOK, tt.wantMatched, tt.wantParseOK)
 		}
+	}
+}
+
+func TestCheckTriggerCronStepSchedule(t *testing.T) {
+	a := Order{Name: "cleanup", Trigger: "cron", Schedule: "0 */4 * * *"}
+
+	for _, hour := range []int{0, 4, 8, 12, 16, 20} {
+		now := time.Date(2026, 5, 12, hour, 0, 0, 0, time.UTC)
+		result := CheckTrigger(a, now, neverRan, nil, nil)
+		if !result.Due {
+			t.Errorf("hour %d Due = false, want true; reason: %s", hour, result.Reason)
+		}
+	}
+
+	for _, hour := range []int{1, 2, 3, 5, 9, 13, 17, 21, 23} {
+		now := time.Date(2026, 5, 12, hour, 0, 0, 0, time.UTC)
+		result := CheckTrigger(a, now, neverRan, nil, nil)
+		if result.Due {
+			t.Errorf("hour %d Due = true, want false", hour)
+		}
+	}
+
+	for _, minute := range []int{1, 15, 30, 59} {
+		now := time.Date(2026, 5, 12, 4, minute, 0, 0, time.UTC)
+		result := CheckTrigger(a, now, neverRan, nil, nil)
+		if result.Due {
+			t.Errorf("minute %d Due = true, want false", minute)
+		}
+	}
+}
+
+func TestCheckTriggerCronInvalidSchedule(t *testing.T) {
+	tests := []struct {
+		schedule string
+		want     string
+	}{
+		{"bad", "invalid cron schedule: want 5 fields, got 1"},
+		{"0 */4 * *", "invalid cron schedule: want 5 fields, got 4"},
+		{"0 abc * * *", `invalid cron schedule: cannot parse hour field "abc"`},
+		{"0 24 * * *", `invalid cron schedule: cannot parse hour field "24"`},
+		{"*/0 * * * *", `invalid cron schedule: cannot parse minute field "*/0"`},
+		{"0 5-3 * * *", `invalid cron schedule: cannot parse hour field "5-3"`},
+		{"1 abc * * *", `invalid cron schedule: cannot parse hour field "abc"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.schedule, func(t *testing.T) {
+			a := Order{Name: "cleanup", Trigger: "cron", Schedule: tt.schedule}
+			now := time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC)
+			result := CheckTrigger(a, now, neverRan, nil, nil)
+			if result.Due {
+				t.Fatal("Due = true, want false")
+			}
+			if result.Reason != tt.want {
+				t.Fatalf("Reason = %q, want %q", result.Reason, tt.want)
+			}
+		})
+	}
+}
+
+// TestCheckTriggerCronMolDogStaleDbScheduleFires pins the #1548
+// mol-dog-stale-db schedule audited in ga-0ipc.4.
+func TestCheckTriggerCronMolDogStaleDbScheduleFires(t *testing.T) {
+	const deployedSchedule = "0 */4 * * *"
+
+	a := Order{Name: "mol-dog-stale-db", Trigger: "cron", Schedule: deployedSchedule}
+	now := time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC)
+	result := CheckTrigger(a, now, neverRan, nil, nil)
+	if !result.Due {
+		t.Fatalf("Due = false, want true; reason: %s", result.Reason)
+	}
+	if result.Reason != "cron: schedule matched" {
+		t.Fatalf("Reason = %q, want %q", result.Reason, "cron: schedule matched")
 	}
 }
 

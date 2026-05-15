@@ -21,7 +21,7 @@ var (
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
-	var fix, verbose bool
+	var fix, verbose, explainPostgresAuth bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check workspace health",
@@ -36,7 +36,7 @@ health. Use --fix to attempt automatic repairs.`,
   gc doctor --verbose`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doDoctor(fix, verbose, stdout, stderr) != 0 {
+			if doDoctor(fix, verbose, explainPostgresAuth, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -44,6 +44,7 @@ health. Use --fix to attempt automatic repairs.`,
 	}
 	cmd.Flags().BoolVar(&fix, "fix", false, "attempt to fix issues automatically")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show extra diagnostic details")
+	cmd.Flags().BoolVar(&explainPostgresAuth, "explain-postgres-auth", false, "after running checks, print per-scope Postgres credential resolution table (no values printed)")
 	return cmd
 }
 
@@ -116,7 +117,7 @@ func (c *doltTopologyCheck) CanFix() bool { return false }
 
 func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
-func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
+func doDoctor(fix, verbose, explainPostgresAuth bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -124,7 +125,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	}
 
 	d := &doctor.Doctor{}
-	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: verbose}
+	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: verbose, ExplainPostgresAuth: explainPostgresAuth}
 
 	// Core checks — always run.
 	d.Register(&doctor.CityStructureCheck{})
@@ -153,6 +154,9 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		d.Register(newCodexHooksDriftCheck(codexHookWorkDirs(cityPath, cfg)))
 		d.Register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		d.Register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
+		if explainPostgresAuth || doctor.HasPostgresBackedScope(cityPath, cfg) {
+			d.Register(doctor.NewPostgresAuthCheck(cityPath, cfg))
+		}
 	}
 	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
 		d.Register(newImportStateDoctorCheck(cityPath))
@@ -270,6 +274,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 
 	report := d.Run(ctx, stdout, fix)
 	doctor.PrintSummary(stdout, report)
+	d.RenderExtras(ctx, stdout)
 
 	if report.Failed > 0 {
 		return 1

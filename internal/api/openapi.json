@@ -2034,6 +2034,9 @@
             "$ref": "#/components/schemas/OutboundEventPayload"
           },
           {
+            "$ref": "#/components/schemas/PostgresCredentialResolvedPayload"
+          },
+          {
             "$ref": "#/components/schemas/RequestFailedPayload"
           },
           {
@@ -4564,6 +4567,38 @@
         ],
         "type": "object"
       },
+      "PostgresCredentialResolvedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "string"
+          },
+          "scope_kind": {
+            "type": "string"
+          },
+          "scope_name": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope_kind",
+          "scope_name",
+          "source",
+          "host",
+          "port",
+          "user"
+        ],
+        "type": "object"
+      },
       "ProviderCreateInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -6822,6 +6857,7 @@
             "order.completed": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
+            "pg.credential_resolved": "#/components/schemas/TypedEventStreamEnvelopePgCredentialResolved",
             "provider.swapped": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped",
             "request.failed": "#/components/schemas/TypedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedEventStreamEnvelopeRequestResultCityCreate",
@@ -6931,6 +6967,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderFired"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopePgCredentialResolved"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped"
@@ -7522,6 +7561,7 @@
                 "provider.swapped",
                 "worker.operation",
                 "supervisor.fs_pressure.skipped_tick",
+                "pg.credential_resolved",
                 "extmsg.bound",
                 "extmsg.unbound",
                 "extmsg.group_created",
@@ -8302,6 +8342,48 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope order.fired",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopePgCredentialResolved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/PostgresCredentialResolvedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "pg.credential_resolved",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope pg.credential_resolved",
         "type": "object"
       },
       "TypedEventStreamEnvelopeProviderSwapped": {
@@ -9135,6 +9217,7 @@
             "order.completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
+            "pg.credential_resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopePgCredentialResolved",
             "provider.swapped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped",
             "request.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultCityCreate",
@@ -9244,6 +9327,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopePgCredentialResolved"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped"
@@ -9882,6 +9968,7 @@
                 "provider.swapped",
                 "worker.operation",
                 "supervisor.fs_pressure.skipped_tick",
+                "pg.credential_resolved",
                 "extmsg.bound",
                 "extmsg.unbound",
                 "extmsg.group_created",
@@ -10735,6 +10822,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope order.fired",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopePgCredentialResolved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/PostgresCredentialResolvedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "pg.credential_resolved",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope pg.credential_resolved",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeProviderSwapped": {

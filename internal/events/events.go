@@ -66,6 +66,7 @@ const (
 	ProviderSwapped                 = "provider.swapped"
 	WorkerOperation                 = "worker.operation"
 	SupervisorFSPressureSkippedTick = "supervisor.fs_pressure.skipped_tick"
+	PostgresCredentialResolved      = "pg.credential_resolved"
 
 	// External messaging events.
 	ExtMsgBound          = "extmsg.bound"
@@ -103,6 +104,7 @@ var KnownEventTypes = []string{
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
 	ProviderSwapped, WorkerOperation, SupervisorFSPressureSkippedTick,
+	PostgresCredentialResolved,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,

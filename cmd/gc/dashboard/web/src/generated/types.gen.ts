@@ -748,7 +748,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | SupervisorFsPressureSkippedTickPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | SupervisorFsPressureSkippedTickPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventStreamEnvelope = {
     actor: string;
@@ -1820,6 +1820,15 @@ export type PoolOverride = {
     Min: number | null;
     OnBoot: string | null;
     OnDeath: string | null;
+};
+
+export type PostgresCredentialResolvedPayload = {
+    host: string;
+    port: string;
+    scope_kind: string;
+    scope_name: string;
+    source: string;
+    user: string;
 };
 
 export type ProviderCreateInputBody = {
@@ -2946,6 +2955,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedEventStreamEnvelopeOrderFired) | ({
+    type: 'pg.credential_resolved';
+} & TypedEventStreamEnvelopePgCredentialResolved) | ({
     type: 'provider.swapped';
 } & TypedEventStreamEnvelopeProviderSwapped) | ({
     type: 'request.failed';
@@ -3408,6 +3419,20 @@ export type TypedEventStreamEnvelopeOrderFired = {
 };
 
 /**
+ * TypedEventStreamEnvelope pg.credential_resolved
+ */
+export type TypedEventStreamEnvelopePgCredentialResolved = {
+    actor: string;
+    message?: string;
+    payload: PostgresCredentialResolvedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'pg.credential_resolved';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope provider.swapped
  */
 export type TypedEventStreamEnvelopeProviderSwapped = {
@@ -3737,6 +3762,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedTaggedEventStreamEnvelopeOrderFired) | ({
+    type: 'pg.credential_resolved';
+} & TypedTaggedEventStreamEnvelopePgCredentialResolved) | ({
     type: 'provider.swapped';
 } & TypedTaggedEventStreamEnvelopeProviderSwapped) | ({
     type: 'request.failed';
@@ -4225,6 +4252,21 @@ export type TypedTaggedEventStreamEnvelopeOrderFired = {
     subject?: string;
     ts: string;
     type: 'order.fired';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope pg.credential_resolved
+ */
+export type TypedTaggedEventStreamEnvelopePgCredentialResolved = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: PostgresCredentialResolvedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'pg.credential_resolved';
     workflow?: WorkflowEventProjection;
 };
 

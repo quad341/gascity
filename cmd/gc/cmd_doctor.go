@@ -16,8 +16,10 @@ import (
 )
 
 var (
-	newDoctorDoltServerCheck    = doctor.NewDoltServerCheck
-	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
+	newDoctorDoltServerCheck     = doctor.NewDoltServerCheck
+	newDoctorRigDoltServerCheck  = doctor.NewRigDoltServerCheck
+	newDoctorPostgresServerCheck = doctor.NewPostgresServerCheck
+	newDoctorPostgresAuthCheck   = doctor.NewPostgresAuthCheck
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -154,8 +156,15 @@ func doDoctor(fix, verbose, explainPostgresAuth bool, stdout, stderr io.Writer) 
 		d.Register(newCodexHooksDriftCheck(codexHookWorkDirs(cityPath, cfg)))
 		d.Register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		d.Register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
-		if explainPostgresAuth || doctor.HasPostgresBackedScope(cityPath, cfg) {
-			d.Register(doctor.NewPostgresAuthCheck(cityPath, cfg))
+		// PG checks: registered only when at least one scope uses the
+		// postgres backend. ORDER IS LOAD-BEARING for operator UX —
+		// reachability before auth. Asserted by
+		// TestPostgresChecksRegistrationOrder.
+		if cityHasPostgresScope(cityPath, cfg) {
+			d.Register(newDoctorPostgresServerCheck(cityPath, cfg))
+			d.Register(newDoctorPostgresAuthCheck(cityPath, cfg))
+		} else if explainPostgresAuth {
+			d.Register(newDoctorPostgresAuthCheck(cityPath, cfg))
 		}
 	}
 	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
@@ -280,6 +289,12 @@ func doDoctor(fix, verbose, explainPostgresAuth bool, stdout, stderr io.Writer) 
 		return 1
 	}
 	return 0
+}
+
+// cityHasPostgresScope reports whether at least one scope in cfg declares a
+// PostgreSQL backend. The check is structural only.
+func cityHasPostgresScope(cityPath string, cfg *config.City) bool {
+	return doctor.HasPostgresBackedScope(cityPath, cfg)
 }
 
 // collectPackDirs returns all unique pack directories from the city

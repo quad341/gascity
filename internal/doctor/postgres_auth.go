@@ -38,7 +38,7 @@ func NewPostgresAuthCheck(cityPath string, cfg *config.City) *PostgresAuthCheck 
 // HasPostgresBackedScope reports whether any city or rig scope has
 // MetadataState.Backend == "postgres".
 func HasPostgresBackedScope(cityPath string, cfg *config.City) bool {
-	return len(postgresAuthScopes(cityPath, cfg)) > 0
+	return len(postgresBackedScopes(cityPath, cfg)) > 0
 }
 
 // Name returns the check identifier.

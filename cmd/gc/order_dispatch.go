@@ -17,9 +17,12 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 )
+
+var startDeprecatedOrderWarningDedup = logutil.NewDedup(logutil.DefaultDedupCapacity)
 
 const (
 	labelOrderTracking = "order-tracking"
@@ -165,7 +168,11 @@ type memoryOrderDispatcher struct {
 // Scans both city-level and per-rig orders. Rig orders get their Rig
 // field stamped so they use independent scoped labels.
 func buildOrderDispatcher(cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer) orderDispatcher {
-	allAA, err := scanAllOrders(cityPath, cfg, stderr, "gc start: order scan")
+	allAA, err := scanAllOrdersWithOptions(cityPath, cfg, stderr, "gc start: order scan", orders.ScanOptions{
+		DeprecatedPathWarningDedup:    startDeprecatedOrderWarningDedup,
+		DeprecatedPathWarningWriter:   stderr,
+		VerboseDeprecatedPathWarnings: startVerboseMode,
+	})
 	if err != nil {
 		logDispatchError(stderr, "gc start: order scan: %v", err)
 		return nil

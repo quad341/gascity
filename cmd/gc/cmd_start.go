@@ -170,6 +170,9 @@ var noStrictMode bool
 // dryRunMode previews what agents would start without actually starting them.
 var dryRunMode bool
 
+// startVerboseMode disables gc start warning deduplication.
+var startVerboseMode bool
+
 // buildIdleTracker creates an idleTracker from the config, populating
 // timeouts for agents that have idle_timeout set. Returns nil if no
 // agents use idle timeout (disabled).
@@ -316,14 +319,57 @@ Use "gc supervisor run" for foreground operation.`,
 	cmd.Flags().MarkHidden("no-strict") //nolint:errcheck // flag always exists
 	cmd.Flags().BoolVarP(&dryRunMode, "dry-run", "n", false,
 		"preview what agents would start without starting them")
+	cmd.Flags().BoolVar(&startVerboseMode, "verbose", false,
+		"disable warning deduplication and print every supervisor warning")
 	return cmd
 }
 
 func doStart(args []string, controllerMode bool, stdout, stderr io.Writer) int {
-	return doStartWithNameOverride(args, controllerMode, stdout, stderr, "")
+	return doStartWithNameOverrideAndSummary(args, controllerMode, stdout, stderr, "")
 }
 
 func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string) int {
+	return doStartWithNameOverrideRaw(args, controllerMode, stdout, stderr, nameOverride)
+}
+
+func doStartWithNameOverrideAndSummary(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string) int {
+	if controllerMode {
+		code := doStartWithNameOverrideRaw(args, controllerMode, stdout, stderr, nameOverride)
+		writeStartSummary(stderr, startSummary{
+			PID:      currentSupervisorPID(),
+			Binary:   startSummaryBinaryPath(),
+			Build:    shortBuildHash(),
+			Drift:    "unknown",
+			Warnings: 0,
+			Fatal:    "",
+		})
+		return code
+	}
+	proxy := newStartOutputProxy(stderr, startOutputProxyOptions{
+		Verbose: startVerboseMode,
+		TTY:     startOutputIsTerminal(stderr),
+	})
+	code := doStartWithNameOverrideRaw(args, controllerMode, stdout, proxy, nameOverride)
+	fatal := ""
+	if code != 0 {
+		fatal = proxy.deriveFatalFromRecords()
+		proxy.SetFatal(fatal)
+	}
+	if err := proxy.Flush(); err != nil && stderr != nil {
+		fmt.Fprintf(stderr, "gc start: flushing output: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+	writeStartSummary(stderr, startSummary{
+		PID:      currentSupervisorPID(),
+		Binary:   startSummaryBinaryPath(),
+		Build:    shortBuildHash(),
+		Drift:    "unknown",
+		Warnings: proxy.WarningCount(),
+		Fatal:    fatalSummaryCause(fatal),
+	})
+	return code
+}
+
+func doStartWithNameOverrideRaw(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string) int {
 	if controllerMode || dryRunMode {
 		return doStartStandalone(args, controllerMode, stdout, stderr)
 	}

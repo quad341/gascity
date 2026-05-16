@@ -2796,6 +2796,7 @@ gc start
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `-n`, `--dry-run` | bool |  | preview what agents would start without starting them |
+| `--verbose` | bool |  | disable warning deduplication and print every supervisor warning |
 
 ## gc status
 

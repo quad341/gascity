@@ -4485,6 +4485,25 @@
         ],
         "type": "object"
       },
+      "PackRootStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "dir": {
+            "description": "Absolute pack root directory.",
+            "type": "string"
+          },
+          "parsed_at": {
+            "description": "Time the supervisor last parsed this pack root.",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "dir",
+          "parsed_at"
+        ],
+        "type": "object"
+      },
       "PaginationInfo": {
         "additionalProperties": false,
         "properties": {
@@ -6810,6 +6829,16 @@
             "description": "Total managed cities.",
             "format": "int64",
             "type": "integer"
+          },
+          "pack_roots": {
+            "description": "Pack roots parsed by the supervisor, with parse timestamps for drift detection.",
+            "items": {
+              "$ref": "#/components/schemas/PackRootStatus"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "startup": {
             "$ref": "#/components/schemas/SupervisorStartup",

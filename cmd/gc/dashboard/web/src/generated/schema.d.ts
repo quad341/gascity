@@ -3295,6 +3295,15 @@ export interface components {
             ref?: string;
             source?: string;
         };
+        PackRootStatus: {
+            /** @description Absolute pack root directory. */
+            dir: string;
+            /**
+             * Format: date-time
+             * @description Time the supervisor last parsed this pack root.
+             */
+            parsed_at: string;
+        };
         PaginationInfo: {
             has_older_messages: boolean;
             /** Format: int64 */
@@ -4121,6 +4130,8 @@ export interface components {
              * @description Total managed cities.
              */
             cities_total: number;
+            /** @description Pack roots parsed by the supervisor, with parse timestamps for drift detection. */
+            pack_roots?: components["schemas"]["PackRootStatus"][] | null;
             /** @description First-city startup info for single-city deployments. */
             startup?: components["schemas"]["SupervisorStartup"];
             /** @description Health status ("ok"). */

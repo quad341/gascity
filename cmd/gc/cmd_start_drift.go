@@ -212,11 +212,21 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 	}
 
 	exePath, exeErr := readSupervisorExePath(pid)
+	now := time.Now()
+	identity := supervisorIdentity{
+		PID:     pid,
+		ExePath: exePath,
+		Started: now,
+	}
+	if exeErr != nil {
+		identity.ExePath = "(unreadable)"
+	}
 	baseURL, urlErr := supervisorAPIBaseURLHook()
 	if urlErr != nil {
 		// Without a base URL we can't query /health. Don't block
 		// startup — just continue silently. (The operator's `gc start`
 		// today doesn't do drift detection, so we prefer fail-open.)
+		printSupervisorIdentity(stdout, identity, now)
 		return 0, true
 	}
 
@@ -227,27 +237,25 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 	if statusErr != nil {
 		// Supervisor is alive (PID exists) but /health didn't respond.
 		// Don't block startup; the registration step has its own retry.
+		printSupervisorIdentity(stdout, identity, now)
 		return 0, true
 	}
-
-	now := time.Now()
-	identity := supervisorIdentity{
-		PID:     pid,
-		ExePath: exePath,
-		BuildID: status.BuildID,
-		Started: now.Add(-time.Duration(status.UptimeSec) * time.Second),
-	}
-	if exeErr != nil {
-		identity.ExePath = "(unreadable)"
-	}
+	identity.BuildID = status.BuildID
+	identity.Started = now.Add(-time.Duration(status.UptimeSec) * time.Second)
 	printSupervisorIdentity(stdout, identity, now)
+
+	packDrift, packErr := DetectPackDrift(status.PackRoots)
+	if packErr != nil {
+		fmt.Fprintf(stderr, "warning: pack-root walk failed: %v\n", packErr) //nolint:errcheck // best-effort stderr
+		packDrift = nil
+	}
 
 	flags := driftFlags{
 		DryRun:           dryRunMode,
 		NoAutoRestart:    noAutoRestartMode,
 		KillSwitchActive: !readDaemonAutoRestart(cityPath),
 	}
-	res := decideDriftAction(commit, status, nil, flags)
+	res := decideDriftAction(commit, status, packDrift, flags)
 
 	switch {
 	case res.ProceedNormally:
@@ -269,9 +277,9 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 			PackDrifted:  res.PackDrift,
 		})
 		if flags.KillSwitchActive {
-			fmt.Fprintln(stderr, "error: supervisor binary drift; auto-restart disabled by [daemon].auto_restart_on_drift in city.toml. Restart manually with 'systemctl --user restart gascity-supervisor'.") //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stderr, "error: supervisor binary/pack drift; auto-restart disabled by [daemon].auto_restart_on_drift in city.toml. Restart manually with 'systemctl --user restart gascity-supervisor'.") //nolint:errcheck // best-effort stderr
 		} else {
-			fmt.Fprintln(stderr, "error: supervisor binary drift; rerun 'gc start' (or 'systemctl --user restart gascity-supervisor') to apply changes.") //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stderr, "error: supervisor binary/pack drift; rerun 'gc start' (or 'systemctl --user restart gascity-supervisor') to apply changes.") //nolint:errcheck // best-effort stderr
 		}
 		return 1, false
 	case res.Restart:

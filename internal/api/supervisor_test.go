@@ -21,6 +21,7 @@ import (
 type fakeCityResolver struct {
 	cities             map[string]*fakeState // keyed by city name
 	listed             []CityInfo
+	packRoots          []PackRootStatus
 	pending            map[string]string
 	supervisorRecorder events.Recorder
 }
@@ -43,6 +44,10 @@ func (f *fakeCityResolver) CityState(name string) State {
 		return s
 	}
 	return nil
+}
+
+func (f *fakeCityResolver) PackRoots() []PackRootStatus {
+	return append([]PackRootStatus(nil), f.packRoots...)
 }
 
 func (f *fakeCityResolver) StorePendingRequestID(cityPath, requestID string) error {
@@ -447,6 +452,60 @@ func TestSupervisorHealthEmptyBuildID(t *testing.T) {
 	}
 	if _, present := resp["build_id"]; present {
 		t.Fatalf("build_id key present in response despite empty buildID; got: %v", resp["build_id"])
+	}
+}
+
+func TestSupervisorHealthIncludesPackRoots(t *testing.T) {
+	parsedAt := time.Date(2026, 5, 16, 12, 30, 0, 0, time.UTC)
+	resolver := &fakeCityResolver{
+		cities: map[string]*fakeState{"test-city": newFakeState(t)},
+		packRoots: []PackRootStatus{{
+			Dir:      "/opt/gc/packs/gastown",
+			ParsedAt: parsedAt,
+		}},
+	}
+	sm := NewSupervisorMux(resolver, nil, false, "test", "abc123", time.Now())
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp struct {
+		PackRoots []PackRootStatus `json:"pack_roots"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.PackRoots) != 1 {
+		t.Fatalf("pack_roots len = %d, want 1; body=%s", len(resp.PackRoots), rec.Body.String())
+	}
+	if resp.PackRoots[0].Dir != "/opt/gc/packs/gastown" {
+		t.Fatalf("pack_roots[0].dir = %q", resp.PackRoots[0].Dir)
+	}
+	if !resp.PackRoots[0].ParsedAt.Equal(parsedAt) {
+		t.Fatalf("pack_roots[0].parsed_at = %s, want %s", resp.PackRoots[0].ParsedAt, parsedAt)
+	}
+}
+
+func TestSupervisorHealthOmitsEmptyPackRoots(t *testing.T) {
+	sm := newTestSupervisorMux(t, map[string]*fakeState{"test-city": newFakeState(t)})
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, present := resp["pack_roots"]; present {
+		t.Fatalf("pack_roots present for empty resolver snapshot; body=%s", rec.Body.String())
 	}
 }
 

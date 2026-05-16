@@ -3,13 +3,151 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/supervisor"
 )
+
+func configureStartDriftHealthServer(t *testing.T, handler http.Handler) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("GC_HOME", home)
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	host, portText, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("mkdir GC_HOME: %v", err)
+	}
+	data := fmt.Appendf(nil, "[supervisor]\nbind = %q\nport = %d\n", host, port)
+	if err := os.WriteFile(supervisor.ConfigPath(), data, 0o644); err != nil {
+		t.Fatalf("write supervisor config: %v", err)
+	}
+}
+
+func writeDriftCheckCity(t *testing.T) string {
+	t.Helper()
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	return cityPath
+}
+
+func withStartDriftGlobals(t *testing.T, buildID string, dryRun bool) {
+	t.Helper()
+	oldAlive := supervisorAliveHook
+	oldCommit := commit
+	oldDryRun := dryRunMode
+	oldNoAutoRestart := noAutoRestartMode
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		commit = oldCommit
+		dryRunMode = oldDryRun
+		noAutoRestartMode = oldNoAutoRestart
+	})
+	supervisorAliveHook = os.Getpid
+	commit = buildID
+	dryRunMode = dryRun
+	noAutoRestartMode = false
+}
+
+func TestRunStartDriftCheckReportsPackDrift(t *testing.T) {
+	const buildID = "abc123"
+	withStartDriftGlobals(t, buildID, true)
+	cityPath := writeDriftCheckCity(t)
+	packDir := filepath.Join(t.TempDir(), "packs", "gastown")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatalf("mkdir pack: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "pack.toml"), []byte("[pack]\nname = \"gastown\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatalf("write pack: %v", err)
+	}
+	parsedAt := time.Now().Add(-time.Hour)
+	configureStartDriftHealthServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"status":"ok","version":"v0","build_id":%q,"uptime_sec":3,"cities_total":1,"cities_running":1,"pack_roots":[{"dir":%q,"parsed_at":%q}]}`,
+			buildID, packDir, parsedAt.Format(time.RFC3339))
+	}))
+
+	var stdout, stderr bytes.Buffer
+	exitCode, cont := runStartDriftCheck(cityPath, &stdout, &stderr)
+	if exitCode != 0 || cont {
+		t.Fatalf("runStartDriftCheck() = (%d, %t), want (0, false); stdout=%q stderr=%q", exitCode, cont, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"Drift detected:", "  pack: " + packDir, "(would auto-restart; --dry-run)"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout missing %q\nstdout:\n%s\nstderr:\n%s", want, stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestRunStartDriftCheckWarnsAndContinuesWhenPackWalkFails(t *testing.T) {
+	const buildID = "abc123"
+	withStartDriftGlobals(t, buildID, false)
+	cityPath := writeDriftCheckCity(t)
+	missingPackDir := filepath.Join(t.TempDir(), "missing-pack")
+	parsedAt := time.Now().Add(-time.Hour)
+	configureStartDriftHealthServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"status":"ok","version":"v0","build_id":%q,"uptime_sec":3,"cities_total":1,"cities_running":1,"pack_roots":[{"dir":%q,"parsed_at":%q}]}`,
+			buildID, missingPackDir, parsedAt.Format(time.RFC3339))
+	}))
+
+	var stdout, stderr bytes.Buffer
+	exitCode, cont := runStartDriftCheck(cityPath, &stdout, &stderr)
+	if exitCode != 0 || !cont {
+		t.Fatalf("runStartDriftCheck() = (%d, %t), want (0, true); stdout=%q stderr=%q", exitCode, cont, stdout.String(), stderr.String())
+	}
+	if want := "warning: pack-root walk failed:"; !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr missing %q\nstdout:\n%s\nstderr:\n%s", want, stdout.String(), stderr.String())
+	}
+}
+
+func TestRunStartDriftCheckWalkErrorIdentityFirst(t *testing.T) {
+	const buildID = "abc123"
+	withStartDriftGlobals(t, buildID, false)
+	cityPath := writeDriftCheckCity(t)
+	missingPackDir := filepath.Join(t.TempDir(), "missing-pack")
+	parsedAt := time.Now().Add(-time.Hour)
+	configureStartDriftHealthServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"status":"ok","version":"v0","build_id":%q,"uptime_sec":3,"cities_total":1,"cities_running":1,"pack_roots":[{"dir":%q,"parsed_at":%q}]}`,
+			buildID, missingPackDir, parsedAt.Format(time.RFC3339))
+	}))
+
+	var combined bytes.Buffer
+	exitCode, cont := runStartDriftCheck(cityPath, &combined, &combined)
+	if exitCode != 0 || !cont {
+		t.Fatalf("runStartDriftCheck() = (%d, %t), want (0, true); output=%q", exitCode, cont, combined.String())
+	}
+	out := combined.String()
+	if !strings.HasPrefix(out, "Supervisor:") {
+		t.Fatalf("combined output should start with Supervisor identity; got %q", firstDriftLine(out))
+	}
+	if !strings.Contains(out, "\nwarning: pack-root walk failed:") {
+		t.Fatalf("combined output missing warning after identity:\n%s", out)
+	}
+}
 
 // TestDecideDriftAction exercises the flag×outcome matrix from the
 // designer brief (§ "Flag-combination matrix"). Six flag combinations

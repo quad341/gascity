@@ -196,6 +196,10 @@ func (r *singleStateResolver) CityState(name string) State {
 	return nil
 }
 
+func (r *singleStateResolver) PackRoots() []PackRootStatus {
+	return nil
+}
+
 func (s *Server) legacySessionHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v0/sessions", s.handleSessionCreate)

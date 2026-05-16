@@ -848,10 +848,11 @@ func shouldIgnoreConfigWatchEvent(path string) bool {
 
 // reloadResult holds the result of a config reload attempt.
 type reloadResult struct {
-	Cfg      *config.City
-	Prov     *config.Provenance
-	Revision string
-	Warnings []string
+	Cfg       *config.City
+	Prov      *config.Provenance
+	PackRoots []config.PackRootSnapshot
+	Revision  string
+	Warnings  []string
 }
 
 type reloadWarningError struct {
@@ -909,9 +910,10 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	reloadWarnings := append([]string(nil), prov.Warnings...)
 	resultWithWarnings := func(warnings []string) *reloadResult {
 		return &reloadResult{
-			Cfg:      newCfg,
-			Prov:     prov,
-			Warnings: append([]string(nil), warnings...),
+			Cfg:       newCfg,
+			Prov:      prov,
+			PackRoots: clonePackRootSnapshots(prov.PackRoots),
+			Warnings:  append([]string(nil), warnings...),
 		}
 	}
 	failWithWarnings := func(err error) (*reloadResult, error) {
@@ -946,7 +948,7 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 		return failWithWarnings(fmt.Errorf("workspace.name changed from %q to %q (restart controller to apply)", lockedWorkspaceName, newName))
 	}
 	rev := config.Revision(fsys.OSFS{}, prov, newCfg, cityRoot)
-	return &reloadResult{Cfg: newCfg, Prov: prov, Revision: rev, Warnings: reloadWarnings}, nil
+	return &reloadResult{Cfg: newCfg, Prov: prov, PackRoots: clonePackRootSnapshots(prov.PackRoots), Revision: rev, Warnings: reloadWarnings}, nil
 }
 
 // gracefulStopAll performs two-pass graceful shutdown:
@@ -1212,6 +1214,7 @@ func runController(
 	tomlPath string,
 	cfg *config.City,
 	configRev string,
+	packRoots []config.PackRootSnapshot,
 	buildFn func(*config.City, runtime.Provider, beads.Store) DesiredStateResult,
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult,
 	sp runtime.Provider,
@@ -1289,6 +1292,7 @@ func runController(
 		ConfigDirty:             configDirty,
 		Cfg:                     cfg,
 		SP:                      sp,
+		PackRoots:               packRoots,
 		Publication:             supervisor.PublicationConfig{},
 		BuildFn:                 buildFn,
 		BuildFnWithSessionBeads: buildFnWithSessionBeads,
@@ -1332,7 +1336,7 @@ func runController(
 		// not own the supervisor registry/reconciler path required by
 		// async POST /v0/city, so leave the initializer nil and let the
 		// handler return 501 for create/unregister routes.
-		apiMux := api.NewSupervisorMux(&singleCityStateResolver{state: cs}, nil, readOnly, "controller", commit, time.Now())
+		apiMux := api.NewSupervisorMux(&singleCityStateResolver{state: cs, runtime: cr}, nil, readOnly, "controller", commit, time.Now())
 		addr := net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))
 		apiLis, apiErr := net.Listen("tcp", addr)
 		if apiErr != nil {
@@ -1368,7 +1372,8 @@ func runController(
 // every per-city operation is served at /v0/city/{cityName}/... . No bare
 // /v0/foo alias exists.
 type singleCityStateResolver struct {
-	state api.State
+	state   api.State
+	runtime *CityRuntime
 }
 
 func (r *singleCityStateResolver) ListCities() []api.CityInfo {
@@ -1384,4 +1389,11 @@ func (r *singleCityStateResolver) CityState(name string) api.State {
 		return r.state
 	}
 	return nil
+}
+
+func (r *singleCityStateResolver) PackRoots() []api.PackRootStatus {
+	if r.runtime == nil {
+		return nil
+	}
+	return apiPackRootStatuses(r.runtime.PackRootSnapshot())
 }

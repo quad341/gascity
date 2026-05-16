@@ -58,6 +58,7 @@ type CityRuntime struct {
 	serviceStateMu          sync.RWMutex
 	cfg                     *config.City
 	sp                      runtime.Provider
+	packRoots               []config.PackRootSnapshot
 	publication             supervisor.PublicationConfig
 	buildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
@@ -140,6 +141,7 @@ type CityRuntimeParams struct {
 
 	Cfg                     *config.City
 	SP                      runtime.Provider
+	PackRoots               []config.PackRootSnapshot
 	Publication             supervisor.PublicationConfig
 	BuildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	BuildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
@@ -250,6 +252,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		configDirty:             configDirty,
 		cfg:                     p.Cfg,
 		sp:                      p.SP,
+		packRoots:               clonePackRootSnapshots(p.PackRoots),
 		publication:             p.Publication,
 		buildFn:                 p.BuildFn,
 		buildFnWithSessionBeads: p.BuildFnWithSessionBeads,
@@ -316,6 +319,23 @@ func (cr *CityRuntime) setControllerState(cs *controllerState) {
 // crashTracker returns the crash tracker for API server wiring.
 func (cr *CityRuntime) crashTrack() crashTracker {
 	return cr.ct
+}
+
+// PackRootSnapshot returns a copy of the pack roots parsed by this runtime's
+// current config snapshot.
+func (cr *CityRuntime) PackRootSnapshot() []config.PackRootSnapshot {
+	cr.serviceStateMu.RLock()
+	defer cr.serviceStateMu.RUnlock()
+	return clonePackRootSnapshots(cr.packRoots)
+}
+
+func clonePackRootSnapshots(in []config.PackRootSnapshot) []config.PackRootSnapshot {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]config.PackRootSnapshot, len(in))
+	copy(out, in)
+	return out
 }
 
 // run executes the reconciliation loop until ctx is canceled. This is
@@ -1426,6 +1446,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cr.cfg = nextCfg
 	cr.sp = nextSp
 	cr.dops = nextDops
+	cr.packRoots = clonePackRootSnapshots(result.PackRoots)
 	cr.serviceStateMu.Unlock()
 	cr.demandSnapshot = nil
 

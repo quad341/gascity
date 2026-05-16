@@ -6,11 +6,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -29,6 +31,7 @@ type cityView struct {
 	// controllerState is a pointer to the city's api.State implementation.
 	// It is thread-safe via its own internal RWMutex.
 	cs api.State
+	cr *CityRuntime
 
 	// Tombstoned is set when the city is being torn down. Copied from
 	// managedCity.tombstoned at snapshot build time.
@@ -38,6 +41,7 @@ type cityView struct {
 	InitProgress *cityInitProgress
 	InitFailure  *initFailRecord
 	PanicRecord  *panicRecord
+	PackRoots    []api.PackRootStatus
 }
 
 // citySnapshot is an immutable point-in-time view of all cities.
@@ -430,6 +434,44 @@ func (r *cityRegistry) ListCities() []api.CityInfo {
 	return out
 }
 
+// PackRoots returns all pack roots known to running city runtimes, deduplicated
+// by directory. When multiple cities share a pack root, the earliest ParsedAt
+// is retained so edits after any runtime parsed the pack are still detected.
+func (r *cityRegistry) PackRoots() []api.PackRootStatus {
+	snap := r.snap.Load()
+	byDir := make(map[string]api.PackRootStatus)
+	for _, v := range snap.all {
+		if v == nil {
+			continue
+		}
+		if !v.Started || v.Tombstoned {
+			continue
+		}
+		roots := v.PackRoots
+		if v.cr != nil {
+			roots = apiPackRootStatuses(v.cr.PackRootSnapshot())
+		}
+		for _, root := range roots {
+			if root.Dir == "" || root.ParsedAt.IsZero() {
+				continue
+			}
+			if existing, ok := byDir[root.Dir]; !ok || root.ParsedAt.Before(existing.ParsedAt) {
+				byDir[root.Dir] = root
+			}
+		}
+	}
+	dirs := make([]string, 0, len(byDir))
+	for dir := range byDir {
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+	out := make([]api.PackRootStatus, 0, len(dirs))
+	for _, dir := range dirs {
+		out = append(out, byDir[dir])
+	}
+	return out
+}
+
 // startupPhaseOrder is the ordered list of startup phases.
 var startupPhaseOrder = []string{
 	"loading_config",
@@ -535,7 +577,11 @@ func (r *cityRegistry) toCityView(path string, mc *managedCity) *cityView {
 		Started:    mc.started,
 		Status:     mc.status,
 		cs:         cs,
+		cr:         mc.cr,
 		Tombstoned: mc.tombstoned.Load(),
+	}
+	if mc.cr != nil {
+		v.PackRoots = apiPackRootStatuses(mc.cr.PackRootSnapshot())
 	}
 
 	if ip, ok := r.initStatus[path]; ok {
@@ -552,4 +598,18 @@ func (r *cityRegistry) toCityView(path string, mc *managedCity) *cityView {
 	}
 
 	return v
+}
+
+func apiPackRootStatuses(snapshots []config.PackRootSnapshot) []api.PackRootStatus {
+	if len(snapshots) == 0 {
+		return nil
+	}
+	out := make([]api.PackRootStatus, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		out = append(out, api.PackRootStatus{
+			Dir:      snapshot.Dir,
+			ParsedAt: snapshot.ParsedAt,
+		})
+	}
+	return out
 }

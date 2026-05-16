@@ -57,6 +57,10 @@ func (r *stateCityResolver) CityState(name string) State {
 	return nil
 }
 
+func (r *stateCityResolver) PackRoots() []PackRootStatus {
+	return nil
+}
+
 // cityURL prefixes path with "/v0/city/<state.CityName()>/" so tests
 // can write URLs relative to a city's Huma API surface. Leading slash
 // on path is required.

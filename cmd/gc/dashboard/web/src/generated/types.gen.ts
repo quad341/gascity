@@ -1810,6 +1810,17 @@ export type PackResponse = {
     source?: string;
 };
 
+export type PackRootStatus = {
+    /**
+     * Absolute pack root directory.
+     */
+    dir: string;
+    /**
+     * Time the supervisor last parsed this pack root.
+     */
+    parsed_at: string;
+};
+
 export type PaginationInfo = {
     has_older_messages: boolean;
     returned_message_count: number;
@@ -2897,6 +2908,10 @@ export type SupervisorHealthOutputBody = {
      * Total managed cities.
      */
     cities_total: number;
+    /**
+     * Pack roots parsed by the supervisor, with parse timestamps for drift detection.
+     */
+    pack_roots?: Array<PackRootStatus> | null;
     /**
      * First-city startup info for single-city deployments.
      */

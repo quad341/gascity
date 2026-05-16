@@ -83,3 +83,6 @@ type emptyResolver struct{}
 
 func (emptyResolver) ListCities() []api.CityInfo   { return nil }
 func (emptyResolver) CityState(_ string) api.State { return nil }
+func (emptyResolver) PackRoots() []api.PackRootStatus {
+	return nil
+}

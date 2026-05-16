@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -42,6 +43,54 @@ name = "mayor"
 	// Include should be cleared from the result.
 	if cfg.Include != nil {
 		t.Errorf("Include should be nil, got %v", cfg.Include)
+	}
+}
+
+func TestLoadWithIncludes_RecordsUniquePackRootSnapshots(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/packs/alpha/pack.toml"] = []byte(`
+[pack]
+name = "alpha"
+schema = 1
+
+[[agent]]
+name = "alpha-agent"
+`)
+	fs.Files["/city/packs/beta/pack.toml"] = []byte(`
+[pack]
+name = "beta"
+schema = 1
+
+[[agent]]
+name = "beta-agent"
+`)
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+includes = ["packs/alpha"]
+
+[[rigs]]
+name = "hw"
+path = "/home/user/hw"
+includes = ["packs/alpha", "packs/beta"]
+`)
+
+	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var got []string
+	for _, root := range prov.PackRoots {
+		if root.ParsedAt.IsZero() {
+			t.Fatalf("PackRoots contains zero ParsedAt for %q", root.Dir)
+		}
+		got = append(got, root.Dir)
+	}
+	sort.Strings(got)
+	want := []string{"/city/packs/alpha", "/city/packs/beta"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("PackRoots dirs = %#v, want %#v", got, want)
 	}
 }
 

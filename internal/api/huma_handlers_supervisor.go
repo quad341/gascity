@@ -39,6 +39,7 @@ type SupervisorHealthOutput struct {
 		CitiesTotal   int                `json:"cities_total" doc:"Total managed cities."`
 		CitiesRunning int                `json:"cities_running" doc:"Cities currently running."`
 		Startup       *SupervisorStartup `json:"startup,omitempty" doc:"First-city startup info for single-city deployments."`
+		PackRoots     []PackRootStatus   `json:"pack_roots,omitempty" doc:"Pack roots parsed by the supervisor, with parse timestamps for drift detection."`
 	}
 }
 
@@ -275,6 +276,7 @@ func (sm *SupervisorMux) humaHandleHealth(_ context.Context, _ *struct{}) (*Supe
 	out.Body.CitiesTotal = len(cities)
 	out.Body.CitiesRunning = running
 	out.Body.Startup = startup
+	out.Body.PackRoots = sm.resolver.PackRoots()
 	return out, nil
 }
 

@@ -527,7 +527,7 @@ func TestSendReloadControlRequestNoChange(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		runController(dir, tomlPath, cfg, configRev, prov.PackRoots, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -735,7 +735,7 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		runController(dir, tomlPath, cfg, configRev, prov.PackRoots, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 	t.Cleanup(func() {

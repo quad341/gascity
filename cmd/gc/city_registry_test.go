@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
@@ -294,6 +295,68 @@ func TestCityRegistryCityState(t *testing.T) {
 	// Non-existent city.
 	if got := reg.CityState("nonexistent"); got != nil {
 		t.Fatalf("CityState for nonexistent = %v, want nil", got)
+	}
+}
+
+func TestCityRegistryPackRootsDedupesByDirWithEarliestParsedAt(t *testing.T) {
+	reg := newCityRegistry()
+	early := time.Date(2026, 5, 16, 10, 0, 0, 0, time.UTC)
+	late := early.Add(2 * time.Hour)
+	reg.Add("/path/a", &managedCity{
+		name:    "city-a",
+		started: true,
+		cr: &CityRuntime{packRoots: []config.PackRootSnapshot{
+			{Dir: "/packs/shared", ParsedAt: late},
+			{Dir: "/packs/alpha", ParsedAt: late},
+		}},
+	})
+	reg.Add("/path/b", &managedCity{
+		name:    "city-b",
+		started: true,
+		cr: &CityRuntime{packRoots: []config.PackRootSnapshot{
+			{Dir: "/packs/shared", ParsedAt: early},
+		}},
+	})
+
+	got := reg.PackRoots()
+	if len(got) != 2 {
+		t.Fatalf("PackRoots() len = %d, want 2; got %#v", len(got), got)
+	}
+	byDir := make(map[string]api.PackRootStatus, len(got))
+	for _, root := range got {
+		byDir[root.Dir] = root
+	}
+	if !byDir["/packs/shared"].ParsedAt.Equal(early) {
+		t.Fatalf("shared ParsedAt = %s, want %s", byDir["/packs/shared"].ParsedAt, early)
+	}
+	if !byDir["/packs/alpha"].ParsedAt.Equal(late) {
+		t.Fatalf("alpha ParsedAt = %s, want %s", byDir["/packs/alpha"].ParsedAt, late)
+	}
+}
+
+func TestCityRegistryPackRootsNoRunningCitiesReturnsNil(t *testing.T) {
+	reg := newCityRegistry()
+	parsedAt := time.Date(2026, 5, 16, 10, 0, 0, 0, time.UTC)
+	reg.Add("/path/a", &managedCity{
+		name:    "city-a",
+		started: false,
+		cr: &CityRuntime{packRoots: []config.PackRootSnapshot{
+			{Dir: "/packs/alpha", ParsedAt: parsedAt},
+		}},
+	})
+	reg.Add("/path/b", &managedCity{
+		name:    "city-b",
+		started: true,
+		cr: &CityRuntime{packRoots: []config.PackRootSnapshot{
+			{Dir: "/packs/beta", ParsedAt: parsedAt},
+		}},
+	})
+	reg.UpdateCallback("/path/b", func(m *managedCity) {
+		m.tombstoned.Store(true)
+	})
+
+	if got := reg.PackRoots(); len(got) != 0 {
+		t.Fatalf("PackRoots() = %#v, want nil/empty when no cities are running", got)
 	}
 }
 

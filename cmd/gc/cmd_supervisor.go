@@ -1494,6 +1494,7 @@ func reconcileCities(
 				ConfigDirty:             configDirty,
 				Cfg:                     cfg,
 				SP:                      sp,
+				PackRoots:               prov.PackRoots,
 				Publication:             publication,
 				BuildFn:                 supervisorBuildAgentsFn(path, cityName, stderr),
 				BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(path, cityName, stderr),

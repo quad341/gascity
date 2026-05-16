@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/api/genclient"
 )
 
 // httpSupervisorClient is the production SupervisorClient implementation.
@@ -34,31 +34,41 @@ func newHTTPSupervisorClient(baseURL string) *httpSupervisorClient {
 	}
 }
 
-// Status fetches /health and projects the response onto SupervisorStatus.
-// PackRoots are not yet exposed by /health (deferred follow-up); callers
-// receive an empty slice and DetectPackDrift treats that as no drift.
+// Status fetches /health and projects the typed response onto SupervisorStatus.
 func (c *httpSupervisorClient) Status(ctx context.Context) (SupervisorStatus, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/health", nil)
+	client, err := genclient.NewClientWithResponses(c.baseURL, genclient.WithHTTPClient(c.httpClient))
 	if err != nil {
 		return SupervisorStatus{}, err
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := client.GetHealthWithResponse(ctx)
 	if err != nil {
 		return SupervisorStatus{}, err
 	}
-	defer resp.Body.Close() //nolint:errcheck // best-effort close
-	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return SupervisorStatus{}, fmt.Errorf("supervisor /health returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	if resp.StatusCode()/100 != 2 {
+		return SupervisorStatus{}, fmt.Errorf("supervisor /health returned %d: %s", resp.StatusCode(), strings.TrimSpace(string(resp.Body)))
 	}
-	var body struct {
-		BuildID   string `json:"build_id"`
-		UptimeSec int    `json:"uptime_sec"`
+	if resp.JSON200 == nil {
+		return SupervisorStatus{}, fmt.Errorf("supervisor /health returned %d with empty JSON body", resp.StatusCode())
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return SupervisorStatus{}, fmt.Errorf("decoding supervisor /health: %w", err)
+	return supervisorStatusFromHealth(resp.JSON200), nil
+}
+
+func supervisorStatusFromHealth(body *genclient.SupervisorHealthOutputBody) SupervisorStatus {
+	var buildID string
+	if body.BuildId != nil {
+		buildID = *body.BuildId
 	}
-	return SupervisorStatus{BuildID: body.BuildID, UptimeSec: body.UptimeSec}, nil
+	status := SupervisorStatus{BuildID: buildID, UptimeSec: int(body.UptimeSec)}
+	if body.PackRoots != nil {
+		status.PackRoots = make([]PackRootStatus, 0, len(*body.PackRoots))
+		for _, root := range *body.PackRoots {
+			status.PackRoots = append(status.PackRoots, PackRootStatus{
+				Dir:      root.Dir,
+				ParsedAt: root.ParsedAt,
+			})
+		}
+	}
+	return status
 }
 
 // Ping issues a GET /health and returns nil iff the response is 2xx.

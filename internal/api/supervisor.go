@@ -27,12 +27,20 @@ type CityInfo struct {
 	PhasesCompleted []string `json:"phases_completed,omitempty"`
 }
 
+// PackRootStatus describes a pack root parsed by a managed city runtime.
+type PackRootStatus struct {
+	Dir      string    `json:"dir" doc:"Absolute pack root directory."`
+	ParsedAt time.Time `json:"parsed_at" doc:"Time the supervisor last parsed this pack root."`
+}
+
 // CityResolver provides city lookup for the supervisor API router.
 type CityResolver interface {
 	// ListCities returns all managed cities with status info.
 	ListCities() []CityInfo
 	// CityState returns the State for a named city, or nil if not found/not running.
 	CityState(name string) State
+	// PackRoots returns the supervisor's deduplicated pack-root snapshot.
+	PackRoots() []PackRootStatus
 }
 
 // ErrPendingRequestExists indicates that a matching async request is already

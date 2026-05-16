@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -85,9 +86,18 @@ type Provenance struct {
 	Workspace map[string]string
 	// Warnings collects non-fatal collision warnings from composition.
 	Warnings []string
+	// PackRoots lists the unique pack root directories parsed while composing
+	// this config and the successful parse timestamp used by drift checks.
+	PackRoots []PackRootSnapshot
 
 	sourceContents   map[string][]byte
 	revisionSnapshot *revisionSnapshot
+}
+
+// PackRootSnapshot records a pack root that contributed to a loaded config.
+type PackRootSnapshot struct {
+	Dir      string
+	ParsedAt time.Time
 }
 
 // LoadOptions controls optional config-loading behavior.
@@ -664,6 +674,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 			}
 		}
 	}
+	prov.PackRoots = collectPackRootSnapshots(root, cityRoot, time.Now().UTC())
 
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
@@ -1366,6 +1377,91 @@ func newProvenance(rootPath string) *Provenance {
 		Rigs:      make(map[string]string),
 		Workspace: make(map[string]string),
 	}
+}
+
+func collectPackRootSnapshots(cfg *City, cityRoot string, parsedAt time.Time) []PackRootSnapshot {
+	if cfg == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var dirs []string
+	addDir := func(dir string) {
+		dir = filepath.Clean(strings.TrimSpace(dir))
+		if dir == "" || dir == "." {
+			return
+		}
+		if _, ok := seen[dir]; ok {
+			return
+		}
+		seen[dir] = struct{}{}
+		dirs = append(dirs, dir)
+	}
+	addRef := func(ref string) {
+		dir, err := resolvePackRef(ref, cityRoot, cityRoot)
+		if err != nil {
+			return
+		}
+		addDir(dir)
+	}
+	addImport := func(imp Import) {
+		dir, err := resolveImportPackRef(imp.Source, cityRoot, cityRoot)
+		if err != nil {
+			return
+		}
+		addDir(dir)
+	}
+
+	for _, ref := range cfg.Workspace.LegacyIncludes() {
+		addRef(ref)
+	}
+	for _, imp := range cfg.Imports {
+		addImport(imp)
+	}
+	for _, dir := range cfg.PackDirs {
+		addDir(dir)
+	}
+	for _, dir := range cfg.PackGraphOnlyDirs {
+		addDir(dir)
+	}
+	for _, dir := range cfg.ExplicitImportPackDirs {
+		addDir(dir)
+	}
+	for _, dir := range cfg.ImplicitImportPackDirs {
+		addDir(dir)
+	}
+	for _, dir := range cfg.BootstrapImportPackDirs {
+		addDir(dir)
+	}
+	for _, rig := range cfg.Rigs {
+		for _, ref := range rig.Includes {
+			addRef(ref)
+		}
+		for _, imp := range rig.Imports {
+			addImport(imp)
+		}
+	}
+	addDirsFromMap := func(byRig map[string][]string) {
+		rigNames := make([]string, 0, len(byRig))
+		for rigName := range byRig {
+			rigNames = append(rigNames, rigName)
+		}
+		sort.Strings(rigNames)
+		for _, rigName := range rigNames {
+			for _, dir := range byRig[rigName] {
+				addDir(dir)
+			}
+		}
+	}
+	addDirsFromMap(cfg.RigPackDirs)
+	addDirsFromMap(cfg.RigPackGraphOnlyDirs)
+	addDirsFromMap(cfg.RigImportPackDirs)
+
+	sort.Strings(dirs)
+	out := make([]PackRootSnapshot, 0, len(dirs))
+	for _, dir := range dirs {
+		out = append(out, PackRootSnapshot{Dir: dir, ParsedAt: parsedAt})
+	}
+	return out
 }
 
 func (p *Provenance) recordSource(path string, data []byte) {

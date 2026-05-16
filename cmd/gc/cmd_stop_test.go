@@ -83,7 +83,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	var controllerStdout, controllerStderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
+		runController(dir, tomlPath, cfg, "", nil, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -231,7 +231,7 @@ func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 	var controllerStdout, controllerStderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
+		runController(dir, tomlPath, cfg, "", nil, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -305,7 +305,7 @@ func TestCmdStopForceEscalatesInProgressControllerStop(t *testing.T) {
 	var controllerStdout, controllerStderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
+		runController(dir, tomlPath, cfg, "", nil, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -1010,7 +1010,7 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 	var controllerStdout, controllerStderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, filepath.Join(dir, "city.toml"), cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
+		runController(dir, filepath.Join(dir, "city.toml"), cfg, "", nil, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
 		close(done)
 	}()
 	t.Cleanup(func() {

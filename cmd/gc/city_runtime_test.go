@@ -4133,6 +4133,133 @@ func TestCityRuntimeReloadRestartsConfigWatcherWithNewPackTargets(t *testing.T) 
 	}
 }
 
+func TestCityRuntimePackRootSnapshotRefreshesOnReload(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfigWithIncludes(t, tomlPath, nil)
+
+	packDir := filepath.Join(cityPath, "packs", "extra")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatalf("mkdir pack: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "pack.toml"), []byte(`
+[pack]
+name = "extra"
+schema = 1
+
+[[agent]]
+name = "worker"
+`), 0o644); err != nil {
+		t.Fatalf("write pack: %v", err)
+	}
+
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+
+	sp := runtime.NewFake()
+	dirty := &atomic.Bool{}
+	var stdout, stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:    cityPath,
+		CityName:    "test-city",
+		TomlPath:    tomlPath,
+		ConfigRev:   configRev,
+		ConfigDirty: dirty,
+		Cfg:         cfg,
+		SP:          sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	if got := cr.PackRootSnapshot(); len(got) != 0 {
+		t.Fatalf("initial PackRootSnapshot() = %#v, want none", got)
+	}
+
+	writeCityRuntimeConfigWithIncludes(t, tomlPath, []string{"packs/extra"})
+	lastProviderName := "fake"
+	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+
+	got := cr.PackRootSnapshot()
+	var found bool
+	for _, root := range got {
+		if root.Dir != packDir {
+			continue
+		}
+		found = true
+		if root.ParsedAt.IsZero() {
+			t.Fatal("PackRootSnapshot() contains pack root with zero ParsedAt")
+		}
+	}
+	if !found {
+		t.Fatalf("PackRootSnapshot() = %#v, want %q", got, packDir)
+	}
+}
+
+func TestCityRuntimePackRootSnapshotPopulatedAtStartup(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	packDir := filepath.Join(cityPath, "packs", "extra")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatalf("mkdir pack: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "pack.toml"), []byte(`
+[pack]
+name = "extra"
+schema = 1
+
+[[agent]]
+name = "worker"
+`), 0o644); err != nil {
+		t.Fatalf("write pack: %v", err)
+	}
+	writeCityRuntimeConfigWithIncludes(t, tomlPath, []string{"packs/extra"})
+
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+
+	sp := runtime.NewFake()
+	dirty := &atomic.Bool{}
+	var stdout, stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:    cityPath,
+		CityName:    "test-city",
+		TomlPath:    tomlPath,
+		ConfigRev:   configRev,
+		ConfigDirty: dirty,
+		Cfg:         cfg,
+		SP:          sp,
+		PackRoots:   prov.PackRoots,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+
+	got := cr.PackRootSnapshot()
+	if len(got) != 1 {
+		t.Fatalf("PackRootSnapshot() len = %d, want 1; got %#v", len(got), got)
+	}
+	if got[0].Dir != packDir {
+		t.Fatalf("PackRootSnapshot()[0].Dir = %q, want %q", got[0].Dir, packDir)
+	}
+	if got[0].ParsedAt.IsZero() {
+		t.Fatal("PackRootSnapshot()[0].ParsedAt is zero")
+	}
+}
+
 func TestCityRuntimeManualReloadPanicAfterReloadKeepsReloadReplyAndClears(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")

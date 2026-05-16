@@ -243,3 +243,6 @@ type emptyTestResolver struct{}
 
 func (emptyTestResolver) ListCities() []api.CityInfo   { return nil }
 func (emptyTestResolver) CityState(_ string) api.State { return nil }
+func (emptyTestResolver) PackRoots() []api.PackRootStatus {
+	return nil
+}

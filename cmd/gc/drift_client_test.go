@@ -54,6 +54,32 @@ func TestHTTPSupervisorClient_StatusEmptyBuildID(t *testing.T) {
 	}
 }
 
+// TestHTTPSupervisorClient_StatusMapsPackRoots confirms the wire client maps
+// supervisor /health pack_roots into the drift detector's local status type.
+func TestHTTPSupervisorClient_StatusMapsPackRoots(t *testing.T) {
+	parsedAt := time.Date(2026, 5, 16, 15, 4, 5, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"status":"ok","version":"v0","build_id":"deadbeef","uptime_sec":7,"cities_total":1,"cities_running":1,"pack_roots":[{"dir":"/packs/gastown","parsed_at":%q}]}`, parsedAt.Format(time.RFC3339))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newHTTPSupervisorClient(srv.URL)
+	got, err := c.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(got.PackRoots) != 1 {
+		t.Fatalf("PackRoots len = %d, want 1; got %#v", len(got.PackRoots), got.PackRoots)
+	}
+	if got.PackRoots[0].Dir != "/packs/gastown" {
+		t.Fatalf("PackRoots[0].Dir = %q", got.PackRoots[0].Dir)
+	}
+	if !got.PackRoots[0].ParsedAt.Equal(parsedAt) {
+		t.Fatalf("PackRoots[0].ParsedAt = %s, want %s", got.PackRoots[0].ParsedAt, parsedAt)
+	}
+}
+
 // TestHTTPSupervisorClient_StatusNon200 confirms the client surfaces a
 // descriptive error when /health returns a non-2xx response.
 func TestHTTPSupervisorClient_StatusNon200(t *testing.T) {

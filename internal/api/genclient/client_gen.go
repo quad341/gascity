@@ -1816,6 +1816,15 @@ type PackResponse struct {
 	Source *string `json:"source,omitempty"`
 }
 
+// PackRootStatus defines model for PackRootStatus.
+type PackRootStatus struct {
+	// Dir Absolute pack root directory.
+	Dir string `json:"dir"`
+
+	// ParsedAt Time the supervisor last parsed this pack root.
+	ParsedAt time.Time `json:"parsed_at"`
+}
+
 // PaginationInfo defines model for PaginationInfo.
 type PaginationInfo struct {
 	HasOlderMessages       bool    `json:"has_older_messages"`
@@ -2718,8 +2727,11 @@ type SupervisorHealthOutputBody struct {
 	CitiesRunning int64 `json:"cities_running"`
 
 	// CitiesTotal Total managed cities.
-	CitiesTotal int64              `json:"cities_total"`
-	Startup     *SupervisorStartup `json:"startup,omitempty"`
+	CitiesTotal int64 `json:"cities_total"`
+
+	// PackRoots Pack roots parsed by the supervisor, with parse timestamps for drift detection.
+	PackRoots *[]PackRootStatus  `json:"pack_roots,omitempty"`
+	Startup   *SupervisorStartup `json:"startup,omitempty"`
 
 	// Status Health status ("ok").
 	Status string `json:"status"`

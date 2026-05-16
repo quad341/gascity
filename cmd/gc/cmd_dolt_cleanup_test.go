@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,6 +12,46 @@ import (
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// fakeBeadsCleanupClient is the regression-test fake for CleanupDoltClient.
+// It returns a fixed database list, records every DropDatabase call, and
+// intentionally no-ops destructive side effects that are not load-bearing for
+// the FR-10 invariant.
+type fakeBeadsCleanupClient struct {
+	databases  []string
+	dropCalls  []string
+	dropFailFn func(name string) error
+}
+
+func (c *fakeBeadsCleanupClient) ListDatabases(_ context.Context) ([]string, error) {
+	out := make([]string, len(c.databases))
+	copy(out, c.databases)
+	return out, nil
+}
+
+func (c *fakeBeadsCleanupClient) DropDatabase(_ context.Context, name string) error {
+	c.dropCalls = append(c.dropCalls, name)
+	if c.dropFailFn != nil {
+		return c.dropFailFn(name)
+	}
+	return nil
+}
+
+func (c *fakeBeadsCleanupClient) PurgeDroppedDatabases(_ context.Context, _ string) error {
+	return nil
+}
+
+func (c *fakeBeadsCleanupClient) Close() error { return nil }
+
+func (c *fakeBeadsCleanupClient) dropCallsFor(target string) int {
+	n := 0
+	for _, name := range c.dropCalls {
+		if name == target {
+			n++
+		}
+	}
+	return n
+}
 
 func TestCleanupReportJSONShape(t *testing.T) {
 	r := CleanupReport{
@@ -132,6 +173,124 @@ func TestRunDoltCleanup_JSONOutputsResolvedPort(t *testing.T) {
 	}
 	if r.Port.Fallback {
 		t.Errorf("Port.Fallback = true, want false")
+	}
+}
+
+// TestDoltCleanupRefusesLiveBeadsDatabase pins FR-10 of ga-nw4z6.
+//
+// Scenario reproduces the production incident: the Dolt server hosts a
+// `beads` database plus stale fixtures. The city has one rig `bd-rig` whose
+// metadata.json is present but does not pin dolt_database. The safe runner
+// must not classify `beads` as an orphan because `beads` does not match
+// defaultStaleDatabasePrefixes.
+func TestDoltCleanupRefusesLiveBeadsDatabase(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
+	fs.Files["/city/rigs/bd-rig/.beads/metadata.json"] = []byte(`{}`)
+
+	fake := &fakeBeadsCleanupClient{
+		databases: []string{
+			"beads",
+			"testdb_abc",
+			"testdb_xyz",
+			"information_schema",
+			"mysql",
+			"dolt_cluster",
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Flag:     "",
+		CityPort: 0,
+		Rigs: []resolverRig{
+			{Name: "hq", Path: "/city", HQ: true},
+			{Name: "bd-rig", Path: "/city/rigs/bd-rig", HQ: false},
+		},
+		FS:         fs,
+		JSON:       true,
+		DoltClient: fake,
+		Probe:      false,
+		DiscoverProcesses: func() ([]DoltProcInfo, error) {
+			return nil, nil
+		},
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runDoltCleanup exit=%d, stderr=%q", code, stderr.String())
+	}
+
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+
+	for _, n := range r.Dropped.Names {
+		if n == "beads" {
+			t.Fatalf("Dropped.Names contains %q: %+v", "beads", r.Dropped.Names)
+		}
+	}
+	for _, e := range r.Errors {
+		if e.Name == "beads" {
+			t.Errorf("Errors[].Name = %q (kind=%s): beads should be invisible to the planner, not error on it", e.Name, e.Kind)
+		}
+	}
+	for _, b := range r.ForceBlockers {
+		if b.Name == "beads" {
+			t.Errorf("ForceBlockers[].Name = %q (kind=%s): beads should be invisible to the planner, not a force-blocker", b.Name, b.Kind)
+		}
+	}
+	if got := fake.dropCallsFor("beads"); got > 0 {
+		t.Fatalf("DropDatabase was called %d time(s) for %q", got, "beads")
+	}
+	if !containsString(r.Dropped.Names, "testdb_abc") || !containsString(r.Dropped.Names, "testdb_xyz") {
+		t.Errorf("expected stale fixtures testdb_abc and testdb_xyz in Dropped.Names; got %v", r.Dropped.Names)
+	}
+}
+
+// TestDoltCleanupRefusesLiveBeadsDatabase_NoMetadataAtAll asserts the safety
+// contract holds even when `bd-rig`'s .beads/metadata.json is entirely absent.
+func TestDoltCleanupRefusesLiveBeadsDatabase_NoMetadataAtAll(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
+
+	fake := &fakeBeadsCleanupClient{
+		databases: []string{"beads", "testdb_xyz"},
+	}
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs: []resolverRig{
+			{Name: "hq", Path: "/city", HQ: true},
+			{Name: "bd-rig", Path: "/city/rigs/bd-rig", HQ: false},
+		},
+		FS:         fs,
+		JSON:       true,
+		DoltClient: fake,
+		Probe:      false,
+		DiscoverProcesses: func() ([]DoltProcInfo, error) {
+			return nil, nil
+		},
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runDoltCleanup exit=%d, stderr=%q", code, stderr.String())
+	}
+
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	for _, n := range r.Dropped.Names {
+		if n == "beads" {
+			t.Fatalf("Dropped.Names contains %q under no-metadata scenario: %+v", "beads", r.Dropped.Names)
+		}
+	}
+	if got := fake.dropCallsFor("beads"); got > 0 {
+		t.Fatalf("DropDatabase was called %d time(s) for %q under no-metadata scenario", got, "beads")
+	}
+	if !containsString(r.Dropped.Names, "testdb_xyz") {
+		t.Errorf("expected stale fixture testdb_xyz in Dropped.Names; got %v", r.Dropped.Names)
 	}
 }
 

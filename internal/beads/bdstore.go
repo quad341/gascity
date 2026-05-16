@@ -29,14 +29,30 @@ type CommandRunner func(dir, name string, args ...string) ([]byte, error)
 var (
 	bdCommandTimeout = 120 * time.Second
 	// bdReadCommandTimeout bounds bd read-only subcommands (count, list,
-	// ready, show, stats). Default matches bdCommandTimeout to preserve
-	// pre-bounded behavior; lowered in follow-up work after slow read
+	// ready, show, stats, dep list). Default matches bdCommandTimeout to
+	// preserve pre-bounded behavior; lowered in follow-up work after slow read
 	// paths are identified.
 	bdReadCommandTimeout = 120 * time.Second
 	// bdSlowTelemetryThreshold is fixed in production via telemetry.BDSlowThreshold:
 	// high enough to avoid normal bd list calls, but below the wrapper timeout.
 	bdSlowTelemetryThreshold = telemetry.BDSlowThreshold
+	bdRetryReadTimeout       = 60 * time.Second
 )
+
+const (
+	bdRetryReasonDeadlineExceeded = "deadline-exceeded"
+	bdRetryReasonSQLDeadlock      = "sql-deadlock"
+	bdRetryReasonSQLLockWait      = "sql-lock-wait-timeout"
+	bdRetryAttemptNumber          = 2
+)
+
+var bdRetryableReadCommands = map[string]bool{
+	"list":  true,
+	"show":  true,
+	"ready": true,
+	"stats": true,
+	"dep":   true,
+}
 
 // ExecCommandRunner returns a CommandRunner that uses os/exec to run commands.
 // Captures stdout for parsing and stderr for error diagnostics.
@@ -70,60 +86,183 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		}
 		trace("start", nil)
 		timeout := bdCommandTimeoutFor(name, args)
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-		var slowTimer *time.Timer
-		if name == "bd" {
-			bdArgs := append([]string(nil), args...)
-			agentID := bdTelemetryAgentID(env)
-			slowTimer = time.AfterFunc(bdSlowTelemetryThreshold, func() {
-				telemetry.RecordBDSlow(ctx, bdArgs, dir, agentID)
+		first := runCommandAttempt(dir, name, args, env, timeout)
+		recordBDCall(name, args, first)
+
+		if reason := bdRetryReason(name, args, first); reason != "" {
+			trace("retry", first.err)
+			telemetry.RecordBDRetry(context.Background(),
+				args, dir, reason, bdRetryAttemptNumber, bdRetryReadTimeout, bdTelemetryAgentID(env))
+			second := runCommandAttempt(dir, name, args, env, bdRetryReadTimeout)
+			recordBDCall(name, args, second)
+			return finishCommandAttempt(name, args, second, trace, &bdRetryContext{
+				initialBudget: timeout,
+				retryBudget:   bdRetryReadTimeout,
 			})
-			defer slowTimer.Stop()
 		}
-		cmd := exec.CommandContext(ctx, name, args...)
-		cmd.WaitDelay = 2 * time.Second
-		prepareCommandForTimeout(cmd)
-		cmd.Dir = dir
-		cmd.Cancel = func() error {
-			return killCommandTree(cmd)
-		}
-		if len(env) > 0 {
-			cmd.Env = mergeEnv(os.Environ(), env)
-		}
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
-		if name == "bd" {
-			telemetry.RecordBDCall(context.Background(),
-				args, float64(time.Since(start).Milliseconds()),
-				err, out, stderr.String())
-		}
-		if ctx.Err() == context.DeadlineExceeded {
-			timeoutErr := fmt.Errorf("timed out after %s", timeout)
-			trace("timeout", timeoutErr)
-			if stderr.Len() > 0 {
-				return out, fmt.Errorf("%w: %s", timeoutErr, stderr.String())
-			}
-			return out, timeoutErr
-		}
-		if err != nil {
-			// bd writes structured errors to stdout (JSON envelope) when
-			// invoked with --json, while stderr is often empty. Surface
-			// whichever stream has content so supervisor logs become
-			// actionable instead of bare "exit status 1".
-			detail := strings.TrimSpace(stderr.String())
-			if detail == "" && name == "bd" {
-				detail = bdStdoutErrorDetail(out)
-			}
-			if detail != "" {
-				trace("error", err)
-				return out, fmt.Errorf("%w: %s", err, detail)
-			}
-		}
-		trace("done", err)
-		return out, err
+
+		return finishCommandAttempt(name, args, first, trace, nil)
 	}
+}
+
+type commandAttemptResult struct {
+	out              []byte
+	err              error
+	stderr           string
+	timeout          time.Duration
+	duration         time.Duration
+	deadlineExceeded bool
+}
+
+type bdRetryContext struct {
+	initialBudget time.Duration
+	retryBudget   time.Duration
+}
+
+type commandTraceFunc func(status string, err error)
+
+func runCommandAttempt(dir, name string, args []string, env map[string]string, timeout time.Duration) commandAttemptResult {
+	attemptStart := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var slowTimer *time.Timer
+	if name == "bd" {
+		bdArgs := append([]string(nil), args...)
+		agentID := bdTelemetryAgentID(env)
+		slowTimer = time.AfterFunc(bdSlowTelemetryThreshold, func() {
+			telemetry.RecordBDSlow(ctx, bdArgs, dir, agentID)
+		})
+		defer slowTimer.Stop()
+	}
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = 2 * time.Second
+	prepareCommandForTimeout(cmd)
+	cmd.Dir = dir
+	cmd.Cancel = func() error {
+		return killCommandTree(cmd)
+	}
+	if len(env) > 0 {
+		cmd.Env = mergeEnv(os.Environ(), env)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	return commandAttemptResult{
+		out:              out,
+		err:              err,
+		stderr:           stderr.String(),
+		timeout:          timeout,
+		duration:         time.Since(attemptStart),
+		deadlineExceeded: ctx.Err() == context.DeadlineExceeded,
+	}
+}
+
+func recordBDCall(name string, args []string, result commandAttemptResult) {
+	if name != "bd" {
+		return
+	}
+	telemetry.RecordBDCall(context.Background(),
+		args, float64(result.duration.Milliseconds()),
+		result.err, result.out, result.stderr)
+}
+
+func finishCommandAttempt(name string, args []string, result commandAttemptResult, trace commandTraceFunc, retry *bdRetryContext) ([]byte, error) {
+	if result.deadlineExceeded {
+		var timeoutErr error
+		switch {
+		case retry != nil:
+			timeoutErr = bdRetriedTimeoutError(args, retry.initialBudget, retry.retryBudget)
+		case name == "bd":
+			timeoutErr = bdNoRetryTimeoutError(args, result.timeout)
+		default:
+			timeoutErr = fmt.Errorf("timed out after %s", result.timeout)
+		}
+		trace("timeout", timeoutErr)
+		if strings.TrimSpace(result.stderr) != "" {
+			return result.out, fmt.Errorf("%w: %s", timeoutErr, result.stderr)
+		}
+		return result.out, timeoutErr
+	}
+	if result.err != nil {
+		// bd writes structured errors to stdout (JSON envelope) when
+		// invoked with --json, while stderr is often empty. Surface
+		// whichever stream has content so supervisor logs become
+		// actionable instead of bare "exit status 1".
+		detail := strings.TrimSpace(result.stderr)
+		if detail == "" && name == "bd" {
+			detail = bdStdoutErrorDetail(result.out)
+		}
+		if detail != "" {
+			trace("error", result.err)
+			return result.out, fmt.Errorf("%w: %s", result.err, detail)
+		}
+	}
+	trace("done", result.err)
+	return result.out, result.err
+}
+
+func isRetryableRead(args []string) bool {
+	if len(args) == 0 || !bdRetryableReadCommands[args[0]] {
+		return false
+	}
+	if args[0] == "dep" {
+		return len(args) >= 2 && args[1] == "list"
+	}
+	return true
+}
+
+func bdRetryReason(name string, args []string, result commandAttemptResult) string {
+	if name != "bd" || !isRetryableRead(args) {
+		return ""
+	}
+	if result.deadlineExceeded {
+		return bdRetryReasonDeadlineExceeded
+	}
+	if !isExitStatusError(result.err) {
+		return ""
+	}
+	return transientSQLRetryReason(result.stderr)
+}
+
+func isExitStatusError(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr)
+}
+
+func transientSQLRetryReason(stderr string) string {
+	lower := strings.ToLower(stderr)
+	switch {
+	case strings.Contains(lower, "error 1213"):
+		return bdRetryReasonSQLDeadlock
+	case strings.Contains(lower, "error 1205"):
+		return bdRetryReasonSQLLockWait
+	default:
+		return ""
+	}
+}
+
+func bdNoRetryTimeoutError(args []string, timeout time.Duration) error {
+	return fmt.Errorf(
+		"bd %s timed out: deadline exceeded after %s. "+
+			"This was a write operation; no automatic retry was attempted. "+
+			"args=%q",
+		bdSubcommand(args), timeout, args)
+}
+
+func bdRetriedTimeoutError(args []string, initialBudget, retryBudget time.Duration) error {
+	return fmt.Errorf(
+		"bd %s timed out: deadline exceeded after %s, retried with "+
+			"%s budget, retry also exceeded. Total elapsed: %s. "+
+			"args=%q",
+		bdSubcommand(args), initialBudget, retryBudget, initialBudget+retryBudget, args)
+}
+
+func bdSubcommand(args []string) string {
+	if len(args) == 0 {
+		return "<none>"
+	}
+	return args[0]
 }
 
 func bdTelemetryAgentID(env map[string]string) string {
@@ -147,6 +286,11 @@ func bdCommandTimeoutFor(name string, args []string) time.Duration {
 	switch args[0] {
 	case "count", "list", "ready", "show", "stats":
 		return bdReadCommandTimeout
+	case "dep":
+		if len(args) >= 2 && args[1] == "list" {
+			return bdReadCommandTimeout
+		}
+		return bdCommandTimeout
 	default:
 		return bdCommandTimeout
 	}

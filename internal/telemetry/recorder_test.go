@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	otellog "go.opentelemetry.io/otel/log"
 	otellogglobal "go.opentelemetry.io/otel/log/global"
@@ -249,6 +250,43 @@ func TestRecordBDSlowEmitsSanitizedWarnEvent(t *testing.T) {
 	}
 	if got := attrs["timestamp"].AsString(); got == "" {
 		t.Fatal("bd.slow timestamp is empty")
+	}
+}
+
+func TestRecordBDRetryEmitsSanitizedWarnEvent(t *testing.T) {
+	resetInstruments(t)
+	exp := installRecordingLogExporter(t)
+
+	RecordBDRetry(context.Background(), []string{"list", "--token", "sk-secret"}, "/tmp/city", "sql-deadlock", 2, 60*time.Second, "test-agent-1")
+
+	rec := exp.recordByBody("bd.retry")
+	if rec == nil {
+		t.Fatal("RecordBDRetry did not emit bd.retry")
+	}
+	if got := rec.Severity(); got != otellog.SeverityWarn {
+		t.Fatalf("bd.retry severity = %v, want WARN", got)
+	}
+	attrs := recordAttrs(*rec)
+	if got := logValueStringSlice(attrs["args"]); !reflect.DeepEqual(got, []string{"list", "--token", "<redacted>"}) {
+		t.Fatalf("bd.retry args = %#v, want token redacted", got)
+	}
+	if got := attrs["dir"].AsString(); got != "/tmp/city" {
+		t.Fatalf("bd.retry dir = %q, want /tmp/city", got)
+	}
+	if got := attrs["reason"].AsString(); got != "sql-deadlock" {
+		t.Fatalf("bd.retry reason = %q, want sql-deadlock", got)
+	}
+	if got := attrs["attempt"].AsInt64(); got != 2 {
+		t.Fatalf("bd.retry attempt = %d, want 2", got)
+	}
+	if got := attrs["budget_ms"].AsInt64(); got != int64(60*time.Second/time.Millisecond) {
+		t.Fatalf("bd.retry budget_ms = %d, want 60000", got)
+	}
+	if got := attrs["agent_id"].AsString(); got != "test-agent-1" {
+		t.Fatalf("bd.retry agent_id = %q, want test-agent-1", got)
+	}
+	if got := attrs["timestamp"].AsString(); got == "" {
+		t.Fatal("bd.retry timestamp is empty")
 	}
 }
 

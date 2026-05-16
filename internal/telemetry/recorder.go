@@ -39,6 +39,17 @@ type BDSlowEvent struct {
 	Threshold int64     `json:"threshold_ms"`
 }
 
+// BDRetryEvent describes the structured fields emitted with bd.retry telemetry.
+type BDRetryEvent struct {
+	Timestamp time.Time `json:"timestamp"`
+	Args      []string  `json:"args"`
+	Dir       string    `json:"dir"`
+	Reason    string    `json:"reason"`
+	Attempt   int       `json:"attempt"`
+	BudgetMs  int64     `json:"budget_ms"`
+	AgentID   string    `json:"agent_id,omitempty"`
+}
+
 // recorderInstruments holds all lazy-initialized OTel metric instruments.
 type recorderInstruments struct {
 	// Counters — Phase 1 (11)
@@ -500,6 +511,31 @@ func RecordBDSlow(ctx context.Context, args []string, dir, agentID string) {
 		kvs = append(kvs, otellog.String("agent_id", event.AgentID))
 	}
 	emit(ctx, "bd.slow", otellog.SeverityWarn, kvs...)
+}
+
+// RecordBDRetry records a bounded automatic retry of an idempotent bd read.
+func RecordBDRetry(ctx context.Context, args []string, dir, reason string, attempt int, budget time.Duration, agentID string) {
+	event := BDRetryEvent{
+		Timestamp: time.Now().UTC(),
+		Args:      sanitizeBDArgs(args),
+		Dir:       strings.TrimSpace(dir),
+		Reason:    strings.TrimSpace(reason),
+		Attempt:   attempt,
+		BudgetMs:  budget.Milliseconds(),
+		AgentID:   strings.TrimSpace(agentID),
+	}
+	kvs := []otellog.KeyValue{
+		otellog.String("timestamp", event.Timestamp.Format(time.RFC3339Nano)),
+		logStringSlice("args", event.Args),
+		otellog.String("dir", event.Dir),
+		otellog.String("reason", event.Reason),
+		otellog.Int("attempt", event.Attempt),
+		otellog.Int64("budget_ms", event.BudgetMs),
+	}
+	if event.AgentID != "" {
+		kvs = append(kvs, otellog.String("agent_id", event.AgentID))
+	}
+	emit(ctx, "bd.retry", otellog.SeverityWarn, kvs...)
 }
 
 // ── Phase 2 recording functions ──────────────────────────────────────────

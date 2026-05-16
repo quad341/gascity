@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -47,11 +48,271 @@ func TestBDCommandTimeoutForReadCommands(t *testing.T) {
 	if got := bdCommandTimeoutFor("bd", []string{"ready", "--json"}); got != bdReadCommandTimeout {
 		t.Fatalf("bd ready timeout = %s, want %s", got, bdReadCommandTimeout)
 	}
+	if got := bdCommandTimeoutFor("bd", []string{"dep", "list", "gc-1"}); got != bdReadCommandTimeout {
+		t.Fatalf("bd dep list timeout = %s, want %s", got, bdReadCommandTimeout)
+	}
+	if got := bdCommandTimeoutFor("bd", []string{"dep", "add", "gc-1", "gc-2"}); got != bdCommandTimeout {
+		t.Fatalf("bd dep add timeout = %s, want %s", got, bdCommandTimeout)
+	}
 	if got := bdCommandTimeoutFor("bd", []string{"update", "gc-1", "--status", "open"}); got != bdCommandTimeout {
 		t.Fatalf("bd update timeout = %s, want %s", got, bdCommandTimeout)
 	}
 	if got := bdCommandTimeoutFor("git", []string{"status"}); got != bdCommandTimeout {
 		t.Fatalf("non-bd timeout = %s, want %s", got, bdCommandTimeout)
+	}
+}
+
+func TestIsRetryableReadAllowList(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "list", args: []string{"list"}, want: true},
+		{name: "show", args: []string{"show", "gc-1"}, want: true},
+		{name: "ready", args: []string{"ready"}, want: true},
+		{name: "stats", args: []string{"stats"}, want: true},
+		{name: "dep list", args: []string{"dep", "list", "gc-1"}, want: true},
+		{name: "dep add", args: []string{"dep", "add", "gc-1", "gc-2"}, want: false},
+		{name: "update", args: []string{"update", "gc-1"}, want: false},
+		{name: "count not retryable", args: []string{"count"}, want: false},
+		{name: "empty", args: nil, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRetryableRead(tt.args); got != tt.want {
+				t.Fatalf("isRetryableRead(%#v) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExecCommandRunnerRetriesReadTimeoutOnce(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+
+	oldReadTimeout := bdReadCommandTimeout
+	oldRetryTimeout := bdRetryReadTimeout
+	bdReadCommandTimeout = 50 * time.Millisecond
+	bdRetryReadTimeout = time.Second
+	t.Cleanup(func() {
+		bdReadCommandTimeout = oldReadTimeout
+		bdRetryReadTimeout = oldRetryTimeout
+	})
+
+	binDir := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "attempts")
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+count=0
+if [ -f "$BD_ATTEMPTS_FILE" ]; then
+	count=$(cat "$BD_ATTEMPTS_FILE")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$BD_ATTEMPTS_FILE"
+if [ "$count" -eq 1 ]; then
+	sleep 1
+fi
+printf 'ok\n'
+`)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_ATTEMPTS_FILE", statePath)
+
+	out, err := ExecCommandRunner()(t.TempDir(), "bd", "list")
+	if err != nil {
+		t.Fatalf("ExecCommandRunner bd list: %v", err)
+	}
+	if got := string(out); got != "ok\n" {
+		t.Fatalf("stdout = %q, want ok", got)
+	}
+	if got := readAttemptCount(t, statePath); got != 2 {
+		t.Fatalf("attempts = %d, want 2", got)
+	}
+}
+
+func TestExecCommandRunnerDoesNotRetryWriteTimeout(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+
+	oldTimeout := bdCommandTimeout
+	bdCommandTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { bdCommandTimeout = oldTimeout })
+
+	binDir := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "attempts")
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+count=0
+if [ -f "$BD_ATTEMPTS_FILE" ]; then
+	count=$(cat "$BD_ATTEMPTS_FILE")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$BD_ATTEMPTS_FILE"
+sleep 1
+`)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_ATTEMPTS_FILE", statePath)
+
+	_, err := ExecCommandRunner()(t.TempDir(), "bd", "update", "gc-1")
+	if err == nil {
+		t.Fatal("ExecCommandRunner unexpectedly succeeded")
+	}
+	if got := err.Error(); !strings.Contains(got, "bd update timed out: deadline exceeded after 50ms") ||
+		!strings.Contains(got, "This was a write operation; no automatic retry was attempted") ||
+		!strings.Contains(got, `args=["update" "gc-1"]`) {
+		t.Fatalf("error = %q, want no-retry timeout detail", got)
+	}
+	if got := readAttemptCount(t, statePath); got != 1 {
+		t.Fatalf("attempts = %d, want 1", got)
+	}
+}
+
+func TestExecCommandRunnerRetriedReadTimeoutFailureMessage(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+
+	oldReadTimeout := bdReadCommandTimeout
+	oldRetryTimeout := bdRetryReadTimeout
+	bdReadCommandTimeout = 40 * time.Millisecond
+	bdRetryReadTimeout = 60 * time.Millisecond
+	t.Cleanup(func() {
+		bdReadCommandTimeout = oldReadTimeout
+		bdRetryReadTimeout = oldRetryTimeout
+	})
+
+	binDir := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "attempts")
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+count=0
+if [ -f "$BD_ATTEMPTS_FILE" ]; then
+	count=$(cat "$BD_ATTEMPTS_FILE")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$BD_ATTEMPTS_FILE"
+sleep 1
+`)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_ATTEMPTS_FILE", statePath)
+
+	_, err := ExecCommandRunner()(t.TempDir(), "bd", "list")
+	if err == nil {
+		t.Fatal("ExecCommandRunner unexpectedly succeeded")
+	}
+	if got := err.Error(); !strings.Contains(got, "bd list timed out: deadline exceeded after 40ms, retried with 60ms budget, retry also exceeded") ||
+		!strings.Contains(got, "Total elapsed: 100ms") ||
+		!strings.Contains(got, `args=["list"]`) {
+		t.Fatalf("error = %q, want retried timeout detail", got)
+	}
+	if got := readAttemptCount(t, statePath); got != 2 {
+		t.Fatalf("attempts = %d, want 2", got)
+	}
+}
+
+func TestExecCommandRunnerRetriesTransientSQLErrorsOnReads(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+
+	tests := []struct {
+		name       string
+		stderr     string
+		wantReason string
+	}{
+		{
+			name:       "deadlock",
+			stderr:     "ERROR 1213 (40001): Deadlock found when trying to get lock",
+			wantReason: "sql-deadlock",
+		},
+		{
+			name:       "lock wait timeout",
+			stderr:     "ERROR 1205 (HY000): Lock wait timeout exceeded",
+			wantReason: "sql-lock-wait-timeout",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exp := installBeadsRecordingLogExporter(t)
+			binDir := t.TempDir()
+			statePath := filepath.Join(t.TempDir(), "attempts")
+			writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+count=0
+if [ -f "$BD_ATTEMPTS_FILE" ]; then
+	count=$(cat "$BD_ATTEMPTS_FILE")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$BD_ATTEMPTS_FILE"
+if [ "$count" -eq 1 ]; then
+	printf '%s\n' "$BD_TRANSIENT_STDERR" >&2
+	exit 1
+fi
+printf 'ok\n'
+`)
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("BD_ATTEMPTS_FILE", statePath)
+			t.Setenv("BD_TRANSIENT_STDERR", tt.stderr)
+			t.Setenv("GC_ALIAS", "test-agent-1")
+
+			out, err := ExecCommandRunner()(t.TempDir(), "bd", "list", "--token", "sk-secret")
+			if err != nil {
+				t.Fatalf("ExecCommandRunner bd list: %v", err)
+			}
+			if got := string(out); got != "ok\n" {
+				t.Fatalf("stdout = %q, want ok", got)
+			}
+			if got := readAttemptCount(t, statePath); got != 2 {
+				t.Fatalf("attempts = %d, want 2", got)
+			}
+			rec := exp.recordByBody("bd.retry")
+			if rec == nil {
+				t.Fatal("bd.retry was not emitted")
+			}
+			attrs := beadsRecordAttrs(*rec)
+			if got := attrs["reason"].AsString(); got != tt.wantReason {
+				t.Fatalf("bd.retry reason = %q, want %q", got, tt.wantReason)
+			}
+			if got := attrs["agent_id"].AsString(); got != "test-agent-1" {
+				t.Fatalf("bd.retry agent_id = %q, want test-agent-1", got)
+			}
+			if got := beadsLogValueStringSlice(attrs["args"]); strings.Join(got, " ") != "list --token <redacted>" {
+				t.Fatalf("bd.retry args = %#v, want token redacted", got)
+			}
+		})
+	}
+}
+
+func TestExecCommandRunnerDoesNotRetryTransientSQLErrorOnWrites(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+
+	exp := installBeadsRecordingLogExporter(t)
+	binDir := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "attempts")
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+count=0
+if [ -f "$BD_ATTEMPTS_FILE" ]; then
+	count=$(cat "$BD_ATTEMPTS_FILE")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$BD_ATTEMPTS_FILE"
+printf 'ERROR 1213 (40001): Deadlock found\n' >&2
+exit 1
+`)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_ATTEMPTS_FILE", statePath)
+
+	_, err := ExecCommandRunner()(t.TempDir(), "bd", "update", "gc-1")
+	if err == nil {
+		t.Fatal("ExecCommandRunner unexpectedly succeeded")
+	}
+	if got := readAttemptCount(t, statePath); got != 1 {
+		t.Fatalf("attempts = %d, want 1", got)
+	}
+	if got := exp.countByBody("bd.retry"); got != 0 {
+		t.Fatalf("bd.retry records = %d, want 0", got)
 	}
 }
 
@@ -195,6 +456,19 @@ func writeExecutable(t *testing.T, path, body string) {
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatalf("write executable %s: %v", path, err)
 	}
+}
+
+func readAttemptCount(t *testing.T, path string) int {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read attempts file: %v", err)
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("parse attempts file %q: %v", raw, err)
+	}
+	return count
 }
 
 type beadsRecordingLogExporter struct {

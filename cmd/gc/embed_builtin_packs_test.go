@@ -105,6 +105,78 @@ func TestMaterializeBuiltinPacks(t *testing.T) {
 	}
 }
 
+// TestNoBashCleanupDestructiveLogic enforces FR-09 of ga-nw4z6:
+// after slice 3 lands, the dolt-pack cleanup shim contains no
+// classification, deletion, or filesystem logic - only argv
+// translation and `exec gc dolt-cleanup`. Any regression that
+// reintroduces destructive logic into the bash side fails CI.
+func TestNoBashCleanupDestructiveLogic(t *testing.T) {
+	dir := t.TempDir()
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+	script := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "cleanup", "run.sh")
+	data, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatalf("read %s: %v", script, err)
+	}
+	body := string(data)
+
+	// Whole-file size cap. The forwarder is ~27 lines; allow some
+	// wiggle room (50 lines, ~2 KB) so future innocuous comments
+	// don't fail CI. Anything larger means classification logic
+	// has snuck back in.
+	if len(data) > 2048 {
+		t.Errorf("cleanup run.sh is %d bytes; forwarder should be <= 2048", len(data))
+	}
+	if lines := strings.Count(body, "\n"); lines > 50 {
+		t.Errorf("cleanup run.sh is %d lines; forwarder should be <= 50", lines)
+	}
+
+	// Denylisted substrings. Each is a fingerprint of destructive or
+	// classification logic that MUST NOT be present.
+	denied := []struct {
+		substr string
+		reason string
+	}{
+		{"rm -rf", "filesystem removal forbidden in bash; Go runner uses SQL DROP"},
+		{"rm -f", "filesystem removal forbidden in bash"},
+		{"DROP DATABASE", "SQL DROP forbidden in bash; Go runner owns deletion"},
+		{"SHOW DATABASES", "classification query forbidden in bash; Go runner enumerates"},
+		{"mysql ", "no MySQL client invocation; Go runner uses go-sql-driver"},
+		{"dolt sql", "no dolt sql invocation; Go runner connects directly"},
+		{"information_schema", "classification depends on Go-side filter; bash MUST NOT classify"},
+		{"testdb_", "name-pattern matching forbidden; Go runner owns the prefix list"},
+		{"metadata.json", "rig discovery forbidden in bash; Go runner loads cfg.Rigs"},
+		{"find ", "filesystem traversal forbidden in bash"},
+	}
+	for _, d := range denied {
+		if strings.Contains(body, d.substr) {
+			t.Errorf("cleanup run.sh contains %q: %s", d.substr, d.reason)
+		}
+	}
+
+	// Mandatory substrings. The forwarder MUST contain these to be
+	// recognizable as a thin shim over the Go runner.
+	required := []string{
+		"exec gc dolt-cleanup",
+		"--max-orphan-dbs",
+		"gc dolt cleanup: --server-down-ok is no longer supported",
+		"GC_CLEANUP_JSON",
+	}
+	for _, r := range required {
+		if !strings.Contains(body, r) {
+			t.Errorf("cleanup run.sh missing required substring %q", r)
+		}
+	}
+
+	// Header line: POSIX /bin/sh, not bash.
+	if !strings.HasPrefix(body, "#!/bin/sh\n") {
+		t.Errorf("cleanup run.sh must use POSIX /bin/sh shebang; got %q",
+			strings.SplitN(body, "\n", 2)[0])
+	}
+}
+
 func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 	dir := t.TempDir()
 	if err := MaterializeBuiltinPacks(dir); err != nil {
@@ -127,7 +199,6 @@ func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), maintenanceScratchNeedle, 1},
 		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), maintenanceTempNeedle, 1},
 		{"dolt", filepath.Join("commands", "list", "run.sh"), doltSystemNeedle, 1},
-		{"dolt", filepath.Join("commands", "cleanup", "run.sh"), doltSystemNeedle, 1},
 		{"dolt", filepath.Join("commands", "health", "run.sh"), doltSystemNeedle, 2},
 		{"dolt", filepath.Join("commands", "sync", "run.sh"), doltSystemNeedle, 2},
 		{"dolt", filepath.Join("formulas", "mol-dog-stale-db.toml"), "__gc_probe", 1},

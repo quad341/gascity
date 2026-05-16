@@ -98,8 +98,9 @@ func TestPostgresServerCheck(t *testing.T) {
 			if got, want := result.Message, "server not reachable at 127.0.0.1:55432"; got != want {
 				t.Fatalf("message = %q, want %q", got, want)
 			}
-			if result.FixHint != tc.want {
-				t.Fatalf("fix hint = %q, want %q", result.FixHint, tc.want)
+			want := tc.want + "; expected listener: 127.0.0.1:55432"
+			if result.FixHint != want {
+				t.Fatalf("fix hint = %q, want %q", result.FixHint, want)
 			}
 		})
 	}
@@ -118,7 +119,7 @@ func TestPostgresServerCheck(t *testing.T) {
 		})
 
 		result := NewPostgresServerCheck(cityPath, cfg).Run(&CheckContext{CityPath: cityPath})
-		want := "start PG (e.g. systemctl --user start postgresql, sudo systemctl start postgresql, or docker compose up -d postgres) then re-run gc doctor; or check the cloud provider's console / your VPN if this is a remote host"
+		want := "start PG (e.g. systemctl --user start postgresql, sudo systemctl start postgresql, or docker compose up -d postgres) then re-run gc doctor; expected listener: db.example.com:5432; or check the cloud provider's console / your VPN if this is a remote host"
 		if result.FixHint != want {
 			t.Fatalf("fix hint = %q, want %q", result.FixHint, want)
 		}
@@ -169,7 +170,7 @@ func TestPostgresServerCheck(t *testing.T) {
 		}
 	})
 
-	t.Run("Scope_MetadataEmpty_RaisesError", func(t *testing.T) {
+	t.Run("Scope_InvalidMetadata_IsSkippedLikeAuthCheck", func(t *testing.T) {
 		withPostgresServerDialResults(t, nil)
 		withSystemdUserLinger(t, "linux", true, true, nil)
 		cityPath, cfg := newPostgresServerCity(t, postgresServerScopeSpec{
@@ -181,15 +182,17 @@ func TestPostgresServerCheck(t *testing.T) {
 		})
 
 		result := NewPostgresServerCheck(cityPath, cfg).Run(&CheckContext{CityPath: cityPath, Verbose: true})
-		if result.Status != StatusError {
-			t.Fatalf("status = %v, want Error; result = %+v", result.Status, result)
+		if result.Status != StatusOK {
+			t.Fatalf("status = %v, want OK; result = %+v", result.Status, result)
 		}
-		if got, want := result.Message, "metadata missing postgres host/port; cannot probe"; got != want {
+		if got, want := result.Message, "no postgres-backed scopes"; got != want {
 			t.Fatalf("message = %q, want %q", got, want)
 		}
-		wantDetails := []string{"✗ rigs/frontend (:5432) — metadata missing postgres host/port; cannot probe"}
-		if !reflect.DeepEqual(result.Details, wantDetails) {
-			t.Fatalf("details = %#v, want %#v", result.Details, wantDetails)
+		if len(result.Details) != 0 {
+			t.Fatalf("details = %#v, want empty", result.Details)
+		}
+		if HasPostgresBackedScope(cityPath, cfg) {
+			t.Fatal("HasPostgresBackedScope() = true, want false for invalid postgres metadata")
 		}
 	})
 
@@ -295,7 +298,7 @@ func TestPostgresServerCheck_Linger(t *testing.T) {
 		if result.Status != StatusError {
 			t.Fatalf("status = %v, want Error; result = %+v", result.Status, result)
 		}
-		want := postgresServerLingerAmendment + " ; start PG (e.g. systemctl --user start postgresql, sudo systemctl start postgresql, or docker compose up -d postgres) then re-run gc doctor"
+		want := postgresServerLingerAmendment + " ; start PG (e.g. systemctl --user start postgresql, sudo systemctl start postgresql, or docker compose up -d postgres) then re-run gc doctor; expected listener: 127.0.0.1:5432"
 		if result.FixHint != want {
 			t.Fatalf("fix hint = %q, want %q", result.FixHint, want)
 		}
@@ -331,6 +334,7 @@ func TestPostgresServerFixHint(t *testing.T) {
 				for _, port := range []string{"5432", "6543"} {
 					t.Run(fmt.Sprintf("%s_linger_%t_host_%s_port_%s", goos, lingerNeeded, host, port), func(t *testing.T) {
 						want := base[goos]
+						want += "; expected listener: " + net.JoinHostPort(host, port)
 						if host == "db.example.com" {
 							want += "; or check the cloud provider's console / your VPN if this is a remote host"
 						}

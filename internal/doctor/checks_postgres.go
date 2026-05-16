@@ -2,7 +2,6 @@ package doctor
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 const (
@@ -131,15 +131,8 @@ func postgresBackedScopes(cityPath string, cfg *config.City) []postgresServerSco
 }
 
 func loadPostgresServerMetadata(scopeRoot string) (contract.MetadataState, bool) {
-	data, err := os.ReadFile(filepath.Join(scopeRoot, ".beads", "metadata.json"))
-	if err != nil {
-		return contract.MetadataState{}, false
-	}
-	var meta contract.MetadataState
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return contract.MetadataState{}, false
-	}
-	if strings.TrimSpace(meta.Backend) != "postgres" {
+	meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	if err != nil || !ok || meta.Backend != "postgres" {
 		return contract.MetadataState{}, false
 	}
 	return meta, true
@@ -349,7 +342,6 @@ func postgresServerLoopbackHost(host string) bool {
 // postgresServerFixHint returns the operator-facing FixHint for the
 // postgres-server check.
 func postgresServerFixHint(host, port, goos string, lingerNeeded bool) string {
-	_ = port
 	var base string
 	switch goos {
 	case "linux":
@@ -360,6 +352,9 @@ func postgresServerFixHint(host, port, goos string, lingerNeeded bool) string {
 		base = "start the PostgreSQL service (services.msc → PostgreSQL → Start, or pg_ctl start -D <data-dir>) then re-run gc doctor"
 	default:
 		base = "gc does not manage external PostgreSQL servers; start it via your OS supervisor or container runtime, then re-run gc doctor"
+	}
+	if host != "" && port != "" {
+		base += "; expected listener: " + net.JoinHostPort(host, port)
 	}
 	if host != "" && !postgresServerLoopbackHost(host) {
 		base += "; or check the cloud provider's console / your VPN if this is a remote host"

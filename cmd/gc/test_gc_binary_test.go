@@ -15,12 +15,15 @@ var (
 	testGCBinaryErr  error
 )
 
+const gcTestBinaryDirPrefix = "gc-test-binary-pid"
+
 func currentGCBinaryForTests(t *testing.T) string {
 	t.Helper()
 	testGCBinaryOnce.Do(func() {
-		buildDir, err := os.MkdirTemp("", "gc-test-binary-")
-		if err != nil {
-			testGCBinaryErr = fmt.Errorf("mktemp gc binary dir: %w", err)
+		buildDir := filepath.Join(os.TempDir(), fmt.Sprintf("%s%d", gcTestBinaryDirPrefix, os.Getpid()))
+		_ = os.RemoveAll(buildDir)
+		if err := os.MkdirAll(buildDir, 0o755); err != nil {
+			testGCBinaryErr = fmt.Errorf("mkdir gc binary dir: %w", err)
 			return
 		}
 		binPath := filepath.Join(buildDir, "gc")

@@ -166,13 +166,26 @@ func configureFSPressureForTests() {
 	}
 }
 
+const (
+	gasCityTestHomeDirPrefix    = "gascity-gc-home-pid"
+	gasCityTestRuntimeDirPrefix = "gascity-runtime-pid"
+)
+
 func TestMain(m *testing.M) {
-	gcHome, err := os.MkdirTemp("", "gascity-gc-home-*")
-	if err != nil {
+	sweepOrphanPIDPrefixedDirs(os.TempDir(), gcTestBinaryDirPrefix)
+	sweepOrphanPIDPrefixedDirs(os.TempDir(), slingTestFormulaDirPrefix)
+	sweepOrphanPIDPrefixedDirs(os.TempDir(), slingTestCityDirPrefix)
+	sweepOrphanPIDPrefixedDirs(os.TempDir(), gasCityTestHomeDirPrefix)
+	sweepOrphanPIDPrefixedDirs(os.TempDir(), gasCityTestRuntimeDirPrefix)
+
+	gcHome := filepath.Join(os.TempDir(), fmt.Sprintf("%s%d", gasCityTestHomeDirPrefix, os.Getpid()))
+	_ = os.RemoveAll(gcHome)
+	if err := os.MkdirAll(gcHome, 0o755); err != nil {
 		panic(err)
 	}
-	runtimeDir, err := os.MkdirTemp("", "gascity-runtime-*")
-	if err != nil {
+	runtimeDir := filepath.Join(os.TempDir(), fmt.Sprintf("%s%d", gasCityTestRuntimeDirPrefix, os.Getpid()))
+	_ = os.RemoveAll(runtimeDir)
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
 		panic(err)
 	}
 	if err := os.Setenv("GC_HOME", gcHome); err != nil {

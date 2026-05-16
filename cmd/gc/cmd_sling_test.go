@@ -332,9 +332,15 @@ var (
 	sharedTestCityDir    string
 )
 
+const (
+	slingTestFormulaDirPrefix = "gc-sling-test-formulas-pid"
+	slingTestCityDirPrefix    = "gc-sling-test-city-pid"
+)
+
 func init() {
-	dir, err := os.MkdirTemp("", "gc-sling-test-formulas-*")
-	if err != nil {
+	dir := filepath.Join(os.TempDir(), fmt.Sprintf("%s%d", slingTestFormulaDirPrefix, os.Getpid()))
+	_ = os.RemoveAll(dir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		panic(err)
 	}
 	for _, name := range []string{
@@ -349,8 +355,9 @@ func init() {
 	}
 	sharedTestFormulaDir = dir
 
-	cityDir, err := os.MkdirTemp("", "gc-sling-test-city-*")
-	if err != nil {
+	cityDir := filepath.Join(os.TempDir(), fmt.Sprintf("%s%d", slingTestCityDirPrefix, os.Getpid()))
+	_ = os.RemoveAll(cityDir)
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
 		panic(err)
 	}
 	sharedTestCityDir = cityDir

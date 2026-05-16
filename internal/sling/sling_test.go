@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -149,9 +151,23 @@ var (
 	sharedTestCityDir    string
 )
 
+const (
+	slingTestFormulaDirPrefix = "gc-sling-test-formulas-pid"
+	slingTestCityDirPrefix    = "gc-sling-test-city-pid"
+)
+
+func TestMain(m *testing.M) {
+	sweepOrphanInternalSlingDirs()
+	code := m.Run()
+	_ = os.RemoveAll(sharedTestFormulaDir)
+	_ = os.RemoveAll(sharedTestCityDir)
+	os.Exit(code)
+}
+
 func init() {
-	dir, err := os.MkdirTemp("", "gc-sling-test-formulas-*")
-	if err != nil {
+	dir := filepath.Join(os.TempDir(), fmt.Sprintf("%s%d", slingTestFormulaDirPrefix, os.Getpid()))
+	_ = os.RemoveAll(dir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		panic(err)
 	}
 	for _, name := range []string{
@@ -166,11 +182,44 @@ func init() {
 	}
 	sharedTestFormulaDir = dir
 
-	cityDir, err := os.MkdirTemp("", "gc-sling-test-city-*")
-	if err != nil {
+	cityDir := filepath.Join(os.TempDir(), fmt.Sprintf("%s%d", slingTestCityDirPrefix, os.Getpid()))
+	_ = os.RemoveAll(cityDir)
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
 		panic(err)
 	}
 	sharedTestCityDir = cityDir
+}
+
+func sweepOrphanInternalSlingDirs() {
+	root := os.TempDir()
+	for _, prefix := range []string{slingTestFormulaDirPrefix, slingTestCityDirPrefix} {
+		sweepOrphanInternalSlingDirsWithPrefix(root, prefix)
+	}
+}
+
+func sweepOrphanInternalSlingDirsWithPrefix(root, prefix string) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	self := os.Getpid()
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimPrefix(name, prefix))
+		if err != nil || pid <= 0 || pid == self {
+			continue
+		}
+		if pidutil.Alive(pid) {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(root, name))
+	}
 }
 
 // --- Pure helper tests ---

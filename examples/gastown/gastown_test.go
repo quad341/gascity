@@ -3541,6 +3541,24 @@ func TestMaintenanceFormulasExist(t *testing.T) {
 	}
 }
 
+// TestMayorWorkQuerySurfacesEmergencyHookInjection asserts that the Gas Town
+// mayor agent's work_query runs gc emergency list --format hook-injection
+// before the normal bd ready query and that the || true fallback is present
+// so a missing gc binary cannot break session startup.
+func TestMayorWorkQuerySurfacesEmergencyHookInjection(t *testing.T) {
+	path := filepath.Join(exampleDir(), "packs", "gastown", "agents", "mayor", "agent.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading mayor agent.toml: %v", err)
+	}
+	assertContainsInOrder(t, string(data),
+		"work_query",
+		"gc emergency list --format hook-injection --limit 20",
+		"|| true",
+		"bd ready --metadata-field gc.routed_to={{.Agent}}",
+	)
+}
+
 func TestDoltHealthFormulasExist(t *testing.T) {
 	dir := exampleDir()
 	formulaDir := filepath.Join(dir, "..", "dolt", "formulas")

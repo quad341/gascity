@@ -151,6 +151,195 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	}
 }
 
+func TestNewStopCmdRegistersValidateAndKillTimeoutFlags(t *testing.T) {
+	cmd := newStopCmd(io.Discard, io.Discard)
+	if flag := cmd.Flags().Lookup("validate"); flag == nil {
+		t.Fatal("gc stop missing --validate flag")
+	}
+	flag := cmd.Flags().Lookup("kill-timeout")
+	if flag == nil {
+		t.Fatal("gc stop missing --kill-timeout flag")
+	}
+	if got := flag.DefValue; got != "30s" {
+		t.Fatalf("--kill-timeout default = %q, want 30s", got)
+	}
+}
+
+func TestStopOptionsForceReasonMatchesRequestedForce(t *testing.T) {
+	tests := []struct {
+		name string
+		opts stopOptions
+		want string
+	}{
+		{
+			name: "force flag",
+			opts: stopOptions{Force: true, KillTimeout: 30 * time.Second, KillTimeoutSet: true},
+			want: "immediate, --force",
+		},
+		{
+			name: "zero kill timeout",
+			opts: stopOptions{KillTimeout: 0, KillTimeoutSet: true},
+			want: "immediate, --kill-timeout=0",
+		},
+		{
+			name: "both",
+			opts: stopOptions{Force: true, KillTimeout: 0, KillTimeoutSet: true},
+			want: "immediate, --force, --kill-timeout=0",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stopOptionsForceReason(tt.opts); got != tt.want {
+				t.Fatalf("stopOptionsForceReason() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCmdStopValidateRefusesInvalidConfigBeforeSupervisorUnregister(t *testing.T) {
+	resetFlags(t)
+	gcHome := shortSocketTempDir(t, "gc-home-")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := writeStopCityConfig(t, "invalid-stop-city", duplicateAgentCityConfig("invalid-stop-city"))
+	reg := registryAt(t, gcHome)
+	if err := reg.Register(cityDir, "invalid-stop-city"); err != nil {
+		t.Fatal(err)
+	}
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int {
+			t.Fatal("reloadSupervisorHook called despite --validate failure")
+			return 1
+		},
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", true },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	var stdout, stderr lockedBuffer
+	code := cmdStopWithOptions([]string{cityDir}, &stdout, &stderr, stopOptions{
+		WallClockTimeout: time.Second,
+		Validate:         true,
+		KillTimeout:      30 * time.Second,
+		KillTimeoutSet:   true,
+	})
+	if code != 1 {
+		t.Fatalf("cmdStopWithOptions() = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc stop: refusing to stop with invalid configuration") {
+		t.Fatalf("stderr = %q, want strict refusal", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "warning:") {
+		t.Fatalf("stderr = %q, strict validation should not render warnings", stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want no stop output", stdout.String())
+	}
+	if _, registered, err := registeredCityEntry(cityDir); err != nil {
+		t.Fatal(err)
+	} else if !registered {
+		t.Fatal("city was unregistered despite --validate failure")
+	}
+}
+
+func TestCmdStopLenientValidationWarnsAndContinues(t *testing.T) {
+	resetFlags(t)
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := writeStopCityConfig(t, "lenient-stop-city", duplicateAgentCityConfig("lenient-stop-city"))
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+	sessionProviderForStopCity = func(_ *config.City, path string) runtime.Provider {
+		assertSameTestPath(t, path, cityDir)
+		return runtime.NewFake()
+	}
+
+	var stdout, stderr lockedBuffer
+	code := cmdStopWithOptions([]string{cityDir}, &stdout, &stderr, stopOptions{
+		WallClockTimeout: time.Second,
+		KillTimeout:      30 * time.Second,
+		KillTimeoutSet:   true,
+	})
+	if code != 0 {
+		t.Fatalf("cmdStopWithOptions() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "warning:") || !strings.Contains(stderr.String(), "duplicate") {
+		t.Fatalf("stderr = %q, want duplicate-agent warning", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc stop: continuing in lenient mode (--validate to opt into strict validation)") {
+		t.Fatalf("stderr = %q, want lenient continuation hint", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout = %q, want stop success", stdout.String())
+	}
+}
+
+func TestCmdStopKillTimeoutZeroSkipsInterruptGrace(t *testing.T) {
+	resetFlags(t)
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "force-now-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Agents: []config.Agent{
+			{Name: "worker", StartCommand: "sleep 1"},
+		},
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cityDir := writeStopCityConfig(t, "force-now-city", string(data))
+	sessionName := lookupSessionNameOrLegacy(nil, loadedCityName(cfg, cityDir), cfg.Agents[0].QualifiedName(), cfg.Workspace.SessionTemplate)
+
+	sp := newRecordingStopProvider()
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+	sessionProviderForStopCity = func(_ *config.City, path string) runtime.Provider {
+		assertSameTestPath(t, path, cityDir)
+		return sp
+	}
+
+	var stdout, stderr lockedBuffer
+	code := cmdStopWithOptions([]string{cityDir}, &stdout, &stderr, stopOptions{
+		WallClockTimeout: time.Second,
+		KillTimeout:      0,
+		KillTimeoutSet:   true,
+	})
+	if code != 0 {
+		t.Fatalf("cmdStopWithOptions() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	select {
+	case interrupted := <-sp.interrupts:
+		t.Fatalf("interrupted %q with --kill-timeout=0, want immediate stop", interrupted)
+	default:
+	}
+	select {
+	case stopped := <-sp.stops:
+		if stopped != sessionName {
+			t.Fatalf("stopped = %q, want %q", stopped, sessionName)
+		}
+	default:
+		t.Fatal("provider Stop was not called")
+	}
+	if !strings.Contains(stderr.String(), "gc stop: SIGKILL sent (immediate, --kill-timeout=0)") {
+		t.Fatalf("stderr = %q, want immediate force line", stderr.String())
+	}
+}
+
 func TestCmdStopWallClockTimeoutBoundsDirectStop(t *testing.T) {
 	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
 
@@ -697,6 +886,36 @@ func setupInvalidConfigManagedRuntime(t *testing.T) string {
 	}
 
 	return cityDir
+}
+
+func writeStopCityConfig(t *testing.T, name, data string) string {
+	t.Helper()
+
+	cityDir := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cityDir
+}
+
+func duplicateAgentCityConfig(name string) string {
+	return fmt.Sprintf(`[workspace]
+name = %q
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+start_command = "sleep 1"
+
+[[agent]]
+name = "worker"
+start_command = "sleep 1"
+`, name)
 }
 
 func overrideShutdownBeadsProviderForStop(t *testing.T, fn func(string) error) {

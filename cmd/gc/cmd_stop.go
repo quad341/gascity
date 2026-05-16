@@ -20,6 +20,8 @@ import (
 func newStopCmd(stdout, stderr io.Writer) *cobra.Command {
 	var wallClockTimeout time.Duration
 	var force bool
+	var validate bool
+	killTimeout := defaultStopKillTimeout
 	cmd := &cobra.Command{
 		Use:   "stop [path]",
 		Short: "Stop all agent sessions in the city",
@@ -37,7 +39,13 @@ cleanup pass. Use --force to skip the interrupt grace period and go
 straight to kill.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdStop(args, stdout, stderr, wallClockTimeout, force) != 0 {
+			if cmdStopWithOptions(args, stdout, stderr, stopOptions{
+				WallClockTimeout: wallClockTimeout,
+				Force:            force,
+				Validate:         validate,
+				KillTimeout:      killTimeout,
+				KillTimeoutSet:   true,
+			}) != 0 {
 				return errExit
 			}
 			return nil
@@ -45,12 +53,24 @@ straight to kill.`,
 	}
 	cmd.Flags().DurationVar(&wallClockTimeout, "timeout", 0, "wall-clock cap for the stop sequence (0 = derive from city config)")
 	cmd.Flags().BoolVar(&force, "force", false, "skip the interrupt grace period and force-kill all sessions immediately")
+	cmd.Flags().BoolVar(&validate, "validate", false, "strict-validate config before stopping (refuse on errors)")
+	cmd.Flags().DurationVar(&killTimeout, "kill-timeout", defaultStopKillTimeout, "SIGTERM-to-SIGKILL escalation window (0 = force immediately)")
 	return cmd
 }
 
 var sessionProviderForStopCity = newSessionProviderForCity
 
 const sleepReasonCityStop = "city-stop"
+
+const defaultStopKillTimeout = 30 * time.Second
+
+type stopOptions struct {
+	WallClockTimeout time.Duration
+	Force            bool
+	Validate         bool
+	KillTimeout      time.Duration
+	KillTimeoutSet   bool
+}
 
 // cmdStop stops the city by terminating all configured agent sessions.
 // If a path is given, operates there; otherwise uses cwd.
@@ -60,13 +80,36 @@ const sleepReasonCityStop = "city-stop"
 // is used. force=true skips the interrupt grace period (gracefulStopAll
 // runs with timeout=0, going straight to kill).
 func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Duration, force bool) int {
+	return cmdStopWithOptions(args, stdout, stderr, stopOptions{
+		WallClockTimeout: wallClockTimeout,
+		Force:            force,
+	})
+}
+
+func cmdStopWithOptions(args []string, stdout, stderr io.Writer, opts stopOptions) int {
 	cityPath, err := resolveStopCityPath(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stdout, stderr, "gc stop", force); handled {
+	cfg, cfgErr := loadCityConfig(cityPath, stderr)
+	validationErr := validateStopConfig(cfg)
+	if opts.Validate {
+		if cfgErr != nil {
+			writeStrictStopConfigError(cfgErr, stderr)
+			return 1
+		}
+		if validationErr != nil {
+			writeStrictStopConfigError(validationErr, stderr)
+			return 1
+		}
+	} else {
+		writeLenientStopConfigWarnings(stderr, cfgErr, validationErr)
+	}
+
+	forceStop := stopOptionsForceStop(opts)
+	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stdout, stderr, "gc stop", forceStop); handled {
 		if code != 0 {
 			return code
 		}
@@ -74,22 +117,23 @@ func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Dura
 			if !stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath, stderr) {
 				return 1
 			}
-			warnInvalidConfigAfterSuccessfulStop(cityPath, stderr)
+			if cfgErr == nil && validationErr == nil {
+				warnInvalidConfigAfterSuccessfulStop(cityPath, stderr)
+			}
 			fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
 			return 0
 		}
 	}
 
-	cfg, err := loadCityConfig(cityPath, stderr)
-	if err != nil {
-		if handled, code := stopManagedRuntimeWithoutConfig(cityPath, err, stdout, stderr, force); handled {
+	if cfgErr != nil {
+		if handled, code := stopManagedRuntimeWithoutConfig(cityPath, cfgErr, stdout, stderr, forceStop); handled {
 			return code
 		}
-		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc stop: %v\n", cfgErr) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	wallClockCap := wallClockTimeout
+	wallClockCap := opts.WallClockTimeout
 	if wallClockCap <= 0 {
 		wallClockCap = defaultStopWallClockTimeout(cfg)
 	}
@@ -97,7 +141,7 @@ func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Dura
 	type stopOutcome struct{ code int }
 	doneCh := make(chan stopOutcome, 1)
 	go func() {
-		doneCh <- stopOutcome{code: cmdStopBody(cityPath, cfg, force, stdout, stderr)}
+		doneCh <- stopOutcome{code: cmdStopBodyWithOptions(cityPath, cfg, opts, stdout, stderr)}
 	}()
 
 	select {
@@ -107,6 +151,73 @@ func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Dura
 		fmt.Fprintf(stderr, "gc stop: timed out after %s; some sessions may not have stopped — retry with --force if stop is wedged, or raise --timeout for large stop sets\n", wallClockCap) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+}
+
+func validateStopConfig(cfg *config.City) error {
+	if cfg == nil {
+		return nil
+	}
+	if err := config.ValidateAgents(cfg.Agents); err != nil {
+		return fmt.Errorf("validating agents: %w", err)
+	}
+	return nil
+}
+
+func writeStrictStopConfigError(err error, stderr io.Writer) {
+	fmt.Fprintf(stderr, "gc stop: invalid config: %s\n", oneLineError(err))                                     //nolint:errcheck // best-effort stderr
+	fmt.Fprintln(stderr, "gc stop: refusing to stop with invalid configuration; fix or run without --validate") //nolint:errcheck // best-effort stderr
+}
+
+func writeLenientStopConfigWarnings(stderr io.Writer, errs ...error) {
+	wrote := false
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		fmt.Fprintf(stderr, "warning: invalid config: %s\n", oneLineError(err)) //nolint:errcheck // best-effort stderr
+		wrote = true
+	}
+	if wrote {
+		fmt.Fprintln(stderr, "gc stop: continuing in lenient mode (--validate to opt into strict validation)") //nolint:errcheck // best-effort stderr
+	}
+}
+
+func oneLineError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.TrimSpace(err.Error())
+	msg = strings.ReplaceAll(msg, "\r\n", "\n")
+	msg = strings.ReplaceAll(msg, "\r", "\n")
+	return strings.ReplaceAll(msg, "\n", `\n`)
+}
+
+func stopOptionsForceStop(opts stopOptions) bool {
+	return opts.Force || (opts.KillTimeoutSet && opts.KillTimeout == 0)
+}
+
+func stopOptionsForceReason(opts stopOptions) string {
+	switch {
+	case opts.Force && opts.KillTimeoutSet && opts.KillTimeout == 0:
+		return "immediate, --force, --kill-timeout=0"
+	case opts.Force:
+		return "immediate, --force"
+	default:
+		return "immediate, --kill-timeout=0"
+	}
+}
+
+func stopOptionsGraceTimeout(opts stopOptions, cfg *config.City) time.Duration {
+	if stopOptionsForceStop(opts) {
+		return 0
+	}
+	if opts.KillTimeoutSet {
+		return opts.KillTimeout
+	}
+	if cfg == nil {
+		return 0
+	}
+	return cfg.Daemon.ShutdownTimeoutDuration()
 }
 
 func resolveStopCityPath(args []string) (string, error) {
@@ -198,16 +309,16 @@ func ceilDiv(n, d int) int {
 	return (n + d - 1) / d
 }
 
-// cmdStopBody contains the original cmdStop flow, factored out so cmdStop
-// can apply a wall-clock cap by running it in a goroutine.
-func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr io.Writer) int {
+// cmdStopBodyWithOptions contains the main cmdStop flow, factored out so
+// cmdStopWithOptions can apply a wall-clock cap by running it in a goroutine.
+func cmdStopBodyWithOptions(cityPath string, cfg *config.City, opts stopOptions, stdout, stderr io.Writer) int {
 	cityName := loadedCityName(cfg, cityPath)
 
 	store, _ := openCityStoreAt(cityPath)
 	markCityStopSessionSleepReason(store, stderr)
 
 	// If a controller is running, ask it to shut down (it stops agents).
-	if tryStopControllerWithForce(cityPath, stdout, force) {
+	if tryStopControllerWithForce(cityPath, stdout, stopOptionsForceStop(opts)) {
 		if err := waitForStandaloneControllerStop(cityPath, cfg.Daemon.ShutdownTimeoutDuration()+15*time.Second); err != nil {
 			fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -246,10 +357,10 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 		recorder = fr
 	}
 
-	graceTimeout := cfg.Daemon.ShutdownTimeoutDuration()
-	if force {
+	graceTimeout := stopOptionsGraceTimeout(opts, cfg)
+	if stopOptionsForceStop(opts) {
 		// gracefulStopAll treats timeout=0 as "skip interrupt pass, kill immediately".
-		graceTimeout = 0
+		fmt.Fprintf(stderr, "gc stop: SIGKILL sent (%s)\n", stopOptionsForceReason(opts)) //nolint:errcheck // best-effort stderr
 	}
 
 	code := doStop(sessionNames, sp, cfg, store, graceTimeout, recorder, stdout, stderr)

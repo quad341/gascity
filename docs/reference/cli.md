@@ -2832,7 +2832,9 @@ gc stop [path] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--force` | bool |  | skip the interrupt grace period and force-kill all sessions immediately |
+| `--kill-timeout` | duration | `30s` | SIGTERM-to-SIGKILL escalation window (0 = force immediately) |
 | `--timeout` | duration | `0s` | wall-clock cap for the stop sequence (0 = derive from city config) |
+| `--validate` | bool |  | strict-validate config before stopping (refuse on errors) |
 
 ## gc supervisor
 

@@ -77,6 +77,52 @@ func TestDoBeadsPreflightHumanBlocked(t *testing.T) {
 	}
 }
 
+func TestDoBeadsPreflightHumanRepairGuideUsesPriorityAndCategories(t *testing.T) {
+	result := contract.NewPreflightResult(contract.PreflightResult{
+		Verdict: contract.PreflightVerdictBlocked,
+		Scope:   "/city",
+		Checks: []contract.PreflightCheckResult{
+			contract.NewPreflightCheckResult(contract.PreflightCheckMetadataBackend, contract.PreflightCheckWarn, "Metadata backend is postgres (postgres_dsn form)", contract.PreflightDetails{MetadataBackend: "postgres"}),
+			contract.NewPreflightCheckResult(contract.PreflightCheckBDContextAgreement, contract.PreflightCheckFail, "Metadata backend=postgres; bd context reports backend=dolt", contract.PreflightDetails{MetadataBackend: "postgres", BDContextBackend: "dolt"}),
+			contract.NewPreflightCheckResult(contract.PreflightCheckIdentityMatch, contract.PreflightCheckFail, "project_id mismatch", contract.PreflightDetails{MetadataProjectID: "metadata-id", DBProjectID: "database-id"}),
+			contract.NewPreflightCheckResult(contract.PreflightCheckContractShape, contract.PreflightCheckWarn, "postgres_dsn present; Gas City expects split fields", contract.PreflightDetails{HasPostgresDSN: boolPtr(true)}),
+		},
+		RepairSteps: []contract.PreflightRepairStep{
+			{CheckID: contract.PreflightCheckMetadataBackend, Priority: contract.PreflightRepairRecommended, Command: "bd bootstrap"},
+			{CheckID: contract.PreflightCheckBDContextAgreement, Priority: contract.PreflightRepairRecommended, Command: "bd context --json"},
+			{CheckID: contract.PreflightCheckIdentityMatch, Priority: contract.PreflightRepairCritical, Command: "bd doctor --fix"},
+			{CheckID: contract.PreflightCheckContractShape, Priority: contract.PreflightRepairRecommended, Command: "bd bootstrap"},
+		},
+		NativeStoreEligible: false,
+		Fallback:            contract.PreflightFallbackBdStore,
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doBeadsPreflight(beadsPreflightOptions{Scope: "/city"}, func(string) (contract.PreflightResult, error) {
+		return result, nil
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doBeadsPreflight() = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"[critical:identity-mismatch]",
+		"[recommended:metadata-backend]",
+		"[recommended:bd-context-agreement]",
+		"[recommended:contract-shape]",
+		"Run: bd doctor --fix",
+		"Run: bd bootstrap",
+		"Run: bd context --json",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Index(out, "[critical:identity-mismatch]") > strings.Index(out, "[recommended:metadata-backend]") {
+		t.Fatalf("critical identity guidance should be prioritized before recommended metadata guidance:\n%s", out)
+	}
+}
+
 func TestDoBeadsPreflightJSONRedactedDegraded(t *testing.T) {
 	result := contract.PreflightResult{
 		Verdict: contract.PreflightVerdictDegraded,

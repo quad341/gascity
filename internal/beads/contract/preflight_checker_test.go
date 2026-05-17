@@ -148,6 +148,46 @@ func TestPreflightRespectsSkipOverrideAsRecoveryOnly(t *testing.T) {
 	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckFail)
 }
 
+func TestPreflightCurrentGascityDriftBlocksNativeAndGuidesRepair(t *testing.T) {
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "postgres",
+		"postgres_dsn": "postgres://operator:swordfish@db.example.com/gascity",
+		"project_id": "metadata-id"
+	}`), PreflightBDContext{Backend: "dolt", DoltMode: "embedded"}, "database-id")
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	assertPreflightVerdict(t, result, PreflightVerdictBlocked, false)
+	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckWarn)
+	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckFail)
+	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckFail)
+	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckWarn)
+
+	wantRepair := []struct {
+		id       PreflightCheckID
+		priority PreflightRepairPriority
+		command  string
+	}{
+		{PreflightCheckIdentityMatch, PreflightRepairCritical, "bd doctor --fix"},
+		{PreflightCheckMetadataBackend, PreflightRepairRecommended, "bd bootstrap"},
+		{PreflightCheckBDContextAgreement, PreflightRepairRecommended, "bd context --json"},
+		{PreflightCheckContractShape, PreflightRepairRecommended, "bd bootstrap"},
+	}
+	if len(result.RepairSteps) != len(wantRepair) {
+		t.Fatalf("RepairSteps len = %d, want %d: %+v", len(result.RepairSteps), len(wantRepair), result.RepairSteps)
+	}
+	for i, want := range wantRepair {
+		got := result.RepairSteps[i]
+		if got.CheckID != want.id || got.Priority != want.priority || got.Command != want.command {
+			t.Fatalf("RepairSteps[%d] = %+v, want id=%s priority=%s command=%q", i, got, want.id, want.priority, want.command)
+		}
+	}
+}
+
 func TestPreflightWarnsWhenDatabaseIdentityUnavailable(t *testing.T) {
 	scope := "/city"
 	checker := testPreflightChecker(preflightMetadataJSON(`{

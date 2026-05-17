@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -204,15 +205,45 @@ func renderBeadsPreflightRepairGuide(w io.Writer, steps []contract.PreflightRepa
 	if len(steps) == 0 {
 		return
 	}
+	ordered := append([]contract.PreflightRepairStep(nil), steps...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return beadsPreflightRepairPriorityRank(ordered[i].Priority) < beadsPreflightRepairPriorityRank(ordered[j].Priority)
+	})
 	fmt.Fprintln(w, "\n  Repair guide") //nolint:errcheck // best-effort stdout
-	for _, step := range steps {
-		fmt.Fprintf(w, "  [%s:%s]\n", step.Priority, step.CheckID) //nolint:errcheck // best-effort stdout
+	for _, step := range ordered {
+		fmt.Fprintf(w, "  [%s:%s]\n", step.Priority, beadsPreflightRepairCategory(step.CheckID)) //nolint:errcheck // best-effort stdout
 		if strings.TrimSpace(step.Command) != "" {
 			fmt.Fprintf(w, "    Run: %s\n", step.Command) //nolint:errcheck // best-effort stdout
 		}
 		if strings.TrimSpace(step.Note) != "" {
 			fmt.Fprintf(w, "    %s\n", step.Note) //nolint:errcheck // best-effort stdout
 		}
+	}
+}
+
+func beadsPreflightRepairPriorityRank(priority contract.PreflightRepairPriority) int {
+	switch priority {
+	case contract.PreflightRepairCritical:
+		return 0
+	case contract.PreflightRepairRecommended:
+		return 1
+	default:
+		return 2
+	}
+}
+
+func beadsPreflightRepairCategory(id contract.PreflightCheckID) string {
+	switch id {
+	case contract.PreflightCheckMetadataBackend:
+		return "metadata-backend"
+	case contract.PreflightCheckBDContextAgreement:
+		return "bd-context-agreement"
+	case contract.PreflightCheckIdentityMatch:
+		return "identity-mismatch"
+	case contract.PreflightCheckContractShape:
+		return "contract-shape"
+	default:
+		return string(id)
 	}
 }
 

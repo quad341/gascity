@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -257,7 +258,7 @@ func preflightRepairSteps(checks []PreflightCheckResult) []PreflightRepairStep {
 	for _, check := range checks {
 		switch check.ID {
 		case PreflightCheckMetadataBackend:
-			if check.State == PreflightCheckFail {
+			if check.State == PreflightCheckFail || check.State == PreflightCheckWarn {
 				steps = append(steps, PreflightRepairStep{
 					CheckID:  check.ID,
 					Priority: PreflightRepairRecommended,
@@ -294,7 +295,21 @@ func preflightRepairSteps(checks []PreflightCheckResult) []PreflightRepairStep {
 			}
 		}
 	}
+	sort.SliceStable(steps, func(i, j int) bool {
+		return preflightRepairPriorityRank(steps[i].Priority) < preflightRepairPriorityRank(steps[j].Priority)
+	})
 	return steps
+}
+
+func preflightRepairPriorityRank(priority PreflightRepairPriority) int {
+	switch priority {
+	case PreflightRepairCritical:
+		return 0
+	case PreflightRepairRecommended:
+		return 1
+	default:
+		return 2
+	}
 }
 
 func boolPtr(value bool) *bool {

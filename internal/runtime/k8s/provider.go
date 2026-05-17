@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -783,10 +784,11 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 	if l1Present {
 		identityB64 = base64.StdEncoding.EncodeToString(l1Bytes)
 	}
+	identityPathB64 := base64.StdEncoding.EncodeToString([]byte(contract.ProjectIdentityPath(".")))
 
 	patchCmd := fmt.Sprintf(
-		`WD=$(echo '%s' | base64 -d) && cd "$WD" && PATCH=$(echo '%s' | base64 -d) && `+
-			`if [ -n '%s' ]; then echo '%s' | base64 -d > .beads/identity.toml || true; fi && `+
+		`WD=$(echo '%s' | base64 -d) && IDENTITY_PATH=$(echo '%s' | base64 -d) && cd "$WD" && PATCH=$(echo '%s' | base64 -d) && `+
+			`if [ -n '%s' ]; then echo '%s' | base64 -d > "$IDENTITY_PATH" || true; fi && `+
 			`if [ -f .beads/metadata.json ]; then `+
 			`python3 -c "import json,sys; `+
 			`m=json.load(open('.beads/metadata.json')); `+
@@ -800,7 +802,7 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 			`DOLT_HOST=$(echo '%s' | base64 -d) && `+
 			`DOLT_PORT=$(echo '%s' | base64 -d) && `+
 			`yes | BEADS_DIR="$WD/.beads" bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" -p "$PREFIX" --skip-hooks --skip-agents; fi`,
-		storeRootB64, patchB64,
+		storeRootB64, identityPathB64, patchB64,
 		identityB64, identityB64,
 		prefixB64,
 		base64.StdEncoding.EncodeToString([]byte(doltHost)),
@@ -823,13 +825,14 @@ func verifyBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runti
 	if len(projected) == 0 {
 		return nil
 	}
+	identityPath := contract.ProjectIdentityPath(".")
 	_, err = ops.execInPod(ctx, podName, "agent", []string{
 		"sh", "-c",
-		`cd "$1" && test -f .beads/metadata.json && test -f .beads/config.yaml && test -f .beads/identity.toml`,
-		"sh", storeRoot,
+		`cd "$1" && test -f .beads/metadata.json && test -f .beads/config.yaml && test -f "$2"`,
+		"sh", storeRoot, identityPath,
 	}, nil)
 	if err != nil {
-		return fmt.Errorf("canonical .beads files missing or unreadable at %s (need metadata.json, config.yaml, identity.toml): %w", storeRoot, err)
+		return fmt.Errorf("canonical .beads files missing or unreadable at %s (need metadata.json, config.yaml, %s): %w", storeRoot, filepath.Base(identityPath), err)
 	}
 	return nil
 }

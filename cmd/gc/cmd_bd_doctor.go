@@ -27,9 +27,8 @@ var (
 		return contract.ReadProjectIdentity(fsys.OSFS{}, scopeRoot)
 	}
 	bdDoctorDialDoltForScope      = dialDoltForScope
-	bdDoctorReadDatabaseProjectID = func(ctx context.Context, db *sql.DB) (string, bool, error) {
-		return readDatabaseProjectID(ctx, db)
-	}
+	bdDoctorReadDatabaseProjectID = readDatabaseProjectID
+	//nolint:gocritic // Keep an explicit call site for the force-upsert guard.
 	bdDoctorUpsertDatabaseProjectIDForce = func(ctx context.Context, db *sql.DB, newID string) (int64, error) {
 		return upsertDatabaseProjectIDForce(ctx, db, newID)
 	}
@@ -80,7 +79,7 @@ func runReseedIdentity(cityName, rigName string, tail []string, assumeYes, noInp
 		return 1
 	}
 	if !ok {
-		fmt.Fprintf(stderr, "gc bd doctor: L1 identity.toml is absent at %s; nothing to reseed from\n", target.ScopeRoot) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc bd doctor: L1 project identity is absent at %s; nothing to reseed from\n", target.ScopeRoot) //nolint:errcheck
 		return 1
 	}
 

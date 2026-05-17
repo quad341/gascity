@@ -1,3 +1,5 @@
+// Package checks contains doctor checks that can live outside the core doctor
+// package without creating import cycles.
 package checks
 
 import (
@@ -136,6 +138,9 @@ func (c *ProjectIdentityCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult
 // CanFix reports that the check can repair L2 cache drift.
 func (c *ProjectIdentityCheck) CanFix() bool { return true }
 
+// WarmupEligible returns false; this check is not part of the start warm-up scan.
+func (c *ProjectIdentityCheck) WarmupEligible() bool { return false }
+
 // Fix regenerates only the L2 metadata cache from L1 for fixable scopes.
 func (c *ProjectIdentityCheck) Fix(ctx *doctor.CheckContext) error {
 	check := c.withDefaults()
@@ -205,7 +210,7 @@ func classifyProjectIdentity(
 	if !l1OK {
 		switch {
 		case !l2OK && !l3OK:
-			return piOutcome{Class: piMigrationFixable, Message: "scope not yet migrated to identity.toml"}, nil
+			return piOutcome{Class: piMigrationFixable, Message: "scope not yet migrated to project identity"}, nil
 		case l2OK && (!l3OK || l2 == l3):
 			return piOutcome{Class: piMigrationFixable, Message: "L1 absent; will adopt id from L2 on next gc bd run"}, nil
 		case l2OK && l3OK && l2 != l3:

@@ -1469,8 +1469,8 @@ func TestInitBeadsInPod_PatchCmdReferencesIdentityToml(t *testing.T) {
 		t.Fatalf("initBeadsInPod: %v", err)
 	}
 	script := firstShellScript(t, fake)
-	if !strings.Contains(script, ".beads/identity.toml") {
-		t.Fatalf("patch script missing identity.toml:\n%s", script)
+	if !strings.Contains(script, "IDENTITY_PATH=") {
+		t.Fatalf("patch script missing identity path binding:\n%s", script)
 	}
 }
 
@@ -1530,8 +1530,8 @@ func TestVerifyBeadsInPod_RequiresIdentityToml(t *testing.T) {
 		t.Fatalf("verifyBeadsInPod: %v", err)
 	}
 	script := firstShellScript(t, fake)
-	if !strings.Contains(script, "test -f .beads/identity.toml") {
-		t.Fatalf("verify script missing identity.toml check:\n%s", script)
+	if !strings.Contains(script, `test -f "$2"`) {
+		t.Fatalf("verify script missing identity path check:\n%s", script)
 	}
 }
 

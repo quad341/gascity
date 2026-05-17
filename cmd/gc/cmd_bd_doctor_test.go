@@ -110,7 +110,7 @@ func TestBdDoctor_ReseedRefusedWhenL1Absent(t *testing.T) {
 	if exit != 1 {
 		t.Fatalf("exit = %d, want 1; stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "identity.toml is absent") {
+	if !strings.Contains(stderr.String(), "project identity is absent") {
 		t.Fatalf("stderr = %q, want L1 absent message", stderr.String())
 	}
 }

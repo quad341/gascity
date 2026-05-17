@@ -22,11 +22,13 @@ const (
 	systemdRuntimeDir = "/run/systemd/system"
 	systemdLingerDir  = "/var/lib/systemd/linger"
 
-	postgresServerLingerAmendment = "also run `loginctl enable-linger` so PG starts after reboot (per-user systemd otherwise stops on logout)"
-	postgresServerLingerDetail    = "⚠ systemd-user linger is not enabled — PG will not start at boot"
+	postgresServerBootstrapAmendment = "local PG not installed yet — see engdocs/postgres-local-bootstrap.md for one-time setup"
+	postgresServerLingerAmendment    = "also run `loginctl enable-linger` so PG starts after reboot (per-user systemd otherwise stops on logout)"
+	postgresServerLingerDetail       = "⚠ systemd-user linger is not enabled — PG will not start at boot"
 )
 
 var (
+	beadsPostgresUnitFile        = ".config/systemd/user/beads-postgres.service"
 	systemdUserLingerStatProbe   = os.Stat
 	systemdUserLingerCurrentUser = user.Current
 	systemdUserLingerGOOS        = func() string { return runtime.GOOS }
@@ -205,6 +207,10 @@ func postgresServerAggregateFixHint(findings []postgresServerFinding, status Che
 	case StatusWarning:
 		return postgresServerFixHint("", "", systemdUserLingerGOOS(), true)
 	case StatusError:
+		failingScopes := postgresServerFailingScopes(findings)
+		if hint, ok := postgresServerBootstrapFixHint(failingScopes, systemdUserLingerGOOS()); ok {
+			return hint
+		}
 		firstError, ok := firstPostgresServerFindingAtStatus(findings, StatusError)
 		if !ok || firstError.scope.host == "" || firstError.scope.port == "" {
 			if lingerDisabled {
@@ -216,6 +222,16 @@ func postgresServerAggregateFixHint(findings []postgresServerFinding, status Che
 	default:
 		return ""
 	}
+}
+
+func postgresServerFailingScopes(findings []postgresServerFinding) []postgresServerScope {
+	scopes := make([]postgresServerScope, 0, len(findings))
+	for _, finding := range findings {
+		if finding.status == StatusError {
+			scopes = append(scopes, finding.scope)
+		}
+	}
+	return scopes
 }
 
 func postgresServerDetails(findings []postgresServerFinding, lingerDisabled bool, lingerErr error) []string {
@@ -335,8 +351,36 @@ func postgresServerHasLoopbackScope(scopes []postgresServerScope) bool {
 	return false
 }
 
+func postgresServerHasNonLoopbackScope(scopes []postgresServerScope) bool {
+	for _, scope := range scopes {
+		if scope.host != "" && !postgresServerLoopbackHost(scope.host) {
+			return true
+		}
+	}
+	return false
+}
+
 func postgresServerLoopbackHost(host string) bool {
 	return host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+func postgresServerBootstrapFixHint(failingScopes []postgresServerScope, goos string) (string, bool) {
+	if goos != "linux" || !postgresServerHasLoopbackScope(failingScopes) {
+		return "", false
+	}
+	systemdPresent, err := postgresServerSystemdRuntimePresent()
+	if err != nil || !systemdPresent {
+		return "", false
+	}
+	unitInstalled, err := beadsPostgresUnitInstalled()
+	if err != nil || unitInstalled {
+		return "", false
+	}
+	hint := postgresServerBootstrapAmendment
+	if postgresServerHasNonLoopbackScope(failingScopes) {
+		hint += "; or check the cloud provider's console / your VPN if this is a remote host"
+	}
+	return hint, true
 }
 
 // postgresServerFixHint returns the operator-facing FixHint for the
@@ -366,6 +410,25 @@ func postgresServerFixHint(host, port, goos string, lingerNeeded bool) string {
 		return postgresServerLingerAmendment
 	}
 	return postgresServerLingerAmendment + " ; " + base
+}
+
+// beadsPostgresUnitInstalled reports whether the local bootstrap unit exists.
+func beadsPostgresUnitInstalled() (bool, error) {
+	if systemdUserLingerGOOS() != "linux" {
+		return false, nil
+	}
+	current, err := systemdUserLingerCurrentUser()
+	if err != nil {
+		return false, err
+	}
+	_, err = systemdUserLingerStatProbe(filepath.Join(current.HomeDir, beadsPostgresUnitFile))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
 }
 
 // systemdUserLingerEnabled reports whether the current user has systemd-user

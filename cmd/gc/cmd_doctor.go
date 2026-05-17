@@ -23,7 +23,7 @@ var (
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
-	var fix, verbose, explainPostgresAuth bool
+	var fix, verbose, explainPostgresAuth, explainPostgresBootstrap bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check workspace health",
@@ -38,7 +38,13 @@ health. Use --fix to attempt automatic repairs.`,
   gc doctor --verbose`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doDoctor(fix, verbose, explainPostgresAuth, stdout, stderr) != 0 {
+			exitCode := 0
+			if explainPostgresBootstrap {
+				exitCode = doDoctorWithOptions(fix, verbose, explainPostgresAuth, true, stdout, stderr)
+			} else {
+				exitCode = doDoctor(fix, verbose, explainPostgresAuth, stdout, stderr)
+			}
+			if exitCode != 0 {
 				return errExit
 			}
 			return nil
@@ -47,6 +53,7 @@ health. Use --fix to attempt automatic repairs.`,
 	cmd.Flags().BoolVar(&fix, "fix", false, "attempt to fix issues automatically")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show extra diagnostic details")
 	cmd.Flags().BoolVar(&explainPostgresAuth, "explain-postgres-auth", false, "after running checks, print per-scope Postgres credential resolution table (no values printed)")
+	cmd.Flags().BoolVar(&explainPostgresBootstrap, "explain-postgres-bootstrap", false, "print engdocs/postgres-local-bootstrap.md and exit (does not run checks)")
 	return cmd
 }
 
@@ -120,6 +127,18 @@ func (c *doltTopologyCheck) CanFix() bool { return false }
 func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 func doDoctor(fix, verbose, explainPostgresAuth bool, stdout, stderr io.Writer) int {
+	return doDoctorWithOptions(fix, verbose, explainPostgresAuth, false, stdout, stderr)
+}
+
+func doDoctorWithOptions(fix, verbose, explainPostgresAuth, explainPostgresBootstrap bool, stdout, stderr io.Writer) int {
+	if explainPostgresBootstrap {
+		if err := printPostgresBootstrapDoc(stdout); err != nil {
+			fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
+
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr

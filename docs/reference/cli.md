@@ -963,6 +963,7 @@ gc doctor
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--explain-postgres-auth` | bool |  | after running checks, print per-scope Postgres credential resolution table (no values printed) |
+| `--explain-postgres-bootstrap` | bool |  | print engdocs/postgres-local-bootstrap.md and exit (does not run checks) |
 | `--fix` | bool |  | attempt to fix issues automatically |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |
 

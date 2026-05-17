@@ -351,6 +351,191 @@ func TestPostgresServerFixHint(t *testing.T) {
 	}
 }
 
+func TestPostgresServerFixHint_LinuxLoopbackUnitMissing_PointsAtBootstrapDoc(t *testing.T) {
+	withPostgresServerDialResults(t, map[string]error{
+		net.JoinHostPort("127.0.0.1", "5433"): errors.New("connection refused"),
+	})
+	withSystemdUserLingerAndPostgresUnit(t, "linux", true, true, false, nil)
+	cityPath, cfg := newPostgresServerCity(t, postgresServerScopeSpec{
+		kind: "city",
+		host: "127.0.0.1",
+		port: "5433",
+	})
+
+	result := NewPostgresServerCheck(cityPath, cfg).Run(&CheckContext{CityPath: cityPath})
+	if result.FixHint != postgresServerBootstrapAmendment {
+		t.Fatalf("fix hint = %q, want %q", result.FixHint, postgresServerBootstrapAmendment)
+	}
+}
+
+func TestPostgresServerFixHint_LinuxLoopbackUnitMissing_SuppressesLingerAmendment(t *testing.T) {
+	withPostgresServerDialResults(t, map[string]error{
+		net.JoinHostPort("127.0.0.1", "5433"): errors.New("connection refused"),
+	})
+	withSystemdUserLingerAndPostgresUnit(t, "linux", true, false, false, nil)
+	cityPath, cfg := newPostgresServerCity(t, postgresServerScopeSpec{
+		kind: "city",
+		host: "127.0.0.1",
+		port: "5433",
+	})
+
+	result := NewPostgresServerCheck(cityPath, cfg).Run(&CheckContext{CityPath: cityPath, Verbose: true})
+	if result.FixHint != postgresServerBootstrapAmendment {
+		t.Fatalf("fix hint = %q, want %q", result.FixHint, postgresServerBootstrapAmendment)
+	}
+	assertPostgresLingerRow(t, result.Details)
+}
+
+func TestPostgresServerFixHint_LinuxLoopbackUnitMissingMixedRemote_AppendsCloudHint(t *testing.T) {
+	withPostgresServerDialResults(t, map[string]error{
+		net.JoinHostPort("127.0.0.1", "5433"):      errors.New("connection refused"),
+		net.JoinHostPort("db.example.com", "5432"): errors.New("connection refused"),
+	})
+	withSystemdUserLingerAndPostgresUnit(t, "linux", true, true, false, nil)
+	cityPath, cfg := newPostgresServerCity(t,
+		postgresServerScopeSpec{kind: "city", host: "127.0.0.1", port: "5433"},
+		postgresServerScopeSpec{kind: "rig", name: "remote", path: "rigs/remote", host: "db.example.com", port: "5432"},
+	)
+
+	result := NewPostgresServerCheck(cityPath, cfg).Run(&CheckContext{CityPath: cityPath})
+	want := postgresServerBootstrapAmendment + "; or check the cloud provider's console / your VPN if this is a remote host"
+	if result.FixHint != want {
+		t.Fatalf("fix hint = %q, want %q", result.FixHint, want)
+	}
+}
+
+func TestPostgresServerFixHint_LinuxLoopbackUnitInstalled_KeepsBaseHint(t *testing.T) {
+	withPostgresServerDialResults(t, map[string]error{
+		net.JoinHostPort("127.0.0.1", "5433"): errors.New("connection refused"),
+	})
+	withSystemdUserLingerAndPostgresUnit(t, "linux", true, true, true, nil)
+	cityPath, cfg := newPostgresServerCity(t, postgresServerScopeSpec{
+		kind: "city",
+		host: "127.0.0.1",
+		port: "5433",
+	})
+
+	result := NewPostgresServerCheck(cityPath, cfg).Run(&CheckContext{CityPath: cityPath})
+	want := "start PG (e.g. systemctl --user start postgresql, sudo systemctl start postgresql, or docker compose up -d postgres) then re-run gc doctor; expected listener: 127.0.0.1:5433"
+	if result.FixHint != want {
+		t.Fatalf("fix hint = %q, want %q", result.FixHint, want)
+	}
+}
+
+func TestPostgresServerFixHint_NonLinuxUnitMissing_NoBootstrapAmendment(t *testing.T) {
+	withPostgresServerDialResults(t, map[string]error{
+		net.JoinHostPort("127.0.0.1", "5433"): errors.New("connection refused"),
+	})
+	withSystemdUserLingerAndPostgresUnit(t, "darwin", true, true, false, nil)
+	cityPath, cfg := newPostgresServerCity(t, postgresServerScopeSpec{
+		kind: "city",
+		host: "127.0.0.1",
+		port: "5433",
+	})
+
+	result := NewPostgresServerCheck(cityPath, cfg).Run(&CheckContext{CityPath: cityPath})
+	want := "start PG (e.g. brew services start postgresql@<version>, launch Postgres.app, or docker compose up -d postgres) then re-run gc doctor; expected listener: 127.0.0.1:5433"
+	if result.FixHint != want {
+		t.Fatalf("fix hint = %q, want %q", result.FixHint, want)
+	}
+}
+
+func TestPostgresServerFixHint_LinuxNonLoopbackUnitMissing_NoBootstrapAmendment(t *testing.T) {
+	withPostgresServerDialResults(t, map[string]error{
+		net.JoinHostPort("db.example.com", "5432"): errors.New("connection refused"),
+	})
+	withSystemdUserLingerAndPostgresUnit(t, "linux", true, true, false, nil)
+	cityPath, cfg := newPostgresServerCity(t, postgresServerScopeSpec{
+		kind: "city",
+		host: "db.example.com",
+		port: "5432",
+	})
+
+	result := NewPostgresServerCheck(cityPath, cfg).Run(&CheckContext{CityPath: cityPath})
+	want := "start PG (e.g. systemctl --user start postgresql, sudo systemctl start postgresql, or docker compose up -d postgres) then re-run gc doctor; expected listener: db.example.com:5432; or check the cloud provider's console / your VPN if this is a remote host"
+	if result.FixHint != want {
+		t.Fatalf("fix hint = %q, want %q", result.FixHint, want)
+	}
+}
+
+func TestPostgresServerFixHint_OK_NoFixHint(t *testing.T) {
+	withPostgresServerDialResults(t, nil)
+	withSystemdUserLingerAndPostgresUnit(t, "linux", true, true, false, nil)
+	cityPath, cfg := newPostgresServerCity(t, postgresServerScopeSpec{
+		kind: "city",
+		host: "127.0.0.1",
+		port: "5433",
+	})
+
+	result := NewPostgresServerCheck(cityPath, cfg).Run(&CheckContext{CityPath: cityPath})
+	if result.FixHint != "" {
+		t.Fatalf("fix hint = %q, want empty", result.FixHint)
+	}
+}
+
+func TestPostgresServerFixHint_LingerWarningUnitMissing_KeepsLingerAmendment(t *testing.T) {
+	withPostgresServerDialResults(t, nil)
+	withSystemdUserLingerAndPostgresUnit(t, "linux", true, false, false, nil)
+	cityPath, cfg := newPostgresServerCity(t, postgresServerScopeSpec{
+		kind: "city",
+		host: "127.0.0.1",
+		port: "5433",
+	})
+
+	result := NewPostgresServerCheck(cityPath, cfg).Run(&CheckContext{CityPath: cityPath})
+	if result.Status != StatusWarning {
+		t.Fatalf("status = %v, want Warning; result = %+v", result.Status, result)
+	}
+	if result.FixHint != postgresServerLingerAmendment {
+		t.Fatalf("fix hint = %q, want %q", result.FixHint, postgresServerLingerAmendment)
+	}
+}
+
+func TestBeadsPostgresUnitInstalled_True(t *testing.T) {
+	withSystemdUserLingerAndPostgresUnit(t, "linux", true, true, true, nil)
+
+	got, err := beadsPostgresUnitInstalled()
+	if err != nil || !got {
+		t.Fatalf("beadsPostgresUnitInstalled() = (%t, %v), want (true, nil)", got, err)
+	}
+}
+
+func TestBeadsPostgresUnitInstalled_False(t *testing.T) {
+	withSystemdUserLingerAndPostgresUnit(t, "linux", true, true, false, nil)
+
+	got, err := beadsPostgresUnitInstalled()
+	if err != nil || got {
+		t.Fatalf("beadsPostgresUnitInstalled() = (%t, %v), want (false, nil)", got, err)
+	}
+}
+
+func TestBeadsPostgresUnitInstalled_UserCurrentFails_DegradesGracefully(t *testing.T) {
+	withPostgresServerDialResults(t, map[string]error{
+		net.JoinHostPort("127.0.0.1", "5433"): errors.New("connection refused"),
+	})
+	withSystemdUserLingerAndPostgresUnit(t, "linux", true, true, false, errors.New("whoami failed"))
+	cityPath, cfg := newPostgresServerCity(t, postgresServerScopeSpec{
+		kind: "city",
+		host: "127.0.0.1",
+		port: "5433",
+	})
+
+	got, err := beadsPostgresUnitInstalled()
+	if err == nil || got {
+		t.Fatalf("beadsPostgresUnitInstalled() = (%t, %v), want (false, error)", got, err)
+	}
+	result := NewPostgresServerCheck(cityPath, cfg).Run(&CheckContext{CityPath: cityPath})
+	if result.FixHint == postgresServerBootstrapAmendment {
+		t.Fatalf("fix hint = %q, want bootstrap amendment suppressed on user lookup failure", result.FixHint)
+	}
+}
+
+func TestBeadsPostgresUnitPath_MatchesEngdocReference(t *testing.T) {
+	if got, want := "~/"+beadsPostgresUnitFile, "~/.config/systemd/user/beads-postgres.service"; got != want {
+		t.Fatalf("beadsPostgresUnitFile = %q, want %q", got, want)
+	}
+}
+
 func TestSystemdUserLingerEnabled(t *testing.T) {
 	t.Run("NonLinux_ReturnsFalseNil", func(t *testing.T) {
 		withSystemdUserLingerSeams(t,
@@ -540,6 +725,11 @@ func (a noopPostgresServerAddr) String() string  { return string(a) }
 
 func withSystemdUserLinger(t *testing.T, goos string, systemdPresent, lingerExists bool, currentErr error) {
 	t.Helper()
+	withSystemdUserLingerAndPostgresUnit(t, goos, systemdPresent, lingerExists, true, currentErr)
+}
+
+func withSystemdUserLingerAndPostgresUnit(t *testing.T, goos string, systemdPresent, lingerExists, unitExists bool, currentErr error) {
+	t.Helper()
 	withSystemdUserLingerSeams(t,
 		func() string { return goos },
 		func(path string) (os.FileInfo, error) {
@@ -554,6 +744,11 @@ func withSystemdUserLinger(t *testing.T, goos string, systemdPresent, lingerExis
 					return fakePostgresServerFileInfo{}, nil
 				}
 				return nil, fs.ErrNotExist
+			case filepath.Join("/home/alice", beadsPostgresUnitFile):
+				if unitExists {
+					return fakePostgresServerFileInfo{}, nil
+				}
+				return nil, fs.ErrNotExist
 			default:
 				return nil, fs.ErrNotExist
 			}
@@ -562,7 +757,7 @@ func withSystemdUserLinger(t *testing.T, goos string, systemdPresent, lingerExis
 			if currentErr != nil {
 				return nil, currentErr
 			}
-			return &user.User{Username: "alice"}, nil
+			return &user.User{Username: "alice", HomeDir: "/home/alice"}, nil
 		},
 	)
 }

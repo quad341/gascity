@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // testReporter is the subset of *testing.T methods that
@@ -290,6 +291,46 @@ func TestRequireNoLeakedDoltAfterWithFilterIgnoresUnownedTempPID(t *testing.T) {
 	}
 	if strings.Contains(msg, "1002") {
 		t.Fatalf("error included unowned leaked PID 1002; got %q", msg)
+	}
+}
+
+func TestStopManagedDoltProcessesUnderTestCityRetriesUntilIdle(t *testing.T) {
+	cityPath := filepath.Join("/tmp", "TestManagedDoltLateSpawn")
+	configPath := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	snapshots := [][]DoltProcInfo{
+		{{PID: 1001, Argv: []string{"dolt", "sql-server", "--config", configPath}}},
+		{{PID: 1002, Argv: []string{"dolt", "sql-server", "--config", configPath}}},
+		nil,
+		nil,
+	}
+	var calls int
+	discover := func() ([]DoltProcInfo, error) {
+		if calls >= len(snapshots) {
+			return nil, nil
+		}
+		out := snapshots[calls]
+		calls++
+		return out, nil
+	}
+
+	var stopped []int
+	now := time.Unix(0, 0)
+	stopManagedDoltProcessesUnderTestCityWith(
+		t,
+		cityPath,
+		discover,
+		func(pid int) { stopped = append(stopped, pid) },
+		func() time.Time { return now },
+		func(d time.Duration) { now = now.Add(d) },
+		500*time.Millisecond,
+		75*time.Millisecond,
+	)
+
+	if calls < len(snapshots) {
+		t.Fatalf("discover called %d time(s), want at least %d", calls, len(snapshots))
+	}
+	if len(stopped) != 2 || stopped[0] != 1001 || stopped[1] != 1002 {
+		t.Fatalf("stopped PIDs = %v, want [1001 1002]", stopped)
 	}
 }
 

@@ -268,17 +268,77 @@ func cleanupManagedDoltTestCity(t *testing.T, cityPath string) {
 
 func stopManagedDoltProcessesUnderTestCity(t *testing.T, cityPath string) {
 	t.Helper()
-	procs, err := discoverDoltProcesses()
+	stopManagedDoltProcessesUnderTestCityWith(
+		t,
+		cityPath,
+		discoverDoltProcesses,
+		func(pid int) { stopManagedDoltTestPID(t, pid) },
+		time.Now,
+		time.Sleep,
+		5*time.Second,
+		250*time.Millisecond,
+	)
+}
+
+func stopManagedDoltProcessesUnderTestCityWith(
+	t testReporter,
+	cityPath string,
+	discover func() ([]DoltProcInfo, error),
+	stopPID func(int),
+	now func() time.Time,
+	sleep func(time.Duration),
+	maxWait time.Duration,
+	idleWait time.Duration,
+) {
+	t.Helper()
+	deadline := now().Add(maxWait)
+	idleDeadline := now().Add(idleWait)
+	for now().Before(deadline) {
+		if stopManagedDoltProcessesUnderTestCityOnceWith(t, cityPath, discover, stopPID) > 0 {
+			idleDeadline = now().Add(idleWait)
+		}
+		if now().After(idleDeadline) {
+			return
+		}
+		sleep(50 * time.Millisecond)
+	}
+
+	procs := managedDoltProcessesUnderTestCityWith(t, cityPath, discover)
+	if len(procs) == 0 {
+		return
+	}
+	pids := make([]int, 0, len(procs))
+	for _, p := range procs {
+		pids = append(pids, p.PID)
+	}
+	sort.Ints(pids)
+	t.Fatalf("dolt test pid(s) still alive under %s after cleanup: %v", cityPath, pids)
+}
+
+func stopManagedDoltProcessesUnderTestCityOnceWith(t testReporter, cityPath string, discover func() ([]DoltProcInfo, error), stopPID func(int)) int {
+	t.Helper()
+	procs := managedDoltProcessesUnderTestCityWith(t, cityPath, discover)
+	for _, p := range procs {
+		stopPID(p.PID)
+	}
+	return len(procs)
+}
+
+func managedDoltProcessesUnderTestCityWith(t testReporter, cityPath string, discover func() ([]DoltProcInfo, error)) []DoltProcInfo {
+	t.Helper()
+	procs, err := discover()
 	if err != nil {
 		t.Fatalf("discoverDoltProcesses: %v", err)
 	}
+	var out []DoltProcInfo
 	for _, p := range procs {
 		configPath := extractConfigPath(p.Argv)
 		if !pathutil.PathWithin(cityPath, configPath) {
 			continue
 		}
-		stopManagedDoltTestPID(t, p.PID)
+		out = append(out, p)
 	}
+	return out
 }
 
 func stopManagedDoltTestPID(t *testing.T, pid int) {

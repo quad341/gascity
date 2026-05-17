@@ -799,7 +799,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							})
 							if hasAssignedWork {
 								batch := sessionpkg.CompleteDrainPatch(clk.Now().UTC(), "idle", session.Metadata["wake_mode"] == "fresh")
-								_ = store.SetMetadataBatch(session.ID, batch)
+								_ = setMetaBatch(store, session.ID, batch, stderr)
 								if session.Metadata == nil {
 									session.Metadata = make(map[string]string, len(batch))
 								}
@@ -1050,7 +1050,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						if hasAssignedWork {
 							batch = sessionpkg.CompleteDrainPatch(clk.Now().UTC(), sleepReason, session.Metadata["wake_mode"] == "fresh")
 						}
-						_ = store.SetMetadataBatch(session.ID, batch)
+						_ = setMetaBatch(store, session.ID, batch, stderr)
 						if session.Metadata == nil {
 							session.Metadata = make(map[string]string, len(batch))
 						}
@@ -1153,7 +1153,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				if hasCapability && newSessionKey == "" {
 					batch["session_key"] = ""
 				}
-				if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+				if err := setMetaBatch(store, session.ID, batch, stderr); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: recording restart handoff for %s: %v\n", name, err) //nolint:errcheck
 					continue
 				}
@@ -1498,7 +1498,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							})
 							telemetry.RecordAgentMaxAgeKill(context.Background(), tp.DisplayName())
 							batch := sessionpkg.SleepPatch(clk.Now(), "max-session-age")
-							_ = store.SetMetadataBatch(session.ID, batch)
+							_ = setMetaBatch(store, session.ID, batch, stderr)
 							if session.Metadata == nil {
 								session.Metadata = make(map[string]string, len(batch))
 							}
@@ -1544,7 +1544,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// last_woke_at and setting state to asleep. The wake logic
 				// below will pick it up.
 				batch := sessionpkg.SleepPatch(clk.Now(), "idle-timeout")
-				_ = store.SetMetadataBatch(session.ID, batch)
+				_ = setMetaBatch(store, session.ID, batch, stderr)
 				if session.Metadata == nil {
 					session.Metadata = make(map[string]string, len(batch))
 				}
@@ -2293,7 +2293,7 @@ func resetConfiguredNamedSessionForConfigDrift(
 	batch[namedSessionConfigDriftDeferredKeyMetadata] = ""
 	batch[sessionAttachedConfigDriftDeferredAtMetadata] = ""
 	batch[sessionAttachedConfigDriftDeferredKeyMetadata] = ""
-	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+	if err := setMetaBatch(store, session.ID, batch, stderr); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: recording config-drift repair for %s: %v\n", sessionName, err) //nolint:errcheck
 		return
 	}

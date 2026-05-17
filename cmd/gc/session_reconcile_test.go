@@ -58,6 +58,14 @@ func (s *testStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return nil
 }
 
+func (s *testStore) SetLocalString(_, _, _ string) error {
+	return beads.ErrLocalMetadataNotSupported
+}
+
+func (s *testStore) GetLocalString(_, _ string) (string, bool, error) {
+	return "", false, beads.ErrLocalMetadataNotSupported
+}
+
 func (s *testStore) Ping() error {
 	return nil
 }

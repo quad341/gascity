@@ -545,6 +545,9 @@ func dependencySessionStartInFlight(store beads.Store, sessionName string, cfg *
 		if !isSessionBead(session) {
 			continue
 		}
+		if err := hydrateLocalLifecycleMetadata(store, &session); err != nil {
+			return true
+		}
 		var startupTimeout time.Duration
 		if cfg != nil {
 			startupTimeout = cfg.Session.StartupTimeoutDuration()
@@ -1197,6 +1200,10 @@ func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Wr
 		fmt.Fprintf(stderr, "session reconciler: refreshing async start %s: %v\n", result.prepared.candidate.name(), err) //nolint:errcheck
 		return result, false, false, true
 	}
+	if err := hydrateLocalLifecycleMetadata(store, &current); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: refreshing async start local metadata %s: %v\n", result.prepared.candidate.name(), err) //nolint:errcheck
+		return result, false, false, true
+	}
 	if asyncStartPreparedCommandStale(result.prepared, current) {
 		fmt.Fprintf(stderr, "session reconciler: ignoring stale async start result for %s: desired command changed during startup\n", result.prepared.candidate.name()) //nolint:errcheck
 		return result, false, true, true
@@ -1474,7 +1481,7 @@ func commitStartResultTraced(
 			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 			return false
 		}
-		if err := store.SetMetadata(session.ID, "last_woke_at", ""); err != nil {
+		if err := setMeta(store, session.ID, "last_woke_at", "", stderr); err != nil {
 			fmt.Fprintf(stderr, "session reconciler: clearing last_woke_at for %s: %v\n", name, err) //nolint:errcheck
 		} else {
 			session.Metadata["last_woke_at"] = ""
@@ -1542,7 +1549,7 @@ func commitStartResultTraced(
 			metadata[sessionpkg.MCPIdentityMetadataKey] = storedMCPIdentity
 		}
 	}
-	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
+	if err := setMetaBatch(store, session.ID, metadata, stderr); err != nil {
 		clearPendingStartInFlightLease(session, store, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
 		if trace != nil {
@@ -1620,7 +1627,7 @@ func recoverRunningPendingCreate(
 		ClearPendingCreateClaim: true,
 		Now:                     now,
 	})
-	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
+	if err := setMetaBatch(store, session.ID, metadata, nil); err != nil {
 		if trace != nil {
 			trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_commit_failed", "failed", traceRecordPayload{
 				"error": err.Error(),
@@ -2407,7 +2414,7 @@ func markCityStopSessionAsAsleep(store beads.Store, sessionID string, stderr io.
 		return
 	}
 	batch := sessionpkg.SleepPatch(time.Now().UTC(), sleepReasonCityStop)
-	if err := store.SetMetadataBatch(sessionID, batch); err != nil && stderr != nil {
+	if err := setMetaBatch(store, sessionID, batch, stderr); err != nil && stderr != nil {
 		fmt.Fprintf(stderr, "gc stop: marking session %s asleep: %v\n", sessionID, err) //nolint:errcheck
 	}
 }

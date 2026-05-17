@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -320,12 +321,14 @@ func reopenClosedConfiguredNamedSessionBead(
 		if state != "active" {
 			pendingCreateClaim = "true"
 		}
-		batch := map[string]string{
-			"state":                state,
-			"close_reason":         "",
-			"closed_at":            "",
+		localBatch := map[string]string{
 			"pending_create_claim": pendingCreateClaim,
 			"synced_at":            now.Format("2006-01-02T15:04:05Z07:00"),
+		}
+		batch := map[string]string{
+			"state":        state,
+			"close_reason": "",
+			"closed_at":    "",
 		}
 		// Reset the pending-create stale clock to NOW. The bead row's
 		// CreatedAt reflects when it was first minted (potentially
@@ -338,6 +341,10 @@ func reopenClosedConfiguredNamedSessionBead(
 			batch["pending_create_started_at"] = ""
 		}
 		for k, v := range extraMeta {
+			if isLocalLifecycleMetadataKey(k) {
+				localBatch[k] = v
+				continue
+			}
 			batch[k] = v
 		}
 		open := "open"
@@ -353,11 +360,18 @@ func reopenClosedConfiguredNamedSessionBead(
 			fmt.Fprintf(stderr, "session beads: reopening configured named session %q: %v\n", identity, err) //nolint:errcheck
 			return nil
 		}
+		if err := setLocalOrDurableBatch(store, bead.ID, localBatch, stderr); err != nil {
+			fmt.Fprintf(stderr, "session beads: setting local metadata for reopened configured named session %q: %v\n", identity, err) //nolint:errcheck
+			return nil
+		}
 		bead.Status = "open"
 		if bead.Metadata == nil {
-			bead.Metadata = make(map[string]string, len(batch))
+			bead.Metadata = make(map[string]string, len(batch)+len(localBatch))
 		}
 		for k, v := range batch {
+			bead.Metadata[k] = v
+		}
+		for k, v := range localBatch {
 			bead.Metadata[k] = v
 		}
 		reopened = bead
@@ -1107,6 +1121,11 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			case finalizeErr != nil:
 				continue
 			default:
+				if err := moveCreatedLocalLifecycleMetadata(store, newBead.ID, meta, stderr); err != nil {
+					fmt.Fprintf(stderr, "session beads: localizing lifecycle metadata for %s: %v\n", agentName, err) //nolint:errcheck
+					closeFailedCreateBead(store, newBead.ID, now, stderr)
+					continue
+				}
 				desiredNames[createdSessionName] = true
 				openIndex[createdSessionName] = newBead.ID
 				openBeads = append(openBeads, newBead)
@@ -1620,18 +1639,44 @@ func configuredSessionNamesWithSnapshot(cfg *config.City, cityName string, sessi
 // setMeta wraps store.SetMetadata with error logging. Returns the error
 // so callers can abort dependent writes (e.g., skip config_hash on failure).
 func setMeta(store beads.Store, id, key, value string, stderr io.Writer) error {
-	if err := store.SetMetadata(id, key, value); err != nil {
-		fmt.Fprintf(stderr, "session beads: setting %s on %s: %v\n", key, id, err) //nolint:errcheck
-		return err
-	}
-	return nil
+	return setLocalOrDurable(store, id, key, value, stderr)
 }
 
 func setMetaBatch(store beads.Store, id string, batch map[string]string, stderr io.Writer) error {
 	if len(batch) == 0 {
 		return nil
 	}
-	if err := store.SetMetadataBatch(id, batch); err != nil {
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	durable := make(map[string]string, len(batch))
+	local := make(map[string]string, len(localLifecycleMetadataKeys))
+	for key, value := range batch {
+		if isLocalLifecycleMetadataKey(key) {
+			local[key] = value
+			continue
+		}
+		durable[key] = value
+	}
+	for _, key := range localLifecycleMetadataKeys {
+		value, ok := local[key]
+		if !ok {
+			continue
+		}
+		err := store.SetLocalString(id, key, value)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, beads.ErrLocalMetadataNotSupported) {
+			fmt.Fprintf(stderr, "session beads: setting local %s on %s: %v\n", key, id, err) //nolint:errcheck
+			return err
+		}
+		durable[key] = value
+	}
+	if len(durable) == 0 {
+		return nil
+	}
+	if err := store.SetMetadataBatch(id, durable); err != nil {
 		fmt.Fprintf(stderr, "session beads: setting metadata on %s: %v\n", id, err) //nolint:errcheck
 		return err
 	}

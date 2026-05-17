@@ -65,6 +65,9 @@ func loadSessionBeadSnapshot(store beads.Store) (*sessionBeadSnapshot, error) {
 	sessions := make([]beads.Bead, 0, len(all))
 	for _, bead := range all {
 		if sessionpkg.IsSessionBeadOrRepairable(bead) {
+			if err := hydrateLocalLifecycleMetadata(store, &bead); err != nil {
+				return nil, fmt.Errorf("hydrating local session metadata for %s: %w", bead.ID, err)
+			}
 			sessions = append(sessions, bead)
 		}
 	}

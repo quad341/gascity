@@ -65,7 +65,7 @@ func preWakeCommit(
 		SleepReason:       sleepReason,
 		FreshWake:         freshWake,
 	})
-	if writeErr := store.SetMetadataBatch(session.ID, batch); writeErr != nil {
+	if writeErr := setMetaBatch(store, session.ID, batch, nil); writeErr != nil {
 		return 0, "", fmt.Errorf("pre-wake metadata commit: %w", writeErr)
 	}
 	traceFreshWakeMetadataReset(name, session.Metadata, batch, freshWake)
@@ -591,7 +591,7 @@ func advanceSessionDrainsWithSessionsTraced(
 func completeDrain(session *beads.Bead, store beads.Store, ds *drainState, clk clock.Clock) {
 	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, session.Metadata["wake_mode"] == "fresh")
 	if store != nil {
-		if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+		if err := setMetaBatch(store, session.ID, batch, nil); err != nil {
 			return
 		}
 	}

@@ -601,7 +601,7 @@ func rapidExitWithinStabilityThreshold(session *beads.Bead, cfg *config.City, al
 }
 
 func clearLastWokeAt(session *beads.Bead, store beads.Store) {
-	_ = store.SetMetadata(session.ID, "last_woke_at", "")
+	_ = setMeta(store, session.ID, "last_woke_at", "", nil)
 	session.Metadata["last_woke_at"] = ""
 }
 
@@ -621,7 +621,7 @@ func recordRateLimitQuarantine(session *beads.Bead, store beads.Store, clk clock
 		"pending_create_claim":      "",
 		"pending_create_started_at": "",
 	}
-	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+	if err := setMetaBatch(store, session.ID, batch, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "recordRateLimitQuarantine: SetMetadataBatch %s: %v\n", session.ID, err) //nolint:errcheck
 		return err
 	}
@@ -753,7 +753,7 @@ func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTrac
 	recordChurn(session, store, clk)
 	// Clear last_woke_at so this death is not re-counted next tick
 	// (edge-triggered, same pattern as checkStability).
-	_ = store.SetMetadata(session.ID, "last_woke_at", "")
+	_ = setMeta(store, session.ID, "last_woke_at", "", nil)
 	session.Metadata["last_woke_at"] = ""
 	return true
 }
@@ -900,7 +900,7 @@ func healState(session *beads.Bead, alive bool, store beads.Store, clk clock.Clo
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string, len(batch))
 	}
-	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+	if err := setMetaBatch(store, session.ID, batch, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "healState: SetMetadataBatch %s: %v\n", session.ID, err) //nolint:errcheck
 	}
 	for k, v := range batch {

@@ -16,6 +16,8 @@ const nativeDoltStoreActor = "gascity"
 
 const nativeTxMaxAttempts = 3
 
+const nativeLocalMetadataPrefix = "gc:bead:"
+
 var (
 	nativeTxBackoffs = [3]time.Duration{
 		50 * time.Millisecond,
@@ -44,6 +46,10 @@ func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *Nati
 
 func newNativeDoltStoreForTest(storage beadslib.Storage) *NativeDoltStore {
 	return newNativeDoltStoreWithStorage(storage, "native-test")
+}
+
+func localMetadataKey(beadID, key string) string {
+	return nativeLocalMetadataPrefix + beadID + ":" + key
 }
 
 // Create persists a new bead through the upstream beads storage layer.
@@ -273,14 +279,23 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 	return s.storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor)
 }
 
-// SetLocalString reports that NativeDoltStore local metadata is not supported.
-func (s *NativeDoltStore) SetLocalString(_, _, _ string) error {
-	return ErrLocalMetadataNotSupported
+// SetLocalString persists clone-local bead metadata through beadslib's
+// dolt-ignored local metadata table.
+func (s *NativeDoltStore) SetLocalString(beadID, key, value string) error {
+	return s.storage.SetLocalMetadata(context.Background(), localMetadataKey(beadID, key), value)
 }
 
-// GetLocalString reports that NativeDoltStore local metadata is not supported.
-func (s *NativeDoltStore) GetLocalString(_, _ string) (string, bool, error) {
-	return "", false, ErrLocalMetadataNotSupported
+// GetLocalString retrieves clone-local bead metadata from beadslib's
+// dolt-ignored local metadata table.
+func (s *NativeDoltStore) GetLocalString(beadID, key string) (string, bool, error) {
+	value, err := s.storage.GetLocalMetadata(context.Background(), localMetadataKey(beadID, key))
+	if err != nil {
+		return "", false, err
+	}
+	if value == "" {
+		return "", false, nil
+	}
+	return value, true, nil
 }
 
 // Delete permanently removes a bead from the upstream beads storage layer.

@@ -305,12 +305,130 @@ func TestNativeDoltStoreTxDoesNotRetryNonSerializationError(t *testing.T) {
 	}
 }
 
+func TestNativeDoltStoreSetLocalStringDelegatesToUpstreamLocalMetadata(t *testing.T) {
+	var capturedKey string
+	var capturedValue string
+	storage := &nativeDoltStorageSpy{
+		setLocalMetadata: func(_ context.Context, key, value string) error {
+			capturedKey = key
+			capturedValue = value
+			return nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	if err := store.SetLocalString("ga-dvvsla.2", "synced_at", "2026-05-17T21:30:00Z"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+
+	if capturedKey != "gc:bead:ga-dvvsla.2:synced_at" {
+		t.Fatalf("local metadata key = %q, want gc:bead:ga-dvvsla.2:synced_at", capturedKey)
+	}
+	if capturedValue != "2026-05-17T21:30:00Z" {
+		t.Fatalf("local metadata value = %q, want timestamp", capturedValue)
+	}
+}
+
+func TestNativeDoltStoreSetLocalStringPropagatesUpstreamError(t *testing.T) {
+	wantErr := errors.New("local metadata write failed")
+	storage := &nativeDoltStorageSpy{
+		setLocalMetadata: func(context.Context, string, string) error {
+			return wantErr
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	if err := store.SetLocalString("ga-dvvsla.2", "synced_at", "value"); !errors.Is(err, wantErr) {
+		t.Fatalf("SetLocalString error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestNativeDoltStoreGetLocalStringDelegatesToUpstreamLocalMetadata(t *testing.T) {
+	var capturedKey string
+	storage := &nativeDoltStorageSpy{
+		getLocalMetadata: func(_ context.Context, key string) (string, error) {
+			capturedKey = key
+			return "2026-05-17T21:30:00Z", nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	value, ok, err := store.GetLocalString("ga-dvvsla.2", "last_woke_at")
+	if err != nil {
+		t.Fatalf("GetLocalString: %v", err)
+	}
+
+	if capturedKey != "gc:bead:ga-dvvsla.2:last_woke_at" {
+		t.Fatalf("local metadata key = %q, want gc:bead:ga-dvvsla.2:last_woke_at", capturedKey)
+	}
+	if !ok {
+		t.Fatal("GetLocalString ok = false, want true")
+	}
+	if value != "2026-05-17T21:30:00Z" {
+		t.Fatalf("GetLocalString value = %q, want timestamp", value)
+	}
+}
+
+func TestNativeDoltStoreGetLocalStringTranslatesAbsentLocalMetadata(t *testing.T) {
+	storage := &nativeDoltStorageSpy{
+		getLocalMetadata: func(context.Context, string) (string, error) {
+			return "", nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	value, ok, err := store.GetLocalString("ga-dvvsla.2", "pending_create_claim")
+	if err != nil {
+		t.Fatalf("GetLocalString: %v", err)
+	}
+	if ok {
+		t.Fatal("GetLocalString ok = true, want false")
+	}
+	if value != "" {
+		t.Fatalf("GetLocalString value = %q, want empty", value)
+	}
+}
+
+func TestNativeDoltStoreGetLocalStringPropagatesUpstreamError(t *testing.T) {
+	wantErr := errors.New("local metadata read failed")
+	storage := &nativeDoltStorageSpy{
+		getLocalMetadata: func(context.Context, string) (string, error) {
+			return "", wantErr
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	_, _, err := store.GetLocalString("ga-dvvsla.2", "synced_at")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("GetLocalString error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestNativeDoltStoreLocalMetadataNamespaceAvoidsBeadslibKeys(t *testing.T) {
+	got := localMetadataKey("ga-dvvsla.2", "linear.last_sync")
+	if got != "gc:bead:ga-dvvsla.2:linear.last_sync" {
+		t.Fatalf("localMetadataKey = %q, want gc:bead namespace with bead ID", got)
+	}
+	for _, upstreamKey := range []string{
+		"bd_version",
+		"bd_version_max",
+		"linear.last_sync",
+		"test.last_sync",
+	} {
+		if got == upstreamKey {
+			t.Fatalf("localMetadataKey collided with upstream beadslib key %q", upstreamKey)
+		}
+	}
+}
+
 type nativeDoltStorageSpy struct {
 	beadslib.Storage
 	createIssue      func(context.Context, *beadslib.Issue, string) error
 	getIssue         func(context.Context, string) (*beadslib.Issue, error)
 	searchIssues     func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error)
 	runInTransaction func(context.Context, string, func(beadslib.Transaction) error) error
+	setLocalMetadata func(context.Context, string, string) error
+	getLocalMetadata func(context.Context, string) (string, error)
 }
 
 func (s *nativeDoltStorageSpy) CreateIssue(ctx context.Context, issue *beadslib.Issue, actor string) error {
@@ -327,6 +445,14 @@ func (s *nativeDoltStorageSpy) SearchIssues(ctx context.Context, query string, f
 
 func (s *nativeDoltStorageSpy) RunInTransaction(ctx context.Context, commitMsg string, fn func(beadslib.Transaction) error) error {
 	return s.runInTransaction(ctx, commitMsg, fn)
+}
+
+func (s *nativeDoltStorageSpy) SetLocalMetadata(ctx context.Context, key, value string) error {
+	return s.setLocalMetadata(ctx, key, value)
+}
+
+func (s *nativeDoltStorageSpy) GetLocalMetadata(ctx context.Context, key string) (string, error) {
+	return s.getLocalMetadata(ctx, key)
 }
 
 type nativeDoltTransactionSpy struct {

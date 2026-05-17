@@ -292,6 +292,9 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 	if hasCacheEventField(fields, "description") {
 		merged.Description = patch.Description
 	}
+	if hasCacheEventField(fields, "notes") {
+		merged.Notes = patch.Notes
+	}
 	if hasCacheEventField(fields, "labels") {
 		merged.Labels = slices.Clone(patch.Labels)
 	}
@@ -326,6 +329,9 @@ func cacheEventConflictsCurrent(current, patch Bead, fields map[string]json.RawM
 		return true
 	}
 	if hasCacheEventField(fields, "description") && current.Description != patch.Description {
+		return true
+	}
+	if hasCacheEventField(fields, "notes") && current.Notes != patch.Notes {
 		return true
 	}
 	if hasCacheEventField(fields, "parent") && current.ParentID != patch.ParentID {
@@ -490,7 +496,8 @@ func beadChanged(old, fresh Bead) bool {
 		old.From != fresh.From ||
 		old.ParentID != fresh.ParentID ||
 		old.Ref != fresh.Ref ||
-		old.Description != fresh.Description {
+		old.Description != fresh.Description ||
+		old.Notes != fresh.Notes {
 		return true
 	}
 	if !maps.Equal(old.Metadata, fresh.Metadata) {

@@ -438,6 +438,25 @@ func RunStoreTests(t *testing.T, newStore func() beads.Store) {
 		}
 	})
 
+	t.Run("UpdateNotes", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "noted", Notes: "original notes"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		newNotes := "updated notes\nwith output"
+		if err := s.Update(b.ID, beads.UpdateOpts{Notes: &newNotes}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Notes != newNotes {
+			t.Errorf("Notes = %q, want %q", got.Notes, newNotes)
+		}
+	})
+
 	t.Run("UpdateNotFound", func(t *testing.T) {
 		s := newStore()
 		desc := "whatever"

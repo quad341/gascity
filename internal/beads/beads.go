@@ -30,6 +30,7 @@ type Bead struct {
 	Ref          string            `json:"ref,omitempty"`         // formula step ID or formula name
 	Needs        []string          `json:"needs,omitempty"`       // dependency step refs
 	Description  string            `json:"description,omitempty"` // step instructions
+	Notes        string            `json:"notes,omitempty"`
 	Labels       []string          `json:"labels,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	Dependencies []Dep             `json:"dependencies,omitempty"`
@@ -47,6 +48,7 @@ type UpdateOpts struct {
 	Type         *string // set issue type (nil = no change)
 	Priority     *int    // set priority (nil = no change)
 	Description  *string
+	Notes        *string
 	ParentID     *string
 	Assignee     *string  // set assignee (nil = no change)
 	Labels       []string // append these labels (nil = no change)

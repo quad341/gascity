@@ -118,6 +118,9 @@ func (m *MemStore) Update(id string, opts UpdateOpts) error {
 			if opts.Description != nil {
 				m.beads[i].Description = *opts.Description
 			}
+			if opts.Notes != nil {
+				m.beads[i].Notes = *opts.Notes
+			}
 			if opts.Priority != nil {
 				m.beads[i].Priority = cloneIntPtr(opts.Priority)
 			}

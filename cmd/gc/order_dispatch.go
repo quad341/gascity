@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +56,9 @@ const (
 	staleOrderTrackingCloseReason = "order-tracking sweep: stale tracking bead exceeded retention window"
 
 	completedOrderTrackingCloseReason = "order dispatch completed: tracking bead lifecycle finished"
+
+	orderExecOutputCaptureLimit = 16 * 1024
+	orderExecOutputCaptureHalf  = orderExecOutputCaptureLimit / 2
 )
 
 // orderDispatcher evaluates order trigger conditions and dispatches due
@@ -74,7 +80,8 @@ type orderDispatcher interface {
 }
 
 // ExecRunner runs a shell command with context, working directory, and
-// environment variables. Returns combined stdout or an error.
+// environment variables. Returns stdout or an error carrying stderr/exit
+// details when available.
 type ExecRunner func(ctx context.Context, command, dir string, env []string) ([]byte, error)
 
 // shellExecRunner is the production ExecRunner using os/exec.
@@ -82,7 +89,48 @@ func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = dir
 	cmd.Env = mergeOrderExecEnv(cmd.Environ(), env)
-	return cmd.CombinedOutput()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return cloneBytes(stdout.Bytes()), &orderExecRunError{
+			err:      err,
+			stderr:   cloneBytes(stderr.Bytes()),
+			exitCode: execExitCodeFromError(err),
+		}
+	}
+	return cloneBytes(stdout.Bytes()), nil
+}
+
+type orderExecRunError struct {
+	err      error
+	stderr   []byte
+	exitCode int
+}
+
+func (e *orderExecRunError) Error() string {
+	return e.err.Error()
+}
+
+func (e *orderExecRunError) Unwrap() error {
+	return e.err
+}
+
+func (e *orderExecRunError) ExitCode() int {
+	return e.exitCode
+}
+
+func (e *orderExecRunError) Stderr() []byte {
+	return cloneBytes(e.stderr)
+}
+
+func cloneBytes(in []byte) []byte {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]byte, len(in))
+	copy(out, in)
+	return out
 }
 
 func mergeOrderExecEnv(environ, env []string) []string {
@@ -520,7 +568,6 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	// Defer order matters: doneInflight runs last, after Close makes the
 	// tracking bead outcome observable to a waiting drain.
 	defer m.doneInflight()
-	defer closeOrderTrackingBead(store, trackingID) //nolint:errcheck // best-effort close
 
 	timeout := effectiveTimeout(a, m.maxTimeout)
 	childCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -533,22 +580,29 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 		Subject: scoped,
 	})
 
+	closeReason := completedOrderTrackingCloseReason
 	if a.IsExec() {
-		m.dispatchExec(childCtx, store, target, a, cityPath, trackingID)
+		closeReason = m.dispatchExec(childCtx, store, target, a, cityPath, trackingID)
 	} else {
 		m.dispatchWisp(childCtx, store, a, cityPath, trackingID)
 	}
+	if err := closeOrderTrackingBead(store, trackingID, closeReason); err != nil {
+		logDispatchError(m.stderr, "gc: order %s: failed to close tracking bead %s: %v", scoped, trackingID, err)
+	}
 }
 
-func closeOrderTrackingBead(store beads.Store, trackingID string) error {
+func closeOrderTrackingBead(store beads.Store, trackingID, reason string) error {
+	if strings.TrimSpace(reason) == "" {
+		reason = completedOrderTrackingCloseReason
+	}
 	_, err := store.CloseAll([]string{trackingID}, map[string]string{
-		"close_reason": completedOrderTrackingCloseReason,
+		"close_reason": reason,
 	})
 	return err
 }
 
 // dispatchExec runs an exec order's shell command.
-func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
+func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) string {
 	scoped := a.ScopedName()
 	labels := []string{"exec"}
 	var headSeq uint64
@@ -569,7 +623,7 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 				Subject: scoped,
 				Message: errMsg,
 			})
-			return
+			return "order dispatch failed: exec event cursor read failed"
 		}
 		hasEventCursor = true
 		// Event-triggered exec orders persist the cursor before the command
@@ -586,24 +640,42 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 				Subject: scoped,
 				Message: fmt.Sprintf("exec tracking bead %s event cursor label failed for seq=%d: %v", trackingID, headSeq, err),
 			})
-			return
+			return "order dispatch failed: exec tracking bead update failed"
 		}
 	}
 
 	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a)
 	var output []byte
+	var stderr []byte
 	var execErrMsg string
+	startedAt := time.Now()
+	duration := time.Duration(0)
+	exitCode := 0
+	var closeReason string
+	description := ""
 	if err != nil {
 		redactionEnv := append(os.Environ(), env...)
 		redacted := redactOrderEnvError(err, redactionEnv)
 		execErrMsg = "exec env failed: " + redacted
 		labels = []string{"exec-env-failed"}
+		exitCode = -1
+		duration = time.Since(startedAt)
+		description = fmt.Sprintf("fail: %s exec env failed: %s", scoped, redacted)
+		closeReason = "order dispatch failed: exec env failed"
 		logDispatchError(m.stderr, "gc: order exec %s env failed: %s", scoped, redacted)
 	} else {
+		startedAt = time.Now()
 		output, err = m.execRun(ctx, a.Exec, target.ScopeRoot, env)
+		duration = time.Since(startedAt)
+		outcome := classifyOrderExecOutcome(ctx, scoped, output, err, effectiveTimeout(a, m.maxTimeout), duration)
+		output = outcome.stdout
+		stderr = outcome.stderr
+		exitCode = outcome.exitCode
+		description = outcome.description
+		closeReason = outcome.closeReason
 		if err != nil {
 			redactionEnv := append(os.Environ(), env...)
-			execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
+			execErrMsg = execenv.RedactText(outcome.eventMessage, redactionEnv)
 			labels = []string{"exec-failed"}
 			logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
 			if len(output) > 0 {
@@ -614,7 +686,12 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 
 	// Label tracking bead with outcome via store (not CLI). For event execs,
 	// cursor labels were already persisted before the command ran.
-	if err := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); err != nil {
+	notes, truncated := orderExecTrackingNotes(exitCode, duration, output, stderr)
+	metadata := map[string]string(nil)
+	if truncated {
+		metadata = map[string]string{"gc.order.output_truncated": "true"}
+	}
+	if err := store.Update(trackingID, beads.UpdateOpts{Labels: labels, Description: &description, Notes: &notes, Metadata: metadata}); err != nil {
 		logDispatchError(m.stderr, "gc: order %s: failed to label exec tracking bead %s: %v", scoped, trackingID, err)
 		msg := fmt.Sprintf("exec tracking bead %s label failed: %v", trackingID, err)
 		if hasEventCursor {
@@ -626,7 +703,7 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: msg,
 		})
-		return
+		return "order dispatch failed: exec tracking bead update failed"
 	}
 	if execErrMsg != "" {
 		if hasEventCursor {
@@ -638,13 +715,163 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: execErrMsg,
 		})
-		return
+		return closeReason
 	}
 	m.rec.Record(events.Event{
 		Type:    events.OrderCompleted,
 		Actor:   "controller",
 		Subject: scoped,
 	})
+	return closeReason
+}
+
+type orderExecOutcome struct {
+	stdout       []byte
+	stderr       []byte
+	exitCode     int
+	description  string
+	closeReason  string
+	eventMessage string
+}
+
+func classifyOrderExecOutcome(ctx context.Context, scoped string, stdout []byte, err error, timeout, duration time.Duration) orderExecOutcome {
+	durationMS := duration.Milliseconds()
+	if err == nil {
+		return orderExecOutcome{
+			stdout:       stdout,
+			exitCode:     0,
+			description:  fmt.Sprintf("ok: %s exec returned 0 in %dms", scoped, durationMS),
+			closeReason:  "order dispatch completed: exec exit 0",
+			eventMessage: "exec exit 0",
+		}
+	}
+
+	stderr := execStderrFromError(err)
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		msg := fmt.Sprintf("exec timed out after %s", timeout)
+		return orderExecOutcome{
+			stdout:       stdout,
+			stderr:       stderr,
+			exitCode:     -1,
+			description:  fmt.Sprintf("fail: %s %s", scoped, msg),
+			closeReason:  "order dispatch failed: " + msg,
+			eventMessage: msg,
+		}
+	}
+
+	if code, ok := execExitCode(err); ok {
+		msg := fmt.Sprintf("exec exit %d", code)
+		return orderExecOutcome{
+			stdout:       stdout,
+			stderr:       stderr,
+			exitCode:     code,
+			description:  fmt.Sprintf("fail: %s exec returned %d in %dms", scoped, code, durationMS),
+			closeReason:  "order dispatch failed: " + msg,
+			eventMessage: msg,
+		}
+	}
+
+	msg := "exec could not start: " + err.Error()
+	return orderExecOutcome{
+		stdout:       stdout,
+		stderr:       stderr,
+		exitCode:     -1,
+		description:  fmt.Sprintf("fail: %s %s", scoped, msg),
+		closeReason:  "order dispatch failed: " + msg,
+		eventMessage: msg,
+	}
+}
+
+func orderExecTrackingNotes(exitCode int, duration time.Duration, stdout, stderr []byte) (string, bool) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "exit_code: %d\n", exitCode)
+	fmt.Fprintf(&b, "duration_ms: %d\n", duration.Milliseconds())
+	truncated := false
+	if len(stdout) > 0 {
+		body, didTruncate := truncateOrderExecOutput(stdout)
+		truncated = truncated || didTruncate
+		b.WriteString("stdout:\n")
+		b.WriteString(body)
+		if !strings.HasSuffix(body, "\n") {
+			b.WriteByte('\n')
+		}
+	}
+	if len(stderr) > 0 {
+		body, didTruncate := truncateOrderExecOutput(stderr)
+		truncated = truncated || didTruncate
+		b.WriteString("stderr:\n")
+		b.WriteString(body)
+		if !strings.HasSuffix(body, "\n") {
+			b.WriteByte('\n')
+		}
+	}
+	return b.String(), truncated
+}
+
+func truncateOrderExecOutput(output []byte) (string, bool) {
+	if len(output) <= orderExecOutputCaptureLimit {
+		return string(output), false
+	}
+	omitted := len(output) - orderExecOutputCaptureLimit
+	truncated := make([]byte, 0, orderExecOutputCaptureLimit+64)
+	truncated = append(truncated, output[:orderExecOutputCaptureHalf]...)
+	truncated = append(truncated, fmt.Sprintf("\n--- [truncated %d bytes] ---\n", omitted)...)
+	truncated = append(truncated, output[len(output)-orderExecOutputCaptureHalf:]...)
+	return string(truncated), true
+}
+
+func execExitCode(err error) (int, bool) {
+	type exitCoder interface {
+		ExitCode() int
+	}
+	var coded exitCoder
+	if errors.As(err, &coded) {
+		code := coded.ExitCode()
+		if code >= 0 {
+			return code, true
+		}
+	}
+	if code := parseExitStatus(err.Error()); code >= 0 {
+		return code, true
+	}
+	return -1, false
+}
+
+func execExitCodeFromError(err error) int {
+	code, ok := execExitCode(err)
+	if !ok {
+		return -1
+	}
+	return code
+}
+
+func parseExitStatus(msg string) int {
+	const prefix = "exit status "
+	idx := strings.LastIndex(msg, prefix)
+	if idx < 0 {
+		return -1
+	}
+	rest := msg[idx+len(prefix):]
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return -1
+	}
+	code, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return -1
+	}
+	return code
+}
+
+func execStderrFromError(err error) []byte {
+	type stderrer interface {
+		Stderr() []byte
+	}
+	var withStderr stderrer
+	if errors.As(err, &withStderr) {
+		return withStderr.Stderr()
+	}
+	return nil
 }
 
 func redactOrderEnvError(err error, env []string) string {

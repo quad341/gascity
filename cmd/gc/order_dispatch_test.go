@@ -89,6 +89,35 @@ type strictCloseReasonStore struct {
 	beads.Store
 }
 
+type fakeExecResultError struct {
+	code   int
+	stderr string
+}
+
+func (e fakeExecResultError) Error() string {
+	return fmt.Sprintf("exit status %d", e.code)
+}
+
+func (e fakeExecResultError) ExitCode() int {
+	return e.code
+}
+
+func (e fakeExecResultError) Stderr() []byte {
+	return []byte(e.stderr)
+}
+
+func trackingBeadByOrderRun(t *testing.T, store beads.Store, scoped string) beads.Bead {
+	t.Helper()
+	all := trackingBeads(t, store, "order-run:"+scoped)
+	for _, b := range all {
+		if b.Title == "order:"+scoped {
+			return b
+		}
+	}
+	t.Fatalf("tracking bead for %q not found; got %#v", scoped, all)
+	return beads.Bead{}
+}
+
 func (s selectiveUpdateFailStore) Update(id string, opts beads.UpdateOpts) error {
 	for _, label := range opts.Labels {
 		if strings.HasPrefix(label, "order-run:") {
@@ -1303,6 +1332,195 @@ func TestOrderDispatchExecDue(t *testing.T) {
 	}
 	if !rec.hasType(events.OrderCompleted) {
 		t.Error("missing order.completed event")
+	}
+}
+
+func TestOrderDispatchExecSuccessCapturesTrackingOutput(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		return []byte("hello stdout\n"), nil
+	}
+
+	aa := []orders.Order{{
+		Name:     "daily-standup-beads",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     "printf hello",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	got := trackingBeadByOrderRun(t, store, "daily-standup-beads")
+	if got.Status != "closed" {
+		t.Fatalf("tracking status = %q, want closed", got.Status)
+	}
+	if !strings.HasPrefix(got.Description, "ok: daily-standup-beads exec returned 0 in ") ||
+		!strings.HasSuffix(got.Description, "ms") {
+		t.Fatalf("description = %q, want ok exec duration summary", got.Description)
+	}
+	for _, want := range []string{
+		"exit_code: 0",
+		"duration_ms: ",
+		"stdout:",
+		"hello stdout",
+	} {
+		if !strings.Contains(got.Notes, want) {
+			t.Fatalf("notes missing %q:\n%s", want, got.Notes)
+		}
+	}
+	if got.Metadata["close_reason"] != "order dispatch completed: exec exit 0" {
+		t.Fatalf("close_reason = %q", got.Metadata["close_reason"])
+	}
+	if got.Metadata["gc.order.output_truncated"] != "" {
+		t.Fatalf("gc.order.output_truncated = %q, want unset", got.Metadata["gc.order.output_truncated"])
+	}
+}
+
+func TestOrderDispatchExecFailureCapturesExitAndStderr(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		return []byte("partial stdout\n"), fakeExecResultError{code: 1, stderr: "bad stderr\n"}
+	}
+
+	aa := []orders.Order{{
+		Name:     "fail-exec",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     "false",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	got := trackingBeadByOrderRun(t, store, "fail-exec")
+	if !strings.HasPrefix(got.Description, "fail: fail-exec exec returned 1 in ") ||
+		!strings.HasSuffix(got.Description, "ms") {
+		t.Fatalf("description = %q, want failed exec duration summary", got.Description)
+	}
+	for _, want := range []string{
+		"exit_code: 1",
+		"duration_ms: ",
+		"stdout:",
+		"partial stdout",
+		"stderr:",
+		"bad stderr",
+	} {
+		if !strings.Contains(got.Notes, want) {
+			t.Fatalf("notes missing %q:\n%s", want, got.Notes)
+		}
+	}
+	if got.Metadata["close_reason"] != "order dispatch failed: exec exit 1" {
+		t.Fatalf("close_reason = %q", got.Metadata["close_reason"])
+	}
+	if !rec.hasType(events.OrderFailed) {
+		t.Fatal("missing order.failed event")
+	}
+}
+
+func TestOrderDispatchExecTimeoutCapturesPartialOutput(t *testing.T) {
+	store := beads.NewMemStore()
+
+	fakeExec := func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+		<-ctx.Done()
+		return []byte("partial before timeout\n"), ctx.Err()
+	}
+
+	aa := []orders.Order{{
+		Name:     "slow-exec",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     "sleep 10",
+		Timeout:  "10ms",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	got := trackingBeadByOrderRun(t, store, "slow-exec")
+	if !strings.HasPrefix(got.Description, "fail: slow-exec exec timed out after ") {
+		t.Fatalf("description = %q, want timeout summary", got.Description)
+	}
+	if got.Metadata["close_reason"] != "order dispatch failed: exec timed out after 10ms" {
+		t.Fatalf("close_reason = %q", got.Metadata["close_reason"])
+	}
+	for _, want := range []string{"exit_code: -1", "stdout:", "partial before timeout"} {
+		if !strings.Contains(got.Notes, want) {
+			t.Fatalf("notes missing %q:\n%s", want, got.Notes)
+		}
+	}
+}
+
+func TestOrderDispatchExecSpawnErrorCapturesReason(t *testing.T) {
+	store := beads.NewMemStore()
+
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		return nil, fmt.Errorf("fork/exec missing-tool: no such file or directory")
+	}
+
+	aa := []orders.Order{{
+		Name:     "spawn-fail",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     "missing-tool",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	got := trackingBeadByOrderRun(t, store, "spawn-fail")
+	if !strings.HasPrefix(got.Description, "fail: spawn-fail exec could not start: fork/exec missing-tool") {
+		t.Fatalf("description = %q, want spawn error summary", got.Description)
+	}
+	if got.Metadata["close_reason"] != "order dispatch failed: exec could not start: fork/exec missing-tool: no such file or directory" {
+		t.Fatalf("close_reason = %q", got.Metadata["close_reason"])
+	}
+	if !strings.Contains(got.Notes, "exit_code: -1") {
+		t.Fatalf("notes missing exit_code -1:\n%s", got.Notes)
+	}
+}
+
+func TestOrderDispatchExecTruncatesLargeOutput(t *testing.T) {
+	store := beads.NewMemStore()
+	head := strings.Repeat("a", 9000)
+	tail := strings.Repeat("z", 9000)
+	stdout := head + tail
+
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		return []byte(stdout), nil
+	}
+
+	aa := []orders.Order{{
+		Name:     "large-output",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     "big-output",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	got := trackingBeadByOrderRun(t, store, "large-output")
+	if got.Metadata["gc.order.output_truncated"] != "true" {
+		t.Fatalf("gc.order.output_truncated = %q, want true", got.Metadata["gc.order.output_truncated"])
+	}
+	if !strings.Contains(got.Notes, "\n--- [truncated 1616 bytes] ---\n") {
+		t.Fatalf("notes missing truncation separator:\n%s", got.Notes)
+	}
+	if !strings.Contains(got.Notes, strings.Repeat("a", 8192)) {
+		t.Fatal("notes missing stdout head")
+	}
+	if !strings.Contains(got.Notes, strings.Repeat("z", 8192)) {
+		t.Fatal("notes missing stdout tail")
 	}
 }
 
@@ -4545,8 +4763,8 @@ func TestOrderDispatchClosesTrackingBead(t *testing.T) {
 				if b.Status != "closed" {
 					t.Errorf("tracking bead status = %q, want %q", b.Status, "closed")
 				}
-				if got := b.Metadata["close_reason"]; got != completedOrderTrackingCloseReason {
-					t.Errorf("close_reason = %q, want %q", got, completedOrderTrackingCloseReason)
+				if got := b.Metadata["close_reason"]; got != "order dispatch completed: exec exit 0" {
+					t.Errorf("close_reason = %q, want %q", got, "order dispatch completed: exec exit 0")
 				}
 				return
 			}

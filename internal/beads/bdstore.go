@@ -420,6 +420,7 @@ type bdIssue struct {
 	Ref          string       `json:"ref"`
 	Needs        []string     `json:"needs"`
 	Description  string       `json:"description"`
+	Notes        string       `json:"notes"`
 	Labels       []string     `json:"labels"`
 	Metadata     StringMap    `json:"metadata,omitempty"`
 	Dependencies []bdIssueDep `json:"dependencies,omitempty"`
@@ -545,6 +546,7 @@ func (b *bdIssue) toBead() Bead {
 		Ref:          b.Ref,
 		Needs:        b.Needs,
 		Description:  b.Description,
+		Notes:        b.Notes,
 		Labels:       b.Labels,
 		Metadata:     b.Metadata,
 		Dependencies: deps,
@@ -621,6 +623,9 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	}
 	if b.Description != "" {
 		args = append(args, "--description", b.Description)
+	}
+	if b.Notes != "" {
+		args = append(args, "--notes", b.Notes)
 	}
 	if b.Assignee != "" {
 		args = append(args, "--assignee", b.Assignee)
@@ -715,6 +720,9 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	}
 	if opts.Description != nil {
 		args = append(args, "--description", *opts.Description)
+	}
+	if opts.Notes != nil {
+		args = append(args, "--notes", *opts.Notes)
 	}
 	if opts.ParentID != nil {
 		args = append(args, "--parent", *opts.ParentID)

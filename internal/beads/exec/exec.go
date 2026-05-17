@@ -167,6 +167,7 @@ func (w *beadWire) toBead() beads.Bead {
 		Ref:         w.Ref,
 		Needs:       w.Needs,
 		Description: w.Description,
+		Notes:       w.Notes,
 		Labels:      w.Labels,
 		Metadata:    coerceMetadata(w.Metadata),
 		Ephemeral:   w.Ephemeral,

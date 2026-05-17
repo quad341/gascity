@@ -22,6 +22,7 @@ type createRequest struct {
 	Ref         string            `json:"ref,omitempty"`
 	Needs       []string          `json:"needs,omitempty"`
 	Description string            `json:"description,omitempty"`
+	Notes       string            `json:"notes,omitempty"`
 	Assignee    string            `json:"assignee,omitempty"`
 	From        string            `json:"from,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
@@ -36,6 +37,7 @@ type updateRequest struct {
 	Type         *string           `json:"type,omitempty"`
 	Priority     *int              `json:"priority,omitempty"`
 	Description  *string           `json:"description,omitempty"`
+	Notes        *string           `json:"notes,omitempty"`
 	ParentID     *string           `json:"parent_id,omitempty"`
 	Assignee     *string           `json:"assignee,omitempty"`
 	Labels       []string          `json:"labels,omitempty"`
@@ -62,6 +64,7 @@ type beadWire struct {
 	Ref         string                     `json:"ref"`
 	Needs       []string                   `json:"needs"`
 	Description string                     `json:"description"`
+	Notes       string                     `json:"notes"`
 	Labels      []string                   `json:"labels"`
 	Metadata    map[string]json.RawMessage `json:"metadata,omitempty"`
 	Ephemeral   bool                       `json:"ephemeral,omitempty"`
@@ -78,6 +81,7 @@ func marshalCreate(b beads.Bead) ([]byte, error) {
 		Ref:         b.Ref,
 		Needs:       b.Needs,
 		Description: b.Description,
+		Notes:       b.Notes,
 		Assignee:    b.Assignee,
 		From:        b.From,
 		Metadata:    b.Metadata,
@@ -94,6 +98,7 @@ func marshalUpdate(opts beads.UpdateOpts) ([]byte, error) {
 		Type:         opts.Type,
 		Priority:     opts.Priority,
 		Description:  opts.Description,
+		Notes:        opts.Notes,
 		ParentID:     opts.ParentID,
 		Assignee:     opts.Assignee,
 		Labels:       opts.Labels,

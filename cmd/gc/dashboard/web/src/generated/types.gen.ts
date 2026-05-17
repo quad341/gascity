@@ -260,6 +260,7 @@ export type Bead = {
         [key: string]: string;
     };
     needs?: Array<string> | null;
+    notes?: string;
     parent?: string;
     priority?: number;
     ref?: string;

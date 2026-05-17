@@ -840,6 +840,9 @@
               "null"
             ]
           },
+          "notes": {
+            "type": "string"
+          },
           "parent": {
             "type": "string"
           },

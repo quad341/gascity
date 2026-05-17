@@ -2123,6 +2123,7 @@ export interface components {
                 [key: string]: string;
             };
             needs?: string[] | null;
+            notes?: string;
             parent?: string;
             /** Format: int64 */
             priority?: number;

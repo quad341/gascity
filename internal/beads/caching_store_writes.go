@@ -296,7 +296,7 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 // cache miss, uninitialized cache, or any field mismatch — in which case the
 // caller falls through to the backing write. Companion to
 // metadataAlreadyMatchesCached but covers the full UpdateOpts surface
-// (Title, Status, Type, Priority, Description, ParentID, Assignee, Metadata,
+// (Title, Status, Type, Priority, Description, Notes, ParentID, Assignee, Metadata,
 // Labels, RemoveLabels). See gastownhall/gascity#1978 Phase 1.
 //
 // The short-circuit path skips the deduplication that
@@ -335,6 +335,9 @@ func (c *CachingStore) updateMatchesCached(id string, opts UpdateOpts) bool {
 		}
 	}
 	if opts.Description != nil && b.Description != *opts.Description {
+		return false
+	}
+	if opts.Notes != nil && b.Notes != *opts.Notes {
 		return false
 	}
 	if opts.ParentID != nil && b.ParentID != *opts.ParentID {
@@ -540,6 +543,9 @@ func applyUpdateOptsToBead(bead Bead, opts UpdateOpts) Bead {
 	}
 	if opts.Description != nil {
 		bead.Description = *opts.Description
+	}
+	if opts.Notes != nil {
+		bead.Notes = *opts.Notes
 	}
 	if opts.ParentID != nil {
 		bead.ParentID = *opts.ParentID

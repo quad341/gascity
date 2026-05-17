@@ -84,6 +84,7 @@ create)
 	parent_id=$(echo "$input" | jq -r '.parent_id // ""')
 	ref=$(echo "$input" | jq -r '.ref // ""')
 	description=$(echo "$input" | jq -r '.description // ""')
+	notes=$(echo "$input" | jq -r '.notes // ""')
 	ephemeral=$(echo "$input" | jq -r '.ephemeral // false')
 	created_at=$(now)
 
@@ -111,6 +112,7 @@ create)
 		--arg ref "$ref" \
 		--argjson needs "$needs" \
 		--arg description "$description" \
+		--arg notes "$notes" \
 		--argjson labels "$labels" \
 		--argjson ephemeral "$ephemeral" \
 		'{
@@ -125,6 +127,7 @@ create)
         ref: $ref,
         needs: $needs,
         description: $description,
+        notes: $notes,
         labels: $labels,
         ephemeral: $ephemeral
       }' >"$STATE_ROOT/$id.json"
@@ -158,6 +161,13 @@ update)
 	if [ "$has_desc" = "true" ]; then
 		new_desc=$(echo "$input" | jq -r '.description')
 		current=$(echo "$current" | jq --arg d "$new_desc" '.description = $d')
+	fi
+
+	# Apply notes if present (non-null).
+	has_notes=$(echo "$input" | jq 'has("notes") and .notes != null')
+	if [ "$has_notes" = "true" ]; then
+		new_notes=$(echo "$input" | jq -r '.notes')
+		current=$(echo "$current" | jq --arg n "$new_notes" '.notes = $n')
 	fi
 
 	# Apply parent_id if present (non-null).

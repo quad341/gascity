@@ -226,6 +226,10 @@ func TestPackV2ImportsScript(t *testing.T) {
 	testscript.Run(t, newTestscriptParams(t, filepath.Join("testdata", "pack-v2-imports.txtar")))
 }
 
+func TestBeadsPreflightScript(t *testing.T) {
+	testscript.Run(t, newTestscriptParams(t, filepath.Join("testdata", "beads-preflight.txtar")))
+}
+
 func newTestscriptParams(t *testing.T, files ...string) testscript.Params {
 	params := testscript.Params{
 		Dir:         "testdata",

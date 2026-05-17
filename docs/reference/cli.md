@@ -231,6 +231,7 @@ gc beads
 |------------|-------------|
 | [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
+| [gc beads preflight](#gc-beads-preflight) | Check whether a beads scope is safe for native storage |
 
 ## gc beads city
 
@@ -300,6 +301,35 @@ gc beads health
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--quiet` | bool |  | silent on success, stderr on failure |
+
+## gc beads preflight
+
+Run a read-only beads backend preflight for native-store activation.
+
+The command checks provider contract, metadata backend, bd context agreement,
+database identity, and metadata field shape. It never rewrites metadata, never
+runs repair commands, and has no --fix flag; repair is operator-triggered
+outside this command.
+
+Exit codes: ELIGIBLE=0, BLOCKED=1, DEGRADED=2, unable-to-run=3.
+
+```
+gc beads preflight [flags]
+```
+
+**Example:**
+
+```
+gc beads preflight
+  gc beads preflight --scope /path/to/city --json
+  gc beads preflight --verbose
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit redacted machine-readable JSON |
+| `--scope` | string |  | beads scope root (default: resolved city root) |
+| `--verbose` | bool |  | include redacted diagnostic detail fields in human output |
 
 ## gc build-image
 

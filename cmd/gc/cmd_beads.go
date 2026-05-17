@@ -17,7 +17,7 @@ Subcommands for topology operations, health checking, and diagnostics.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc beads: missing subcommand (city, health)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc beads: missing subcommand (city, health, preflight)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc beads: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -27,6 +27,7 @@ Subcommands for topology operations, health checking, and diagnostics.`,
 	cmd.AddCommand(
 		newBeadsCityCmd(stdout, stderr),
 		newBeadsHealthCmd(stdout, stderr),
+		newBeadsPreflightCmd(stdout, stderr),
 	)
 	return cmd
 }

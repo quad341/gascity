@@ -1,0 +1,42 @@
+# User-facing beads preflight coverage.
+
+env GC_SESSION=fake
+env GC_BEADS=bd
+env GC_DOLT=skip
+
+cd $WORK/preflight-city
+
+exec gc beads preflight --help
+stdout 'ELIGIBLE=0'
+stdout 'BLOCKED=1'
+stdout 'DEGRADED=2'
+stdout 'unable-to-run=3'
+stdout 'no --fix'
+
+! exec gc beads preflight --verbose
+stdout 'Beads backend preflight'
+stdout 'Scope:'
+stdout '\[PASS\]'
+stdout '\[WARN\]'
+stdout '\[FAIL\]'
+stdout 'Verdict: BLOCKED'
+stdout 'Using BdStore fallback'
+
+! exec gc beads preflight --json
+stdout '"verdict": "BLOCKED"'
+stdout '"postgres_dsn_redacted": "postgres://\[REDACTED\]"'
+! stdout 'swordfish'
+
+-- preflight-city/.gc/.keep --
+-- preflight-city/.beads/metadata.json --
+{
+  "backend": "postgres",
+  "postgres_dsn": "postgres://operator:swordfish@db.example.com/gascity",
+  "project_id": "gc-local"
+}
+-- preflight-city/city.toml --
+[workspace]
+name = "preflight-city"
+
+[beads]
+provider = "bd"

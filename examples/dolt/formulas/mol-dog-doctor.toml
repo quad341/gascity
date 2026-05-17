@@ -70,12 +70,31 @@ Time the probe query. Warn if > {{latency_threshold}}.
 - Latency: <duration>
 - Warning: if latency exceeds threshold
 
-**If server unreachable:**
-This is a critical failure. Escalate immediately:
-```bash
-gc mail send mayor/ -s "ESCALATION: Dolt server unreachable on port {{port}} [CRITICAL]" \\
-  -m "Doctor probe failed: server did not respond to active_branch() query."
-```
+**If the probe fails, classify by exit code:**
+
+The probe's exit code distinguishes config drift from outage. Read `$?`
+immediately after the probe command and pick the branch:
+
+- **Exit `78` (`EX_CONFIG`):** the helper `resolve_dolt_port_or_die`
+  could not resolve a runtime port. The city has not been started, or
+  `GC_CITY_RUNTIME_DIR` points at a different scope. This is config
+  drift, not an outage — escalate as **WARNING**:
+  ```bash
+  gc mail send mayor/ -s "Dolt runtime not initialized [WARNING]" \\
+    -m "Doctor probe could not resolve a runtime port (exit 78 / EX_CONFIG). Run \\`gc start\\` to bring up the city, or set GC_DOLT_PORT to an already-running server. See \\`gc doctor\\` (the \\`dolt-runtime-discoverable\\` check) for the state file path and the env vars consulted."
+  ```
+
+- **Any other non-zero exit** (connection refused, query error, timeout):
+  the runtime port resolved cleanly but the server itself is unreachable
+  or unhealthy. This is a real outage — escalate as **CRITICAL**:
+  ```bash
+  gc mail send mayor/ -s "Dolt server unreachable [CRITICAL]" \\
+    -m "Doctor probe failed after port resolution succeeded: server did not respond to active_branch() query (exit <code>). See \\`gc doctor\\` for connection diagnostics; the \\`dolt-runtime-discoverable\\` check passed, so the runtime state file is current."
+  ```
+
+The exit code is the primary signal. The probe stderr text
+(e.g. `gc dolt: cannot resolve runtime port ...`) is human-facing audit
+trail only — do not pattern-match it.
 
 **Exit criteria:** Server connectivity confirmed (or escalated)."""
 

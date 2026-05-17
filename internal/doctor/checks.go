@@ -1072,6 +1072,95 @@ func doctorScopeHasFileStoreMarker(scopePath string) bool {
 	return err == nil && !info.IsDir()
 }
 
+// DoltRuntimeDiscoverableCheck verifies the city's managed Dolt runtime
+// state file (dolt-state.json) is present and marks a live server. It
+// runs immediately before DoltServerCheck so discovery failures surface
+// with a clearer message than "connection refused".
+type DoltRuntimeDiscoverableCheck struct {
+	cityPath string
+	skip     bool
+}
+
+// NewDoltRuntimeDiscoverableCheck creates a check that asserts the
+// managed Dolt runtime state file is current. If skip is true, the
+// check returns OK without inspecting the filesystem.
+func NewDoltRuntimeDiscoverableCheck(cityPath string, skip bool) *DoltRuntimeDiscoverableCheck {
+	return &DoltRuntimeDiscoverableCheck{cityPath: cityPath, skip: skip}
+}
+
+// Name returns the check identifier.
+func (c *DoltRuntimeDiscoverableCheck) Name() string { return "dolt-runtime-discoverable" }
+
+// Run checks that dolt-state.json exists, parses, marks the server
+// running, and names a live PID and valid port.
+func (c *DoltRuntimeDiscoverableCheck) Run(_ *CheckContext) *CheckResult {
+	r := &CheckResult{Name: c.Name()}
+	if c.skip {
+		r.Status = StatusOK
+		r.Message = "skipped (file backend or GC_DOLT=skip)"
+		return r
+	}
+
+	stateFile := filepath.Join(doctorDoltPackStateDir(c.cityPath), "dolt-state.json")
+	data, err := os.ReadFile(stateFile) //nolint:gosec // path is derived from managed city layout
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			r.Status = StatusError
+			r.Message = "dolt runtime state not published (file missing)"
+			r.FixHint = doltRuntimeDiscoverableFixHint
+			return r
+		}
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("dolt runtime state unreadable: %v", err)
+		r.FixHint = doltRuntimeDiscoverableFixHint
+		return r
+	}
+
+	var state managedDoltDoctorRuntimeState
+	if err := json.Unmarshal(data, &state); err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("dolt runtime state malformed: %v", err)
+		r.FixHint = doltRuntimeDiscoverableFixHint
+		return r
+	}
+
+	if !state.Running {
+		r.Status = StatusError
+		r.Message = "dolt runtime state present but server marked stopped"
+		r.FixHint = doltRuntimeDiscoverableFixHint
+		return r
+	}
+	if state.PID <= 0 {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("dolt runtime state invalid: pid %d not a process", state.PID)
+		r.FixHint = doltRuntimeDiscoverableFixHint
+		return r
+	}
+	if !pidutil.Alive(state.PID) {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("dolt runtime state stale: pid %d not alive", state.PID)
+		r.FixHint = doltRuntimeDiscoverableFixHint
+		return r
+	}
+	if state.Port < 1 || state.Port > 65535 {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("dolt runtime state invalid: port %d out of range", state.Port)
+		r.FixHint = doltRuntimeDiscoverableFixHint
+		return r
+	}
+
+	r.Status = StatusOK
+	r.Message = fmt.Sprintf("dolt runtime state published: port %d, pid %d", state.Port, state.PID)
+	return r
+}
+
+// CanFix returns false — runtime state is published by `gc start`; the
+// doctor cannot autostart the city.
+func (c *DoltRuntimeDiscoverableCheck) CanFix() bool { return false }
+
+// Fix is a no-op.
+func (c *DoltRuntimeDiscoverableCheck) Fix(_ *CheckContext) error { return nil }
+
 // DoltServerCheck verifies the dolt server is running and reachable.
 type DoltServerCheck struct {
 	cityPath string
@@ -1125,6 +1214,106 @@ func (c *DoltServerCheck) CanFix() bool { return false }
 
 // Fix is a no-op.
 func (c *DoltServerCheck) Fix(_ *CheckContext) error { return nil }
+
+// RigDoltRuntimeDiscoverableCheck verifies a rig-local explicit Dolt
+// runtime state file is current. Inherited rigs delegate to the
+// city-level check and return OK here.
+type RigDoltRuntimeDiscoverableCheck struct {
+	cityPath string
+	rig      config.Rig
+	skip     bool
+}
+
+// NewRigDoltRuntimeDiscoverableCheck creates a runtime-discoverable
+// check for an explicit rig Dolt endpoint.
+func NewRigDoltRuntimeDiscoverableCheck(cityPath string, rig config.Rig, skip bool) *RigDoltRuntimeDiscoverableCheck {
+	return &RigDoltRuntimeDiscoverableCheck{cityPath: cityPath, rig: rig, skip: skip}
+}
+
+// Name returns the check identifier.
+func (c *RigDoltRuntimeDiscoverableCheck) Name() string {
+	return "rig:" + c.rig.Name + ":dolt-runtime-discoverable"
+}
+
+// Run delegates to the city-level check when the rig inherits the
+// city's dolt endpoint; otherwise reads the rig-local state file.
+func (c *RigDoltRuntimeDiscoverableCheck) Run(_ *CheckContext) *CheckResult {
+	r := &CheckResult{Name: c.Name()}
+	if c.skip {
+		r.Status = StatusOK
+		r.Message = "skipped (file backend or GC_DOLT=skip)"
+		return r
+	}
+
+	rigPath := c.rig.Path
+	if !filepath.IsAbs(rigPath) {
+		rigPath = filepath.Join(c.cityPath, rigPath)
+	}
+	explicit, err := contract.ScopeUsesExplicitEndpoint(fsys.OSFS{}, c.cityPath, rigPath)
+	if err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("resolve dolt scope: %v", err)
+		r.FixHint = doltRuntimeDiscoverableFixHint
+		return r
+	}
+	if !explicit {
+		r.Status = StatusOK
+		r.Message = "inherits city dolt runtime"
+		return r
+	}
+
+	stateFile := filepath.Join(doctorDoltPackStateDir(rigPath), "dolt-state.json")
+	data, err := os.ReadFile(stateFile) //nolint:gosec // path is derived from managed rig layout
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			r.Status = StatusError
+			r.Message = "dolt runtime state not published (file missing)"
+			r.FixHint = doltRuntimeDiscoverableFixHint
+			return r
+		}
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("dolt runtime state unreadable: %v", err)
+		r.FixHint = doltRuntimeDiscoverableFixHint
+		return r
+	}
+
+	var state managedDoltDoctorRuntimeState
+	if err := json.Unmarshal(data, &state); err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("dolt runtime state malformed: %v", err)
+		r.FixHint = doltRuntimeDiscoverableFixHint
+		return r
+	}
+
+	if !state.Running {
+		r.Status = StatusError
+		r.Message = "dolt runtime state present but server marked stopped"
+		r.FixHint = doltRuntimeDiscoverableFixHint
+		return r
+	}
+	if state.PID <= 0 || !pidutil.Alive(state.PID) {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("dolt runtime state stale: pid %d not alive", state.PID)
+		r.FixHint = doltRuntimeDiscoverableFixHint
+		return r
+	}
+	if state.Port < 1 || state.Port > 65535 {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("dolt runtime state invalid: port %d out of range", state.Port)
+		r.FixHint = doltRuntimeDiscoverableFixHint
+		return r
+	}
+
+	r.Status = StatusOK
+	r.Message = fmt.Sprintf("dolt runtime state published: port %d, pid %d", state.Port, state.PID)
+	return r
+}
+
+// CanFix returns false.
+func (c *RigDoltRuntimeDiscoverableCheck) CanFix() bool { return false }
+
+// Fix is a no-op.
+func (c *RigDoltRuntimeDiscoverableCheck) Fix(_ *CheckContext) error { return nil }
 
 // RigDoltServerCheck verifies a rig-local explicit Dolt endpoint is reachable.
 type RigDoltServerCheck struct {
@@ -1199,6 +1388,13 @@ func (c *RigDoltServerCheck) CanFix() bool { return false }
 
 // Fix is a no-op.
 func (c *RigDoltServerCheck) Fix(_ *CheckContext) error { return nil }
+
+// doltRuntimeDiscoverableFixHint is the FixHint surfaced by both the
+// city-level and per-rig dolt-runtime-discoverable checks when the
+// runtime state file is absent or stale. Stable text — the dog
+// formula prose at mol-dog-doctor.toml references the check name and
+// expects the FixHint to name `gc start`.
+const doltRuntimeDiscoverableFixHint = "start the city (gc start) or check $GC_CITY_RUNTIME_DIR for a stale or wrong-scope state file"
 
 func resolveDoltServerFixHint(fs fsys.FS, cityPath string) string {
 	state, ok, err := contract.ResolveAuthoritativeConfigState(fs, cityPath, cityPath, "")

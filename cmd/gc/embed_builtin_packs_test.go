@@ -213,6 +213,39 @@ func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 	}
 }
 
+func TestMolDogDoctorSubjectsPinned(t *testing.T) {
+	dir := t.TempDir()
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+	path := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "formulas", "mol-dog-doctor.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read formula: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		`Dolt runtime not initialized [WARNING]`,
+		`Dolt server unreachable [CRITICAL]`,
+		"Exit `78` (`EX_CONFIG`)",
+		"dolt-runtime-discoverable",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("mol-dog-doctor.toml missing pinned wire string: %q", want)
+		}
+	}
+
+	for _, gone := range []string{
+		`ESCALATION: Dolt server unreachable [CRITICAL]`,
+		`ESCALATION: Dolt server unreachable on port`,
+	} {
+		if strings.Contains(body, gone) {
+			t.Errorf("mol-dog-doctor.toml still contains pre-slice-3 subject: %q", gone)
+		}
+	}
+}
+
 func TestDoltSyncRejectsManagedProbeDatabaseFilter(t *testing.T) {
 	for _, dbName := range []string{
 		managedDoltProbeDatabase,

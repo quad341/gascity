@@ -242,6 +242,51 @@ dolt_port = "3308"
 	}
 }
 
+func TestDoctorRegistersDoltRuntimeBeforeServer(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+
+[[rigs]]
+name = "fe"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_DOLT", "skip")
+
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, false, &stdout, &stderr)
+	out := stdout.String()
+
+	assertCheckBefore(t, out, "dolt-runtime-discoverable", "dolt-server")
+	assertCheckBefore(t, out, "rig:fe:dolt-runtime-discoverable", "rig:fe:dolt-server")
+}
+
+func assertCheckBefore(t *testing.T, out, first, second string) {
+	t.Helper()
+	firstIndex := strings.Index(out, first)
+	if firstIndex < 0 {
+		t.Fatalf("doctor output missing %q:\n%s", first, out)
+	}
+	secondIndex := strings.Index(out, second)
+	if secondIndex < 0 {
+		t.Fatalf("doctor output missing %q:\n%s", second, out)
+	}
+	if firstIndex >= secondIndex {
+		t.Fatalf("doctor output ordered %q at %d after %q at %d:\n%s", first, firstIndex, second, secondIndex, out)
+	}
+}
+
 func TestDoDoctorReportsLegacyBDSplitStore(t *testing.T) {
 	cityDir := t.TempDir()
 	writeMinimalCityToml(t, cityDir)

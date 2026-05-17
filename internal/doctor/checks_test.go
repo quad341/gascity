@@ -1287,6 +1287,186 @@ func (s *spyPingStore) Ping() error {
 
 // --- DoltServerCheck ---
 
+func TestDoltRuntimeDiscoverableCheck_Skipped(t *testing.T) {
+	c := NewDoltRuntimeDiscoverableCheck(t.TempDir(), true)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "skipped") {
+		t.Fatalf("message = %q, want skipped", r.Message)
+	}
+	if r.FixHint != "" {
+		t.Fatalf("fix hint = %q, want empty", r.FixHint)
+	}
+}
+
+func TestDoltRuntimeDiscoverableCheck_FileMissing(t *testing.T) {
+	dir := t.TempDir()
+	c := NewDoltRuntimeDiscoverableCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	}
+	if r.Message != "dolt runtime state not published (file missing)" {
+		t.Fatalf("message = %q", r.Message)
+	}
+	if r.FixHint != doltRuntimeDiscoverableFixHint {
+		t.Fatalf("fix hint = %q, want %q", r.FixHint, doltRuntimeDiscoverableFixHint)
+	}
+}
+
+func TestDoltRuntimeDiscoverableCheck_Malformed(t *testing.T) {
+	dir := t.TempDir()
+	writeDoltRuntimeDiscoverableState(t, dir, "{not valid json}")
+	c := NewDoltRuntimeDiscoverableCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	}
+	if !strings.HasPrefix(r.Message, "dolt runtime state malformed: ") {
+		t.Fatalf("message = %q, want malformed prefix", r.Message)
+	}
+	if r.FixHint != doltRuntimeDiscoverableFixHint {
+		t.Fatalf("fix hint = %q, want %q", r.FixHint, doltRuntimeDiscoverableFixHint)
+	}
+}
+
+func TestDoltRuntimeDiscoverableCheck_RunningFalse(t *testing.T) {
+	dir := t.TempDir()
+	writeDoltRuntimeDiscoverableState(t, dir, fmt.Sprintf(`{"running":false,"pid":1,"port":47823,"data_dir":%q}`, filepath.Join(dir, ".beads", "dolt")))
+	c := NewDoltRuntimeDiscoverableCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	}
+	if r.Message != "dolt runtime state present but server marked stopped" {
+		t.Fatalf("message = %q", r.Message)
+	}
+}
+
+func TestDoltRuntimeDiscoverableCheck_DeadPID(t *testing.T) {
+	dir := t.TempDir()
+	writeDoltRuntimeDiscoverableState(t, dir, fmt.Sprintf(`{"running":true,"pid":999999,"port":47823,"data_dir":%q}`, filepath.Join(dir, ".beads", "dolt")))
+	c := NewDoltRuntimeDiscoverableCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	}
+	if r.Message != "dolt runtime state stale: pid 999999 not alive" {
+		t.Fatalf("message = %q", r.Message)
+	}
+}
+
+func TestDoltRuntimeDiscoverableCheck_PortOutOfRange(t *testing.T) {
+	dir := t.TempDir()
+	writeDoltRuntimeDiscoverableState(t, dir, fmt.Sprintf(`{"running":true,"pid":%d,"port":70000,"data_dir":%q}`, os.Getpid(), filepath.Join(dir, ".beads", "dolt")))
+	c := NewDoltRuntimeDiscoverableCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	}
+	if r.Message != "dolt runtime state invalid: port 70000 out of range" {
+		t.Fatalf("message = %q", r.Message)
+	}
+}
+
+func TestDoltRuntimeDiscoverableCheck_OK(t *testing.T) {
+	dir := t.TempDir()
+	writeDoltRuntimeDiscoverableState(t, dir, fmt.Sprintf(`{"running":true,"pid":%d,"port":47823,"data_dir":%q}`, os.Getpid(), filepath.Join(dir, ".beads", "dolt")))
+	c := NewDoltRuntimeDiscoverableCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	want := fmt.Sprintf("dolt runtime state published: port 47823, pid %d", os.Getpid())
+	if r.Message != want {
+		t.Fatalf("message = %q, want %q", r.Message, want)
+	}
+	if r.FixHint != "" {
+		t.Fatalf("fix hint = %q, want empty", r.FixHint)
+	}
+}
+
+func TestDoltRuntimeDiscoverableCheck_CanFixFalse(t *testing.T) {
+	c := NewDoltRuntimeDiscoverableCheck(t.TempDir(), false)
+	if c.CanFix() {
+		t.Fatal("CanFix() = true, want false")
+	}
+	if err := c.Fix(&CheckContext{}); err != nil {
+		t.Fatalf("Fix() error = %v, want nil", err)
+	}
+}
+
+func TestDoltRuntimeDiscoverableCheck_NameStable(t *testing.T) {
+	c := NewDoltRuntimeDiscoverableCheck(t.TempDir(), false)
+	if got := c.Name(); got != "dolt-runtime-discoverable" {
+		t.Fatalf("Name() = %q, want %q", got, "dolt-runtime-discoverable")
+	}
+}
+
+func TestRigDoltRuntimeDiscoverableCheck_NameStable(t *testing.T) {
+	c := NewRigDoltRuntimeDiscoverableCheck(t.TempDir(), config.Rig{Name: "fe", Path: "frontend"}, false)
+	if got := c.Name(); got != "rig:fe:dolt-runtime-discoverable" {
+		t.Fatalf("Name() = %q, want %q", got, "rig:fe:dolt-runtime-discoverable")
+	}
+}
+
+func TestRigDoltRuntimeDiscoverableCheck_Inherits(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{
+		IssuePrefix:    "fe",
+		EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	writeDoctorCanonicalMetadata(t, fs, rigDir, "fe")
+
+	c := NewRigDoltRuntimeDiscoverableCheck(cityDir, config.Rig{Name: "fe", Path: rigDir}, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	if r.Message != "inherits city dolt runtime" {
+		t.Fatalf("message = %q", r.Message)
+	}
+}
+
+func TestRigDoltRuntimeDiscoverableCheck_ExplicitFileMissing(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{
+		IssuePrefix:    "fe",
+		EndpointOrigin: contract.EndpointOriginExplicit,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltHost:       "127.0.0.1",
+		DoltPort:       "3307",
+	})
+	writeDoctorCanonicalMetadata(t, fs, rigDir, "fe")
+
+	c := NewRigDoltRuntimeDiscoverableCheck(cityDir, config.Rig{Name: "fe", Path: rigDir}, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	}
+	if r.Message != "dolt runtime state not published (file missing)" {
+		t.Fatalf("message = %q", r.Message)
+	}
+}
+
+func TestRigDoltRuntimeDiscoverableCheck_Skipped(t *testing.T) {
+	c := NewRigDoltRuntimeDiscoverableCheck(t.TempDir(), config.Rig{Name: "fe", Path: "frontend"}, true)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	if r.Message != "skipped (file backend or GC_DOLT=skip)" {
+		t.Fatalf("message = %q", r.Message)
+	}
+}
+
 func TestDoltServerCheck_ManagedCityUsesRuntimeState(t *testing.T) {
 	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
 	fs := fsys.OSFS{}
@@ -1930,6 +2110,17 @@ func writeDoctorRuntimeState(t *testing.T, fs fsys.FS, dir, port string) {
 		filepath.Join(dir, ".beads", "dolt"),
 	)
 	if err := fs.WriteFile(filepath.Join(runtimeDir, "dolt-state.json"), []byte(state), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeDoltRuntimeDiscoverableState(t *testing.T, dir, state string) {
+	t.Helper()
+	runtimeDir := filepath.Join(dir, ".gc", "runtime", "packs", "dolt")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "dolt-state.json"), []byte(state), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

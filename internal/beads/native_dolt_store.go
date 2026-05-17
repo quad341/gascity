@@ -273,6 +273,16 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 	return s.storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor)
 }
 
+// SetLocalString reports that NativeDoltStore local metadata is not supported.
+func (s *NativeDoltStore) SetLocalString(_, _, _ string) error {
+	return ErrLocalMetadataNotSupported
+}
+
+// GetLocalString reports that NativeDoltStore local metadata is not supported.
+func (s *NativeDoltStore) GetLocalString(_, _ string) (string, bool, error) {
+	return "", false, ErrLocalMetadataNotSupported
+}
+
 // Delete permanently removes a bead from the upstream beads storage layer.
 func (s *NativeDoltStore) Delete(id string) error {
 	return s.storage.DeleteIssue(context.Background(), id)

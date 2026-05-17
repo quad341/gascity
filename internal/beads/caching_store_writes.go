@@ -291,6 +291,11 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	return nil
 }
 
+// SetLocalString writes clone-local metadata through to the backing store.
+func (c *CachingStore) SetLocalString(beadID, key, value string) error {
+	return c.backing.SetLocalString(beadID, key, value)
+}
+
 type trackingTx struct {
 	inner   Tx
 	touched []string

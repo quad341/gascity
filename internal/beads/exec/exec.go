@@ -423,6 +423,18 @@ func (s *Store) SetMetadataBatch(id string, kvs map[string]string) error {
 	return nil
 }
 
+// SetLocalString reports that exec-backed stores do not support clone-local
+// metadata.
+func (s *Store) SetLocalString(_, _, _ string) error {
+	return beads.ErrLocalMetadataNotSupported
+}
+
+// GetLocalString reports that exec-backed stores do not support clone-local
+// metadata.
+func (s *Store) GetLocalString(_, _ string) (string, bool, error) {
+	return "", false, beads.ErrLocalMetadataNotSupported
+}
+
 // Tx executes fn sequentially against the exec store.
 func (s *Store) Tx(_ string, fn func(beads.Tx) error) error {
 	if fn == nil {

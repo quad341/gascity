@@ -862,6 +862,16 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return nil
 }
 
+// SetLocalString reports that BdStore does not support clone-local metadata.
+func (s *BdStore) SetLocalString(_, _, _ string) error {
+	return ErrLocalMetadataNotSupported
+}
+
+// GetLocalString reports that BdStore does not support clone-local metadata.
+func (s *BdStore) GetLocalString(_, _ string) (string, bool, error) {
+	return "", false, ErrLocalMetadataNotSupported
+}
+
 // Tx executes fn sequentially against the BdStore.
 func (s *BdStore) Tx(_ string, fn func(Tx) error) error {
 	return runSequentialTx(s, fn)

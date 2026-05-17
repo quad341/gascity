@@ -11,6 +11,10 @@ import (
 // ErrNotFound is returned when a bead ID does not exist in the store.
 var ErrNotFound = errors.New("bead not found")
 
+// ErrLocalMetadataNotSupported is returned by store implementations that do
+// not support clone-local bead metadata.
+var ErrLocalMetadataNotSupported = errors.New("local metadata not supported by this store")
+
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a
 // concurrent reparent before the caller's projection wait could converge.
 var ErrParentProjectionSuperseded = errors.New("parent projection superseded by concurrent update")
@@ -242,6 +246,19 @@ type Store interface {
 	// batch contents to be idempotent and tolerate partial writes.
 	// Returns ErrNotFound if the bead does not exist.
 	SetMetadataBatch(id string, kvs map[string]string) error
+
+	// SetLocalString persists a clone-local key-value pair for a bead.
+	// The value is not replicated to remote peers. Callers pass only the
+	// short key; implementations apply any backing-store namespace.
+	// Returns ErrLocalMetadataNotSupported if the backing store does not
+	// support clone-local metadata.
+	SetLocalString(beadID, key, value string) error
+
+	// GetLocalString retrieves a clone-local value set by SetLocalString.
+	// ok is false when the key is absent. Returns
+	// ErrLocalMetadataNotSupported if the backing store does not support
+	// clone-local metadata.
+	GetLocalString(beadID, key string) (value string, ok bool, err error)
 
 	// Tx executes fn inside a single logical transaction identified by
 	// commitMsg. Stores without native transaction support execute fn

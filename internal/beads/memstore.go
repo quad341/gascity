@@ -390,6 +390,16 @@ func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return fmt.Errorf("setting metadata batch on %q: %w", id, ErrNotFound)
 }
 
+// SetLocalString reports that MemStore does not support clone-local metadata.
+func (m *MemStore) SetLocalString(_, _, _ string) error {
+	return ErrLocalMetadataNotSupported
+}
+
+// GetLocalString reports that MemStore does not support clone-local metadata.
+func (m *MemStore) GetLocalString(_, _ string) (string, bool, error) {
+	return "", false, ErrLocalMetadataNotSupported
+}
+
 // Tx executes fn sequentially against the MemStore.
 func (m *MemStore) Tx(_ string, fn func(Tx) error) error {
 	return runSequentialTx(m, fn)

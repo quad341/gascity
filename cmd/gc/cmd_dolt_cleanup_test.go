@@ -3,14 +3,190 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+func TestCleanupAuditLineAppended(t *testing.T) {
+	fixed := time.Date(2026, 5, 11, 20, 30, 45, 987654321, time.FixedZone("PDT", -7*60*60))
+
+	t.Run("happy_path_dropped", func(t *testing.T) {
+		fake, runtimeDir := fakeCleanupAuditFS()
+		report := &CleanupReport{
+			Dropped: CleanupDroppedReport{
+				Names: []string{"testdb_a", "testdb_b"},
+			},
+		}
+
+		if err := appendCleanupAuditLine(fake, runtimeDir, fixed, CleanupSchemaVersion, 0, report); err != nil {
+			t.Fatalf("appendCleanupAuditLine: %v", err)
+		}
+
+		fields := cleanupAuditFields(t, fake, runtimeDir, 1)[0]
+		assertCleanupAuditTimestamp(t, fields[0])
+		assertEqual(t, fields[1], CleanupSchemaVersion)
+		assertEqual(t, fields[2], "0")
+		assertEqual(t, fields[3], "testdb_a,testdb_b")
+		assertEqual(t, fields[4], "")
+	})
+
+	t.Run("happy_path_skipped", func(t *testing.T) {
+		fake, runtimeDir := fakeCleanupAuditFS()
+		report := &CleanupReport{
+			Dropped: CleanupDroppedReport{
+				Skipped: []DoltDropSkip{
+					{Name: "beads", Reason: DropSkipReasonRigProtected},
+					{Name: "testdb_q", Reason: "live-session"},
+				},
+			},
+		}
+
+		if err := appendCleanupAuditLine(fake, runtimeDir, fixed, CleanupSchemaVersion, 0, report); err != nil {
+			t.Fatalf("appendCleanupAuditLine: %v", err)
+		}
+
+		fields := cleanupAuditFields(t, fake, runtimeDir, 1)[0]
+		assertEqual(t, fields[3], "")
+		assertEqual(t, fields[4], "live-session=testdb_q,rig-protected=beads")
+	})
+
+	t.Run("exit_nonzero", func(t *testing.T) {
+		fake, runtimeDir := fakeCleanupAuditFS()
+
+		if err := appendCleanupAuditLine(fake, runtimeDir, fixed, CleanupSchemaVersion, 1, &CleanupReport{}); err != nil {
+			t.Fatalf("appendCleanupAuditLine: %v", err)
+		}
+
+		fields := cleanupAuditFields(t, fake, runtimeDir, 1)[0]
+		assertEqual(t, fields[2], "1")
+		assertEqual(t, fields[3], "")
+		assertEqual(t, fields[4], "")
+	})
+
+	t.Run("mode_0644", func(t *testing.T) {
+		fake, runtimeDir := fakeCleanupAuditFS()
+		path := filepath.Join(runtimeDir, cleanupAuditLogRelPath)
+
+		if err := appendCleanupAuditLine(fake, runtimeDir, fixed, CleanupSchemaVersion, 0, &CleanupReport{}); err != nil {
+			t.Fatalf("first appendCleanupAuditLine: %v", err)
+		}
+		if got := fake.Modes[path] & 0o777; got != 0o644 {
+			t.Fatalf("created mode = %o, want 0644", got)
+		}
+		if err := fake.Chmod(path, 0o600); err != nil {
+			t.Fatalf("Chmod: %v", err)
+		}
+		if err := appendCleanupAuditLine(fake, runtimeDir, fixed, CleanupSchemaVersion, 0, &CleanupReport{}); err != nil {
+			t.Fatalf("second appendCleanupAuditLine: %v", err)
+		}
+		if got := fake.Modes[path] & 0o777; got != 0o600 {
+			t.Fatalf("existing mode after append = %o, want 0600", got)
+		}
+	})
+
+	t.Run("appends_not_truncates", func(t *testing.T) {
+		fake, runtimeDir := fakeCleanupAuditFS()
+		first := &CleanupReport{Dropped: CleanupDroppedReport{Names: []string{"testdb_a"}}}
+		second := &CleanupReport{Dropped: CleanupDroppedReport{Names: []string{"testdb_b"}}}
+
+		if err := appendCleanupAuditLine(fake, runtimeDir, fixed, CleanupSchemaVersion, 0, first); err != nil {
+			t.Fatalf("first appendCleanupAuditLine: %v", err)
+		}
+		if err := appendCleanupAuditLine(fake, runtimeDir, fixed, CleanupSchemaVersion, 0, second); err != nil {
+			t.Fatalf("second appendCleanupAuditLine: %v", err)
+		}
+
+		fields := cleanupAuditFields(t, fake, runtimeDir, 2)
+		assertEqual(t, fields[1][3], "testdb_b")
+	})
+
+	t.Run("sort_stable", func(t *testing.T) {
+		fake, runtimeDir := fakeCleanupAuditFS()
+		report := &CleanupReport{
+			Dropped: CleanupDroppedReport{
+				Names: []string{"testdb_c", "testdb_a", "testdb_b"},
+				Skipped: []DoltDropSkip{
+					{Name: "zz", Reason: "live-session"},
+					{Name: "aa", Reason: "live-session"},
+					{Name: "beads", Reason: DropSkipReasonRigProtected},
+				},
+			},
+		}
+
+		if err := appendCleanupAuditLine(fake, runtimeDir, fixed, CleanupSchemaVersion, 0, report); err != nil {
+			t.Fatalf("appendCleanupAuditLine: %v", err)
+		}
+
+		fields := cleanupAuditFields(t, fake, runtimeDir, 1)[0]
+		assertEqual(t, fields[3], "testdb_a,testdb_b,testdb_c")
+		assertEqual(t, fields[4], "live-session=aa,live-session=zz,rig-protected=beads")
+	})
+}
+
+func TestCleanupAuditLineAppendedRefusesMissingDir(t *testing.T) {
+	fake := fsys.NewFake()
+	err := appendCleanupAuditLine(fake, "/runtime", time.Now(), CleanupSchemaVersion, 0, &CleanupReport{})
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("appendCleanupAuditLine error = %v, want fs.ErrNotExist", err)
+	}
+}
+
+func fakeCleanupAuditFS() (*fsys.Fake, string) {
+	fake := fsys.NewFake()
+	runtimeDir := "/runtime"
+	fake.Dirs[filepath.Join(runtimeDir, "packs")] = true
+	fake.Dirs[filepath.Join(runtimeDir, "packs", "dolt")] = true
+	return fake, runtimeDir
+}
+
+func cleanupAuditFields(t *testing.T, fake *fsys.Fake, runtimeDir string, wantLines int) [][]string {
+	t.Helper()
+	path := filepath.Join(runtimeDir, cleanupAuditLogRelPath)
+	data := strings.TrimSuffix(string(fake.Files[path]), "\n")
+	if data == "" {
+		t.Fatalf("audit log %s is empty", path)
+	}
+	lines := strings.Split(data, "\n")
+	if len(lines) != wantLines {
+		t.Fatalf("audit log lines = %d, want %d; data=%q", len(lines), wantLines, data)
+	}
+	fields := make([][]string, 0, len(lines))
+	for _, line := range lines {
+		parts := strings.Split(line, "\t")
+		if len(parts) != 5 {
+			t.Fatalf("audit line field count = %d, want 5; line=%q", len(parts), line)
+		}
+		fields = append(fields, parts)
+	}
+	return fields
+}
+
+func assertCleanupAuditTimestamp(t *testing.T, got string) {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339, got)
+	if err != nil {
+		t.Fatalf("timestamp %q is not RFC3339: %v", got, err)
+	}
+	if parsed.Format(time.RFC3339) != got || !strings.HasSuffix(got, "Z") || strings.Contains(got, ".") {
+		t.Fatalf("timestamp %q is not UTC second-precision RFC3339", got)
+	}
+}
+
+func assertEqual(t *testing.T, got, want string) {
+	t.Helper()
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
 
 func TestCleanupReportJSONShape(t *testing.T) {
 	r := CleanupReport{

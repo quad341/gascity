@@ -8,11 +8,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
@@ -170,6 +172,78 @@ func (r CleanupReport) MarshalJSON() ([]byte, error) {
 	return json.Marshal(alias(r))
 }
 
+// TODO(audit-format): if validDoltDatabaseIdentifier allows tab, comma,
+// equals, or newline later, re-pin the cleanup audit log format before writing.
+const cleanupAuditLogRelPath = "packs/dolt/cleanup-audit.log"
+
+type cleanupAuditOpenFileFS interface {
+	OpenFile(name string, flag int, perm os.FileMode) (io.WriteCloser, error)
+}
+
+// appendCleanupAuditLine writes a single tab-separated audit line to
+// <runtimeDir>/packs/dolt/cleanup-audit.log. It is called exactly once per
+// runDoltCleanup invocation with a runtime dir, regardless of exit code or
+// mode.
+//
+// The audit log is append-only; rotation is the operator's job. Failure to
+// write the audit line is logged by the caller but does not change the cleanup
+// runner's exit code.
+//
+//nolint:unparam // schema is an explicit audit-format field, pinned by ga-endmgy for future schema bumps.
+func appendCleanupAuditLine(
+	fs fsys.FS,
+	runtimeDir string,
+	now time.Time,
+	schema string,
+	exitCode int,
+	report *CleanupReport,
+) error {
+	if report == nil {
+		return errors.New("cleanup audit report is nil")
+	}
+	opener, ok := fs.(cleanupAuditOpenFileFS)
+	if !ok {
+		return errors.New("filesystem does not support append open")
+	}
+
+	dropped := append([]string(nil), report.Dropped.Names...)
+	sort.Strings(dropped)
+
+	skipped := append([]DoltDropSkip(nil), report.Dropped.Skipped...)
+	sort.Slice(skipped, func(i, j int) bool {
+		if skipped[i].Reason == skipped[j].Reason {
+			return skipped[i].Name < skipped[j].Name
+		}
+		return skipped[i].Reason < skipped[j].Reason
+	})
+	skippedTokens := make([]string, 0, len(skipped))
+	for _, skip := range skipped {
+		skippedTokens = append(skippedTokens, skip.Reason+"="+skip.Name)
+	}
+
+	line := fmt.Sprintf(
+		"%s\t%s\t%d\t%s\t%s\n",
+		now.UTC().Format(time.RFC3339),
+		schema,
+		exitCode,
+		strings.Join(dropped, ","),
+		strings.Join(skippedTokens, ","),
+	)
+	file, err := opener.OpenFile(filepath.Join(runtimeDir, cleanupAuditLogRelPath), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer file.Close() //nolint:errcheck // best-effort close after append write
+	n, err := file.Write([]byte(line))
+	if err != nil {
+		return err
+	}
+	if n != len(line) {
+		return io.ErrShortWrite
+	}
+	return nil
+}
+
 // cleanupOptions bundles the inputs to runDoltCleanup so the command body
 // stays Cobra-free and testable. The Cobra command builds an options value
 // from flags and city state and hands it off.
@@ -192,6 +266,7 @@ type cleanupOptions struct {
 	Host           string
 	HomeDir        string
 	TempDir        string
+	RuntimeDir     string
 	MaxOrphanDBs   int
 
 	// StalePrefixes overrides defaultStaleDatabasePrefixes when non-empty.
@@ -223,16 +298,25 @@ type cleanupOptions struct {
 // otherwise the report still renders with errors describing the unreachable
 // data plane.
 func runDoltCleanup(opts cleanupOptions, stdout, stderr io.Writer) int {
+	report := &CleanupReport{Schema: CleanupSchemaVersion}
+	auditExitCode := 0
+	if opts.RuntimeDir != "" {
+		defer func() {
+			if err := appendCleanupAuditLine(opts.FS, opts.RuntimeDir, time.Now(), CleanupSchemaVersion, auditExitCode, report); err != nil {
+				fmt.Fprintf(stderr, "warning: cleanup audit log append failed: %v\n", err) //nolint:errcheck
+			}
+		}()
+	}
 	if opts.MaxOrphanDBs < 0 {
-		report := CleanupReport{Schema: CleanupSchemaVersion}
 		recordCleanupErrorKind(
-			&report,
+			report,
 			"config",
 			cleanupErrorKindInvalidMaxOrphanDBs,
 			"--max-orphan-dbs",
 			fmt.Errorf("--max-orphan-dbs must be non-negative, got %d", opts.MaxOrphanDBs),
 		)
-		emitReport(report, PortResolution{}, opts, stdout, stderr)
+		emitReport(*report, PortResolution{}, opts, stdout, stderr)
+		auditExitCode = 1
 		return 1
 	}
 
@@ -240,7 +324,7 @@ func runDoltCleanup(opts cleanupOptions, stdout, stderr io.Writer) int {
 	opts.PortResolution = resolution
 	protections, protectionErrors := rigProtections(opts.Rigs, opts.FS)
 
-	report := CleanupReport{
+	*report = CleanupReport{
 		Schema: CleanupSchemaVersion,
 		Port: CleanupPortReport{
 			Resolved: resolution.Port,
@@ -250,14 +334,14 @@ func runDoltCleanup(opts cleanupOptions, stdout, stderr io.Writer) int {
 		RigsProtected: protections,
 	}
 	for _, e := range protectionErrors {
-		recordCleanupForceBlocker(&report, cleanupErrorKindRigProtection, e.rig, e.err)
+		recordCleanupForceBlocker(report, cleanupErrorKindRigProtection, e.rig, e.err)
 	}
 	if opts.Force {
 		for _, e := range protectionErrors {
-			recordCleanupErrorKind(&report, "rig", cleanupErrorKindRigProtection, e.rig, e.err)
+			recordCleanupErrorKind(report, "rig", cleanupErrorKindRigProtection, e.rig, e.err)
 		}
 	}
-	recordUnsafeRigDatabaseNames(&report)
+	recordUnsafeRigDatabaseNames(report)
 
 	if fatalAttempt, err := fatalPortResolutionAttempt(resolution); err != nil {
 		fatalResolution := resolution
@@ -269,8 +353,9 @@ func runDoltCleanup(opts cleanupOptions, stdout, stderr io.Writer) int {
 			Source:   fatalAttempt.Source,
 			Fallback: false,
 		}
-		recordCleanupError(&report, "port", fatalAttempt.Source, err)
-		emitReport(report, fatalResolution, opts, stdout, stderr)
+		recordCleanupError(report, "port", fatalAttempt.Source, err)
+		emitReport(*report, fatalResolution, opts, stdout, stderr)
+		auditExitCode = 1
 		return 1
 	}
 
@@ -285,21 +370,24 @@ func runDoltCleanup(opts cleanupOptions, stdout, stderr io.Writer) int {
 				Error: err.Error(),
 			})
 			report.Summary.ErrorsTotal++
-			emitReport(report, resolution, opts, stdout, stderr)
+			emitReport(*report, resolution, opts, stdout, stderr)
+			auditExitCode = 1
 			return 1
 		}
 	}
 
-	if runDropStage(&report, opts) {
-		runPurgeStage(&report, opts)
-		runReapStage(&report, opts)
+	if runDropStage(report, opts) {
+		runPurgeStage(report, opts)
+		runReapStage(report, opts)
 	}
 	report.Summary.BytesFreedDisk = report.Purge.BytesReclaimed
 
-	emitReport(report, resolution, opts, stdout, stderr)
+	emitReport(*report, resolution, opts, stdout, stderr)
 	if opts.DoltClientOpenErr != nil {
+		auditExitCode = 1
 		return 1
 	}
+	auditExitCode = 0
 	return 0
 }
 
@@ -862,6 +950,10 @@ can still return successfully after emitting the report.`,
 			}
 			rigs := loadResolverRigs(cityPath, cfg)
 			homeDir, _ := os.UserHomeDir()
+			runtimeDir := citylayout.RuntimeDataDir(cityPath)
+			if trusted := citylayout.TrustedAmbientCityRuntimeDir(cityPath); trusted != "" {
+				runtimeDir = trusted
+			}
 			opts := cleanupOptions{
 				Flag:         portFlag,
 				CityPort:     cfg.Dolt.Port,
@@ -873,6 +965,7 @@ can still return successfully after emitting the report.`,
 				Host:         cfg.Dolt.Host,
 				HomeDir:      homeDir,
 				TempDir:      os.TempDir(),
+				RuntimeDir:   runtimeDir,
 				MaxOrphanDBs: maxOrphanDBs,
 			}
 

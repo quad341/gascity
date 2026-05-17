@@ -1,7 +1,9 @@
 package fsys
 
 import (
+	"errors"
 	"hash/fnv"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -27,7 +29,7 @@ type Fake struct {
 
 // Call records a single method invocation on [Fake].
 type Call struct {
-	Method string // "MkdirAll", "WriteFile", "ReadFile", "ReadRegularFile", "Stat", "ReadDir", "Rename", "Remove", or "Chmod"
+	Method string // "MkdirAll", "WriteFile", "OpenFile", "ReadFile", "ReadRegularFile", "Stat", "ReadDir", "Rename", "Remove", or "Chmod"
 	Path   string // path argument
 }
 
@@ -95,6 +97,64 @@ func (f *Fake) WriteFile(name string, data []byte, perm os.FileMode) error {
 	f.Files[name] = cp
 	f.Modes[name] = perm.Perm()
 	f.ModTimes[name] = modTime
+	return nil
+}
+
+// OpenFile records the call and returns an in-memory append/write handle.
+func (f *Fake) OpenFile(name string, flag int, perm os.FileMode) (io.WriteCloser, error) {
+	f.Calls = append(f.Calls, Call{Method: "OpenFile", Path: name})
+	if err, ok := f.Errors[name]; ok {
+		return nil, err
+	}
+	dir := filepath.Dir(filepath.Clean(name))
+	if dir != "." && dir != "/" && !f.Dirs[dir] {
+		return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrNotExist}
+	}
+	if f.Files == nil {
+		f.Files = make(map[string][]byte)
+	}
+	if f.Modes == nil {
+		f.Modes = make(map[string]os.FileMode)
+	}
+	if f.ModTimes == nil {
+		f.ModTimes = make(map[string]time.Time)
+	}
+	if _, ok := f.Files[name]; !ok {
+		if flag&os.O_CREATE == 0 {
+			return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrNotExist}
+		}
+		f.Files[name] = nil
+		f.Modes[name] = perm.Perm()
+		f.ModTimes[name] = f.nextModTime()
+	} else if flag&os.O_TRUNC != 0 {
+		f.Files[name] = nil
+		f.ModTimes[name] = f.nextModTime()
+	}
+	return &fakeFile{fs: f, name: name, append: flag&os.O_APPEND != 0}, nil
+}
+
+type fakeFile struct {
+	fs     *Fake
+	name   string
+	append bool
+	closed bool
+}
+
+func (f *fakeFile) Write(data []byte) (int, error) {
+	if f.closed {
+		return 0, errors.New("write closed fake file")
+	}
+	cp := append([]byte(nil), data...)
+	if f.append {
+		cp = append(append([]byte(nil), f.fs.Files[f.name]...), cp...)
+	}
+	f.fs.Files[f.name] = cp
+	f.fs.ModTimes[f.name] = f.fs.nextModTime()
+	return len(data), nil
+}
+
+func (f *fakeFile) Close() error {
+	f.closed = true
 	return nil
 }
 

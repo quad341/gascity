@@ -7,6 +7,7 @@
 package fsys
 
 import (
+	"io"
 	"os"
 )
 
@@ -53,6 +54,11 @@ func (OSFS) MkdirAll(path string, perm os.FileMode) error {
 // WriteFile delegates to [os.WriteFile].
 func (OSFS) WriteFile(name string, data []byte, perm os.FileMode) error {
 	return os.WriteFile(name, data, perm)
+}
+
+// OpenFile delegates to [os.OpenFile].
+func (OSFS) OpenFile(name string, flag int, perm os.FileMode) (io.WriteCloser, error) {
+	return os.OpenFile(name, flag, perm)
 }
 
 // ReadFile delegates to [os.ReadFile].

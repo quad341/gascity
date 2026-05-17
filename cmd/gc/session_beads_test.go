@@ -60,6 +60,20 @@ type sessionLifecycleTxSpyStore struct {
 	directCloseCalls            int
 }
 
+type rollbackTxStore struct {
+	*beads.MemStore
+
+	failAfter string
+	txCalls   int
+}
+
+const (
+	rollbackFailAfterUpdate        = "update"
+	rollbackFailAfterMetadataBatch = "metadata-batch"
+)
+
+var errRollbackTxInjected = errors.New("injected tx failure")
+
 func (s *sessionLifecycleTxSpyStore) SetMetadata(id, key, value string) error {
 	s.directSetMetadataKeys = append(s.directSetMetadataKeys, key)
 	return s.MemStore.SetMetadata(id, key, value)
@@ -88,8 +102,27 @@ func (s *sessionLifecycleTxSpyStore) Tx(_ string, fn func(beads.Tx) error) error
 	return fn(sessionLifecycleTxSpy{store: s})
 }
 
+func (s *rollbackTxStore) Tx(_ string, fn func(beads.Tx) error) error {
+	s.txCalls++
+	snapshot, err := s.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		return err
+	}
+	err = fn(rollbackTx{store: s.MemStore, failAfter: s.failAfter})
+	if err != nil {
+		s.MemStore = beads.NewMemStoreFrom(len(snapshot), snapshot, nil)
+		return err
+	}
+	return nil
+}
+
 type sessionLifecycleTxSpy struct {
 	store *sessionLifecycleTxSpyStore
+}
+
+type rollbackTx struct {
+	store     *beads.MemStore
+	failAfter string
 }
 
 func (t sessionLifecycleTxSpy) Update(id string, opts beads.UpdateOpts) error {
@@ -105,6 +138,30 @@ func (t sessionLifecycleTxSpy) SetMetadataBatch(id string, kvs map[string]string
 func (t sessionLifecycleTxSpy) Close(id string) error {
 	t.store.txOps = append(t.store.txOps, "Close:"+id)
 	return t.store.MemStore.Close(id)
+}
+
+func (t rollbackTx) Update(id string, opts beads.UpdateOpts) error {
+	if err := t.store.Update(id, opts); err != nil {
+		return err
+	}
+	if t.failAfter == rollbackFailAfterUpdate {
+		return errRollbackTxInjected
+	}
+	return nil
+}
+
+func (t rollbackTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := t.store.SetMetadataBatch(id, kvs); err != nil {
+		return err
+	}
+	if t.failAfter == rollbackFailAfterMetadataBatch {
+		return errRollbackTxInjected
+	}
+	return nil
+}
+
+func (t rollbackTx) Close(id string) error {
+	return t.store.Close(id)
 }
 
 type failingCloseStore struct {
@@ -1270,6 +1327,69 @@ func TestReopenClosedConfiguredNamedSessionBeadUsesTransactionUnderIdentifierLoc
 	wantOps := "Update:" + closed.ID + ",SetMetadataBatch:" + closed.ID
 	if got := strings.Join(store.txOps, ","); got != wantOps {
 		t.Fatalf("tx ops = %s, want %s", got, wantOps)
+	}
+}
+
+func TestReopenClosedConfiguredNamedSessionBead_AtomicWrites(t *testing.T) {
+	cityPath := t.TempDir()
+	store := &rollbackTxStore{
+		MemStore:  beads.NewMemStore(),
+		failAfter: rollbackFailAfterUpdate,
+	}
+	now := time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "refinery", StartCommand: "true", MaxActiveSessions: intPtr(2)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "refinery", Mode: "on_demand"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "refinery")
+	closed, err := store.Create(beads.Bead{
+		Title:  "refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "refinery",
+			"template":                   "refinery",
+			"state":                      "suspended",
+			"close_reason":               "suspended",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "refinery",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create closed canonical bead: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("close canonical bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	if reopened, ok := reopenClosedConfiguredNamedSessionBead(
+		cityPath, store, cfg, "test-city", "refinery", sessionName, "creating", now, nil, &stderr,
+	); ok {
+		t.Fatalf("reopen succeeded with bead %#v; want rollback after injected tx error", reopened)
+	}
+	if store.txCalls != 1 {
+		t.Fatalf("Tx calls = %d, want 1", store.txCalls)
+	}
+	got, err := store.Get(closed.ID)
+	if err != nil {
+		t.Fatalf("get closed canonical bead: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed after rollback", got.Status)
+	}
+	if got.Metadata["state"] != "suspended" {
+		t.Fatalf("state = %q, want suspended after rollback", got.Metadata["state"])
+	}
+	if got.Metadata["close_reason"] != "suspended" {
+		t.Fatalf("close_reason = %q, want suspended after rollback", got.Metadata["close_reason"])
 	}
 }
 
@@ -5684,6 +5804,50 @@ func TestCloseBeadUsesTransactionForMetadataAndClose(t *testing.T) {
 	}
 }
 
+func TestCloseBead_AtomicAcrossMetadataAndStatus(t *testing.T) {
+	store := &rollbackTxStore{
+		MemStore:  beads.NewMemStore(),
+		failAfter: rollbackFailAfterMetadataBatch,
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	if closeBead(store, sessionBead.ID, "stale-session", now, &stderr) {
+		t.Fatalf("closeBead returned true; want false after injected tx error")
+	}
+	if store.txCalls != 1 {
+		t.Fatalf("Tx calls = %d, want 1", store.txCalls)
+	}
+	got, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get session bead: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open after rollback", got.Status)
+	}
+	if got.Metadata["state"] != "active" {
+		t.Fatalf("state = %q, want active after rollback", got.Metadata["state"])
+	}
+	if got.Metadata["close_reason"] != "" {
+		t.Fatalf("close_reason = %q, want empty after rollback", got.Metadata["close_reason"])
+	}
+	if got.Metadata["closed_at"] != "" {
+		t.Fatalf("closed_at = %q, want empty after rollback", got.Metadata["closed_at"])
+	}
+}
+
 func TestRollbackPendingCreateClearsExplicitSessionNameBeforeCloseTransaction(t *testing.T) {
 	store := &sessionLifecycleTxSpyStore{MemStore: beads.NewMemStore()}
 	sessionBead, err := store.Create(beads.Bead{
@@ -5743,6 +5907,58 @@ func TestRollbackPendingCreateClearsExplicitSessionNameBeforeCloseTransaction(t 
 	if got.Metadata["session_name"] != "" {
 		t.Fatalf("session_name = %q, want empty", got.Metadata["session_name"])
 	}
+}
+
+func BenchmarkCloseBeadWithPatchWritePair(b *testing.B) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	patch := session.ClosePatch(now, "stale-session")
+
+	b.Run("tx", func(b *testing.B) {
+		store := beads.NewMemStore()
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			created, err := store.Create(beads.Bead{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name": fmt.Sprintf("worker-%d", i),
+					"state":        "active",
+				},
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := closeBeadWithPatch(store, created.ID, patch); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("sequential", func(b *testing.B) {
+		store := beads.NewMemStore()
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			created, err := store.Create(beads.Bead{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name": fmt.Sprintf("worker-%d", i),
+					"state":        "active",
+				},
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := store.SetMetadataBatch(created.ID, patch); err != nil {
+				b.Fatal(err)
+			}
+			if err := store.Close(created.ID); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
 
 func TestCloseBeadDoesNotDuplicateOwnershipGuard(t *testing.T) {

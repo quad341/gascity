@@ -134,6 +134,11 @@ func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
 	return cached, true
 }
 
+// GetLocalString retrieves clone-local metadata from the backing store.
+func (c *CachingStore) GetLocalString(beadID, key string) (string, bool, error) {
+	return c.backing.GetLocalString(beadID, key)
+}
+
 func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, items []Bead) []Bead {
 	refreshedParents := make(map[string]Bead)
 	removedParents := make(map[string]struct{})

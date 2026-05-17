@@ -32,6 +32,23 @@ func fakeRunner(responses map[string]struct {
 	}
 }
 
+func TestBdStoreLocalMetadataUnsupportedReturnsSentinel(t *testing.T) {
+	s := beads.NewBdStore("/city", fakeRunner(nil))
+	if err := s.SetLocalString("bd-1", "synced_at", "2026-05-17T00:00:00Z"); !errors.Is(err, beads.ErrLocalMetadataNotSupported) {
+		t.Fatalf("SetLocalString error = %v, want ErrLocalMetadataNotSupported", err)
+	}
+	value, ok, err := s.GetLocalString("bd-1", "synced_at")
+	if !errors.Is(err, beads.ErrLocalMetadataNotSupported) {
+		t.Fatalf("GetLocalString error = %v, want ErrLocalMetadataNotSupported", err)
+	}
+	if ok {
+		t.Fatalf("GetLocalString ok = true, want false")
+	}
+	if value != "" {
+		t.Fatalf("GetLocalString value = %q, want empty", value)
+	}
+}
+
 // --- Create ---
 
 func TestBdStoreCreate(t *testing.T) {

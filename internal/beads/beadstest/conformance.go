@@ -664,6 +664,23 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	t.Run("LocalMetadataUnsupportedReturnsSentinel", func(t *testing.T) {
+		s := newStore()
+		if err := s.SetLocalString("gc-1", "synced_at", "2026-05-17T00:00:00Z"); !errors.Is(err, beads.ErrLocalMetadataNotSupported) {
+			t.Fatalf("SetLocalString error = %v, want ErrLocalMetadataNotSupported", err)
+		}
+		value, ok, err := s.GetLocalString("gc-1", "synced_at")
+		if !errors.Is(err, beads.ErrLocalMetadataNotSupported) {
+			t.Fatalf("GetLocalString error = %v, want ErrLocalMetadataNotSupported", err)
+		}
+		if ok {
+			t.Fatalf("GetLocalString ok = true, want false")
+		}
+		if value != "" {
+			t.Fatalf("GetLocalString value = %q, want empty", value)
+		}
+	})
+
 	t.Run("ListByLabelEmpty", func(t *testing.T) {
 		s := newStore()
 		got, err := s.ListByLabel("anything", 0)

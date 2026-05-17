@@ -638,6 +638,70 @@ func TestRunDoltCleanup_DryRunAllowsProcessTempRootTestConfig(t *testing.T) {
 	}
 }
 
+func TestRunDoltCleanup_DryRunReportsReapReason(t *testing.T) {
+	procs := []DoltProcInfo{{
+		PID:       1281044,
+		ParentPID: 1 << 30,
+		Argv:      []string{"dolt", "sql-server", "--config", "/tmp/TestCityRuntime123/001/.gc/runtime/packs/dolt/dolt-config.yaml"},
+	}}
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		FS:                fsys.NewFake(),
+		JSON:              true,
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+
+	if len(r.Reaped.Targets) != 1 {
+		t.Fatalf("Targets = %+v, want exactly one reap target", r.Reaped.Targets)
+	}
+	target := r.Reaped.Targets[0]
+	if target.ConfigPath != "/tmp/TestCityRuntime123/001/.gc/runtime/packs/dolt/dolt-config.yaml" {
+		t.Fatalf("ConfigPath = %q", target.ConfigPath)
+	}
+	if !strings.Contains(target.Reason, "parent") || !strings.Contains(target.Reason, "test prefix") {
+		t.Fatalf("Reason = %q, want parent-dead and test-prefix reason", target.Reason)
+	}
+}
+
+func TestRunDoltCleanup_DryRunProtectsCityManagedDoltConfig(t *testing.T) {
+	procs := []DoltProcInfo{{
+		PID:  1282001,
+		Argv: []string{"dolt", "sql-server", "--config", "/tmp/gc-live-city/.gc/runtime/packs/dolt/dolt-config.yaml"},
+	}}
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs:              []resolverRig{{Name: "city", Path: "/tmp/gc-live-city", HQ: true}},
+		FS:                fsys.NewFake(),
+		JSON:              true,
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+
+	if r.Reaped.Count != 0 || len(r.Reaped.Targets) != 0 {
+		t.Fatalf("Reaped = %+v, want live city managed Dolt protected", r.Reaped)
+	}
+	if !equalIntSlice(r.Reaped.ProtectedPIDs, []int{1282001}) {
+		t.Fatalf("ProtectedPIDs = %v, want [1282001]", r.Reaped.ProtectedPIDs)
+	}
+}
+
 func TestRunDoltCleanup_ForceKillsOrphans(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
@@ -679,6 +743,44 @@ func TestRunDoltCleanup_ForceKillsOrphans(t *testing.T) {
 	wantTermed := []int{1281044, 1281099}
 	if !equalIntSlice(termed, wantTermed) {
 		t.Errorf("SIGTERM-ed PIDs = %v, want %v", termed, wantTermed)
+	}
+}
+
+func TestRunDoltCleanup_ForceChecksLivenessBeforeSIGKILL(t *testing.T) {
+	procs := []DoltProcInfo{{
+		PID:            4444,
+		Argv:           []string{"dolt", "sql-server", "--config", "/tmp/TestX/config.yaml"},
+		StartTimeTicks: 10,
+	}}
+	var signals []syscall.Signal
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		FS:                fsys.NewFake(),
+		JSON:              true,
+		Force:             true,
+		HomeDir:           "/home/u",
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
+		KillProcess: func(_ int, sig syscall.Signal) error {
+			signals = append(signals, sig)
+			return nil
+		},
+		ProcessAlive:    func(int) (bool, error) { return false, nil },
+		ReapGracePeriod: 1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if r.Reaped.Count != 1 {
+		t.Errorf("Reaped.Count = %d, want 1 for post-SIGTERM disappearance", r.Reaped.Count)
+	}
+	if len(signals) != 1 || signals[0] != syscall.SIGTERM {
+		t.Errorf("signals = %v, want only SIGTERM because liveness check skipped SIGKILL", signals)
 	}
 }
 

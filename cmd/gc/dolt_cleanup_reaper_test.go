@@ -65,6 +65,20 @@ func TestIsTestConfigPath_KnownGCTestPrefix(t *testing.T) {
 	}
 }
 
+func TestIsTestConfigPath_GeneralGCTestPrefixes(t *testing.T) {
+	for _, path := range []string{
+		"/tmp/gc-reload-invalid-123/.gc/runtime/packs/dolt/dolt-config.yaml",
+		"/tmp/gc-stop-123/.gc/runtime/packs/dolt/dolt-config.yaml",
+		"/tmp/gc-margin-123/.gc/runtime/packs/dolt/dolt-config.yaml",
+		"/tmp/gc-force-stop-123/.gc/runtime/packs/dolt/dolt-config.yaml",
+		"/tmp/gc-any-unit-test-123/.gc/runtime/packs/dolt/dolt-config.yaml",
+	} {
+		if !isTestConfigPath(path, "/home/u", "") {
+			t.Errorf("expected %q to be a gc test path", path)
+		}
+	}
+}
+
 func TestIsTestConfigPath_NotTest(t *testing.T) {
 	cases := []string{
 		"/tmp/be-s9d-bench-dolt/config.yaml", // benchmark
@@ -110,6 +124,39 @@ func TestClassifyDoltProcess_OrphanByTestPath(t *testing.T) {
 	}
 	if got.ConfigPath != "/tmp/TestMailRouter9182/config.yaml" {
 		t.Errorf("ConfigPath = %q", got.ConfigPath)
+	}
+}
+
+func TestClassifyDoltProcess_OrphanByDeadParentAndTestPath(t *testing.T) {
+	p := DoltProcInfo{
+		PID:       2224,
+		ParentPID: 1 << 30,
+		Argv:      []string{"dolt", "sql-server", "--config", "/tmp/TestCityRuntime123/001/.gc/runtime/packs/dolt/dolt-config.yaml"},
+		Ports:     []int{},
+	}
+	got := classifyDoltProcess(p, nil, "/home/u", "", nil)
+
+	if got.Action != "reap" {
+		t.Errorf("Action = %q, want reap", got.Action)
+	}
+	if !strings.Contains(got.Reason, "parent") || !strings.Contains(got.Reason, "test prefix") {
+		t.Errorf("Reason = %q, want parent-dead and test-prefix reason", got.Reason)
+	}
+}
+
+func TestPlanReap_ProtectsManagedDoltUnderRegisteredRigRoot(t *testing.T) {
+	procs := []DoltProcInfo{{
+		PID:  2299,
+		Argv: []string{"dolt", "sql-server", "--config", "/tmp/gc-live-city/.gc/runtime/packs/dolt/dolt-config.yaml"},
+	}}
+
+	plan := planOrphanReap(procs, nil, "/home/u", "", nil, []string{"/tmp/gc-live-city"}...)
+
+	if len(plan.Reap) != 0 {
+		t.Fatalf("Reap = %+v, want no reap targets for registered city managed Dolt", plan.Reap)
+	}
+	if len(plan.Protected) != 1 || !strings.Contains(plan.Protected[0].Reason, "managed Dolt") {
+		t.Fatalf("Protected = %+v, want managed-Dolt protection reason", plan.Protected)
 	}
 }
 

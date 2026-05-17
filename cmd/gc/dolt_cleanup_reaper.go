@@ -8,15 +8,17 @@ import (
 
 // DoltProcInfo describes a live `dolt sql-server` process candidate.
 //
-// PID is the OS pid; Argv is the raw command line split on NUL boundaries
-// (typically read from /proc/<pid>/cmdline). Ports lists the TCP ports the
-// process is listening on, used to cross-reference against active per-rig
-// dolt servers so the reaper never touches a production server. RSSBytes is
-// the best-effort resident set size used for operator cleanup summaries.
-// StartTimeTicks is /proc/<pid>/stat field 22 and lets force-mode revalidation
-// detect PID reuse before sending a signal.
+// PID is the OS pid; ParentPID is the current parent pid from /proc/<pid>/stat.
+// Argv is the raw command line split on NUL boundaries (typically read from
+// /proc/<pid>/cmdline). Ports lists the TCP ports the process is listening on,
+// used to cross-reference against active per-rig dolt servers so the reaper
+// never touches a production server. RSSBytes is the best-effort resident set
+// size used for operator cleanup summaries. StartTimeTicks is /proc/<pid>/stat
+// field 22 and lets force-mode revalidation detect PID reuse before sending a
+// signal.
 type DoltProcInfo struct {
 	PID            int
+	ParentPID      int
 	Argv           []string
 	Ports          []int
 	RSSBytes       int64
@@ -38,6 +40,7 @@ type reapClassification struct {
 type ReapTarget struct {
 	PID            int
 	ConfigPath     string
+	Reason         string
 	RSSBytes       int64
 	StartTimeTicks uint64
 }
@@ -98,11 +101,7 @@ func isTestConfigPath(p, homeDir, tempDir string) bool {
 func testConfigPathPrefixes() []string {
 	return []string{
 		"Test",
-		"gc-state-runtime-builtin-",
-		"gc-state-mutation-builtin-",
-		"gc-supervisor-city-",
-		"gc-reload-invalid-",
-		"gc-rename-",
+		"gc-",
 	}
 }
 
@@ -144,17 +143,47 @@ func configUnderActiveTestRoot(configPath string, activeTestRoots []string) bool
 	return false
 }
 
+func configUnderProtectedManagedDoltRoot(configPath string, protectedRoots []string) bool {
+	if configPath == "" {
+		return false
+	}
+	cleanConfig := filepath.Clean(configPath)
+	for _, root := range protectedRoots {
+		cleanRoot := filepath.Clean(root)
+		if cleanRoot == "." || cleanRoot == string(filepath.Separator) {
+			continue
+		}
+		if cleanConfig == cleanRoot || strings.HasPrefix(cleanConfig, cleanRoot+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func protectedManagedDoltConfigRoots(rigs []resolverRig) []string {
+	roots := make([]string, 0, len(rigs))
+	for _, rig := range rigs {
+		if rig.Path == "" {
+			continue
+		}
+		roots = append(roots, filepath.Join(rig.Path, ".gc", "runtime", "packs", "dolt"))
+	}
+	return roots
+}
+
 // classifyDoltProcess applies the architect's reaper decision rules (§4.3) to a
 // single dolt sql-server process. Order matters:
 //
 //  1. Any port match against rigPortByPort → protected (active rig server),
 //     even if the cmdline says it's a test path (defense in depth).
-//  2. Else extract --config path; matches /tmp/Test*, os.TempDir()/Test*,
-//     known Gas City temp prefixes → reap.
+//  2. Else extract --config path and protect configs under registered
+//     city/rig managed-Dolt roots.
 //  3. Else protect if the config sits under an active test root.
-//  4. Else protect with a reason that echoes the actual config path so
+//  4. Else matches /tmp/Test*, os.TempDir()/Test*, known Gas City temp
+//     prefixes → reap.
+//  5. Else protect with a reason that echoes the actual config path so
 //     operators can decide whether to kill it manually (architect Open Q 0).
-func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, tempDir string, activeTestRoots []string) reapClassification {
+func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, tempDir string, activeTestRoots []string, protectedConfigRoots ...string) reapClassification {
 	for _, port := range p.Ports {
 		if name, ok := rigPortByPort[port]; ok {
 			return reapClassification{
@@ -171,6 +200,13 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 			Reason: "no --config path detected; refusing to kill an unidentified dolt server",
 		}
 	}
+	if configUnderProtectedManagedDoltRoot(cfgPath, protectedConfigRoots) {
+		return reapClassification{
+			Action:     "protect",
+			Reason:     fmt.Sprintf("config %q is under a registered managed Dolt root", cfgPath),
+			ConfigPath: cfgPath,
+		}
+	}
 	if configUnderActiveTestRoot(cfgPath, activeTestRoots) {
 		return reapClassification{
 			Action:     "protect",
@@ -179,7 +215,7 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 		}
 	}
 	if isTestConfigPath(cfgPath, homeDir, tempDir) {
-		return reapClassification{Action: "reap", ConfigPath: cfgPath}
+		return reapClassification{Action: "reap", ConfigPath: cfgPath, Reason: reapReason(p)}
 	}
 	return reapClassification{
 		Action: "protect",
@@ -190,18 +226,31 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 	}
 }
 
+func reapReason(p DoltProcInfo) string {
+	const pathReason = "path matches test prefix"
+	if p.ParentPID <= 1 {
+		return pathReason
+	}
+	alive, err := processAlive(p.ParentPID)
+	if err == nil && !alive {
+		return fmt.Sprintf("parent pid %d unreachable; %s", p.ParentPID, pathReason)
+	}
+	return pathReason
+}
+
 // planOrphanReap classifies each dolt sql-server process and partitions them
 // into reap targets vs protected processes. Order is preserved so the report
 // renders deterministically.
-func planOrphanReap(procs []DoltProcInfo, rigPortByPort map[int]string, homeDir, tempDir string, activeTestRoots []string) ReapPlan {
+func planOrphanReap(procs []DoltProcInfo, rigPortByPort map[int]string, homeDir, tempDir string, activeTestRoots []string, protectedConfigRoots ...string) ReapPlan {
 	plan := ReapPlan{}
 	for _, p := range procs {
-		c := classifyDoltProcess(p, rigPortByPort, homeDir, tempDir, activeTestRoots)
+		c := classifyDoltProcess(p, rigPortByPort, homeDir, tempDir, activeTestRoots, protectedConfigRoots...)
 		switch c.Action {
 		case "reap":
 			plan.Reap = append(plan.Reap, ReapTarget{
 				PID:            p.PID,
 				ConfigPath:     c.ConfigPath,
+				Reason:         c.Reason,
 				RSSBytes:       p.RSSBytes,
 				StartTimeTicks: p.StartTimeTicks,
 			})

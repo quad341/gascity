@@ -236,6 +236,13 @@ else
   run_or_warn "emit reap event" gc event emit mol-dog-stale-db.reap \
     --message "${REAP_KILLED}/${REAP_TOTAL} procs killed"
 
+  if [ "$REAP_TOTAL" -gt 0 ]; then
+    if ! bd update "$WORK_BEAD" --append-notes "reap summary: killed=${REAP_KILLED} targets=${REAP_TOTAL}"; then
+      echo "failed to append reap summary; continuing to drain-ack" >&2
+    fi
+    jq -r '.reaped.targets[]? | "mol-dog-stale-db.reap target pid=\\(.pid) config=\\(.config_path // "(unknown)") reason=\\(.reason // "path matches test prefix")"' "$APPLY_FILE" || true
+  fi
+
   append_report_note "apply (--force)" "$APPLY_FILE"
 fi
 

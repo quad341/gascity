@@ -109,6 +109,7 @@ type CleanupReapedReport struct {
 type CleanupReapTarget struct {
 	PID        int    `json:"pid"`
 	ConfigPath string `json:"config_path"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 // CleanupSummary aggregates totals across the three steps.
@@ -210,6 +211,7 @@ type cleanupOptions struct {
 	DiscoverProcesses func() ([]DoltProcInfo, error)
 	ActiveTestRoots   []string
 	KillProcess       func(pid int, sig syscall.Signal) error
+	ProcessAlive      func(pid int) (bool, error)
 	ReapGracePeriod   time.Duration
 }
 
@@ -363,7 +365,8 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	if activeTestRoots == nil {
 		activeTestRoots = discoverActiveTestRoots(opts.HomeDir, tempDir)
 	}
-	plan := planOrphanReap(procs, rigPorts, opts.HomeDir, tempDir, activeTestRoots)
+	protectedConfigRoots := protectedManagedDoltConfigRoots(opts.Rigs)
+	plan := planOrphanReap(procs, rigPorts, opts.HomeDir, tempDir, activeTestRoots, protectedConfigRoots...)
 
 	report.Reaped.ProtectedPIDs = nil
 	for _, p := range plan.Protected {
@@ -371,7 +374,7 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	}
 	report.Reaped.Targets = nil
 	for _, t := range plan.Reap {
-		report.Reaped.Targets = append(report.Reaped.Targets, CleanupReapTarget{PID: t.PID, ConfigPath: t.ConfigPath})
+		report.Reaped.Targets = append(report.Reaped.Targets, CleanupReapTarget{PID: t.PID, ConfigPath: t.ConfigPath, Reason: t.Reason})
 	}
 
 	if !opts.Force {
@@ -384,6 +387,14 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	if killFn == nil {
 		killFn = killProcess
 	}
+	aliveFn := opts.ProcessAlive
+	if aliveFn == nil {
+		if opts.KillProcess != nil {
+			aliveFn = func(int) (bool, error) { return true, nil }
+		} else {
+			aliveFn = processAlive
+		}
+	}
 	grace := opts.ReapGracePeriod
 	if grace <= 0 {
 		grace = 250 * time.Millisecond
@@ -393,7 +404,7 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	gone := make(map[int]bool, len(plan.Reap))
 	sigtermSent := make(map[int]bool, len(plan.Reap))
 	for _, target := range plan.Reap {
-		switch revalidateReapTarget(report, discover, target, rigPorts, opts.HomeDir, tempDir, activeTestRoots, "SIGTERM") {
+		switch revalidateReapTarget(report, discover, target, rigPorts, opts.HomeDir, tempDir, activeTestRoots, protectedConfigRoots, "SIGTERM") {
 		case reapRevalidationEligible:
 		case reapRevalidationVanished:
 			appendVanishedPID(report, target.PID)
@@ -419,7 +430,16 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 		if gone[target.PID] || !sigtermSent[target.PID] {
 			continue
 		}
-		switch revalidateReapTarget(report, discover, target, rigPorts, opts.HomeDir, tempDir, activeTestRoots, "SIGKILL") {
+		alive, err := aliveFn(target.PID)
+		if err != nil {
+			recordReapLivenessError(report, target.PID, err)
+			continue
+		}
+		if !alive {
+			gone[target.PID] = true
+			continue
+		}
+		switch revalidateReapTarget(report, discover, target, rigPorts, opts.HomeDir, tempDir, activeTestRoots, protectedConfigRoots, "SIGKILL") {
 		case reapRevalidationEligible:
 		case reapRevalidationVanished:
 			gone[target.PID] = true
@@ -473,7 +493,7 @@ const (
 	reapRevalidationError
 )
 
-func revalidateReapTarget(report *CleanupReport, discover func() ([]DoltProcInfo, error), target ReapTarget, rigPorts map[int]string, homeDir, tempDir string, activeTestRoots []string, signalName string) reapRevalidationStatus {
+func revalidateReapTarget(report *CleanupReport, discover func() ([]DoltProcInfo, error), target ReapTarget, rigPorts map[int]string, homeDir, tempDir string, activeTestRoots, protectedConfigRoots []string, signalName string) reapRevalidationStatus {
 	refreshed, err := discover()
 	if err != nil {
 		recordReapRevalidationError(report, signalName, err)
@@ -483,7 +503,7 @@ func revalidateReapTarget(report *CleanupReport, discover func() ([]DoltProcInfo
 		if proc.PID != target.PID {
 			continue
 		}
-		recheck := classifyDoltProcess(proc, rigPorts, homeDir, tempDir, activeTestRoots)
+		recheck := classifyDoltProcess(proc, rigPorts, homeDir, tempDir, activeTestRoots, protectedConfigRoots...)
 		if recheck.Action != "reap" || recheck.ConfigPath != target.ConfigPath || !sameReapProcessIdentity(target, proc) {
 			appendProtectedPID(report, target.PID)
 			return reapRevalidationProtected
@@ -570,6 +590,17 @@ func recordReapSignalError(report *CleanupReport, pid int, sig syscall.Signal, e
 		Stage: "reap",
 		Name:  fmt.Sprintf("pid %d", pid),
 		Error: fmt.Sprintf("%s: %v", sigName, err),
+	})
+	report.Summary.ErrorsTotal++
+}
+
+func recordReapLivenessError(report *CleanupReport, pid int, err error) {
+	msg := fmt.Sprintf("pid %d liveness check before SIGKILL: %v", pid, err)
+	report.Reaped.Errors = append(report.Reaped.Errors, msg)
+	report.Errors = append(report.Errors, CleanupError{
+		Stage: "reap",
+		Name:  fmt.Sprintf("pid %d", pid),
+		Error: msg,
 	})
 	report.Summary.ErrorsTotal++
 }

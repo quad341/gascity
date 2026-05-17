@@ -355,8 +355,8 @@ func TestStaleDBFormulaCleanApplyClosesWorkAndUsesDBThreshold(t *testing.T) {
 	logPath := filepath.Join(dir, "commands.log")
 	scanPath := filepath.Join(dir, "scan.json")
 	applyPath := filepath.Join(dir, "apply.json")
-	writeTestFile(t, scanPath, `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":20,"failed":[]},"purge":{"bytes_reclaimed":1000},"reaped":{"count":0,"targets":[{"pid":1},{"pid":2}]},"summary":{"bytes_freed_disk":1000,"bytes_freed_rss":200,"errors_total":0}}`)
-	writeTestFile(t, applyPath, `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":20,"failed":[]},"purge":{"bytes_reclaimed":1000},"reaped":{"count":2,"targets":[{"pid":1},{"pid":2}]},"summary":{"bytes_freed_disk":1000,"bytes_freed_rss":200,"errors_total":0}}`)
+	writeTestFile(t, scanPath, `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":20,"failed":[]},"purge":{"bytes_reclaimed":1000},"reaped":{"count":0,"targets":[{"pid":1,"config_path":"/tmp/TestA/config.yaml","reason":"path matches test prefix"},{"pid":2,"config_path":"/tmp/gc-stop-123/.gc/runtime/packs/dolt/dolt-config.yaml","reason":"path matches test prefix"}]},"summary":{"bytes_freed_disk":1000,"bytes_freed_rss":200,"errors_total":0}}`)
+	writeTestFile(t, applyPath, `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":20,"failed":[]},"purge":{"bytes_reclaimed":1000},"reaped":{"count":2,"targets":[{"pid":1,"config_path":"/tmp/TestA/config.yaml","reason":"path matches test prefix"},{"pid":2,"config_path":"/tmp/gc-stop-123/.gc/runtime/packs/dolt/dolt-config.yaml","reason":"path matches test prefix"}]},"summary":{"bytes_freed_disk":1000,"bytes_freed_rss":200,"errors_total":0}}`)
 	writeTestFile(t, filepath.Join(binDir, "gc"), `#!/usr/bin/env bash
 set -euo pipefail
 case "${1:-} ${2:-}" in
@@ -411,10 +411,19 @@ esac
 	for _, want := range []string{
 		"gc dolt-cleanup --json --probe --force --max-orphan-dbs 20",
 		"gc event emit mol-dog-stale-db.done --message 1200 bytes freed; 0 errors",
+		"bd update bead-1 --append-notes reap summary: killed=2 targets=2",
 		"bd close bead-1",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
+		}
+	}
+	for _, want := range []string{
+		"mol-dog-stale-db.reap target pid=1 config=/tmp/TestA/config.yaml reason=path matches test prefix",
+		"mol-dog-stale-db.reap target pid=2 config=/tmp/gc-stop-123/.gc/runtime/packs/dolt/dolt-config.yaml reason=path matches test prefix",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("formula output missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
 		}
 	}
 	if strings.Contains(log, "mol-dog-stale-db.escalate") {

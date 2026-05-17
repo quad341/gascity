@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -76,6 +77,7 @@ func discoverDoltProcesses() ([]DoltProcInfo, error) {
 		}
 		out = append(out, DoltProcInfo{
 			PID:            pid,
+			ParentPID:      readProcParentPID(pid),
 			Argv:           argv,
 			Ports:          pidPorts[pid],
 			RSSBytes:       readProcRSSBytes(pid),
@@ -134,6 +136,31 @@ func activeTestRootFromPath(path, homeDir, tempDir string) (string, bool) {
 		return "", false
 	}
 	return activeTestRootUnder(clean, filepath.Join(homeDir, ".gotmp"), []string{"Test"})
+}
+
+func readProcParentPID(pid int) int {
+	data, err := readWithTimeout(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return 0
+	}
+	return parseProcParentPID(data)
+}
+
+func parseProcParentPID(data []byte) int {
+	text := string(data)
+	closeParen := strings.LastIndex(text, ")")
+	if closeParen < 0 {
+		return 0
+	}
+	fields := strings.Fields(text[closeParen+1:])
+	if len(fields) <= 1 {
+		return 0
+	}
+	ppid, err := strconv.Atoi(fields[1])
+	if err != nil || ppid < 0 {
+		return 0
+	}
+	return ppid
 }
 
 func activeTestRootUnder(cleanPath, root string, prefixes []string) (string, bool) {
@@ -358,4 +385,25 @@ func readWithTimeout(path string) ([]byte, error) {
 // process) is the caller's responsibility to interpret as "already gone".
 func killProcess(pid int, sig syscall.Signal) error {
 	return syscall.Kill(pid, sig)
+}
+
+func processAlive(pid int) (bool, error) {
+	if pid <= 0 {
+		return false, nil
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false, err
+	}
+	err = proc.Signal(syscall.Signal(0))
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, syscall.ESRCH), errors.Is(err, os.ErrProcessDone):
+		return false, nil
+	case errors.Is(err, syscall.EPERM):
+		return true, nil
+	default:
+		return false, err
+	}
 }

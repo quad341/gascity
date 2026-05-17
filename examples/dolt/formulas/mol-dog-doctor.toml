@@ -18,7 +18,6 @@ This is infrastructure work. You:
 
 | Variable | Source | Description |
 |----------|--------|-------------|
-| port | config | Dolt server port (default 3307) |
 | latency_threshold | config | Latency warning threshold (default 1s) |
 | conn_max | config | Maximum connection count (default 50) |
 
@@ -32,10 +31,6 @@ formula = "mol-dog-doctor"
 version = 1
 
 [vars]
-[vars.port]
-description = "Dolt server port"
-default = "3307"
-
 [vars.latency_threshold]
 description = "Latency warning threshold"
 default = "1s"
@@ -52,12 +47,7 @@ Check basic server health and measure latency.
 
 **1. Connectivity check:**
 ```bash
-DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" dolt \
-  --host "${GC_DOLT_HOST:-127.0.0.1}" \
-  --port "${GC_DOLT_PORT:-{{port}}}" \
-  --user "${GC_DOLT_USER:-root}" \
-  --no-tls \
-  sql -q "SELECT active_branch()"
+gc dolt sql -q "SELECT active_branch()"
 ```
 Use active_branch() — lightweight probe that won't block behind queued queries
 (per Dolt CEO recommendation).
@@ -73,7 +63,7 @@ Time the probe query. Warn if > {{latency_threshold}}.
 **If server unreachable:**
 This is a critical failure. Escalate immediately:
 ```bash
-gc mail send mayor/ -s "ESCALATION: Dolt server unreachable on port {{port}} [CRITICAL]" \\
+gc mail send mayor/ -s "ESCALATION: Dolt server unreachable [CRITICAL]" \\
   -m "Doctor probe failed: server did not respond to active_branch() query."
 ```
 

@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -171,6 +173,46 @@ func TestMaterializeBuiltinPacks(t *testing.T) {
 	info, err := os.Stat(bdToml)
 	if err == nil && info.Mode()&0o111 != 0 {
 		t.Errorf("pack.toml should not be executable: mode %v", info.Mode())
+	}
+}
+
+func TestFormulasUseGcDoltSqlNotRawPort(t *testing.T) {
+	dir := t.TempDir()
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
+	}
+	packsRoot := filepath.Join(dir, citylayout.SystemPacksRoot)
+
+	var offenders []string
+	err := filepath.WalkDir(packsRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if filepath.Ext(path) != ".toml" {
+			return nil
+		}
+		if !strings.Contains(path, string(os.PathSeparator)+"formulas"+string(os.PathSeparator)) {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if bytes.Contains(data, []byte(`--port "${GC_DOLT_PORT`)) {
+			rel, _ := filepath.Rel(packsRoot, path)
+			offenders = append(offenders, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking embedded pack tree: %v", err)
+	}
+	if len(offenders) > 0 {
+		sort.Strings(offenders)
+		t.Fatalf("formulas embed a raw Dolt port literal — they must call \"gc dolt sql -q \\\"<query>\\\"\" instead: %v", offenders)
 	}
 }
 

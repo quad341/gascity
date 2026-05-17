@@ -19,10 +19,21 @@ import (
 var rawDoltSQLCallRe = regexp.MustCompile(`(?m)(^|[^A-Za-z0-9_-])dolt(?:[ \t]+|[ \t]*\\[ \t]*\r?\n[ \t]*)+sql([ \t]|$)`)
 
 var (
-	sqlFenceRe            = regexp.MustCompile("(?s)```sql\\s*\\n(.*?)```")
+	formulaCodeFenceRe    = regexp.MustCompile("(?s)```(?:sql|bash)\\s*\\n(.*?)```")
 	mailTableRe           = regexp.MustCompile(`(?i)(?:FROM|UPDATE|INTO|JOIN|DELETE\s+FROM)\s+(?:\x60?[\w-]+\x60?\.)?\x60?mail\x60?\b`)
 	rawDurationIntervalRe = regexp.MustCompile(`(?i)\bINTERVAL\s+\{\{(?:max_age|purge_age|stale_issue_age)\}\}`)
 )
+
+func rawDoltSQLCall(data []byte) []byte {
+	for _, loc := range rawDoltSQLCallRe.FindAllIndex(data, -1) {
+		prefixFields := strings.Fields(string(data[:loc[0]]))
+		if len(prefixFields) > 0 && prefixFields[len(prefixFields)-1] == "gc" {
+			continue
+		}
+		return data[loc[0]:loc[1]]
+	}
+	return nil
+}
 
 func TestMaintenanceCheckBinariesTreatsGhAsOptional(t *testing.T) {
 	binDir := t.TempDir()
@@ -1022,12 +1033,12 @@ func TestReaperFormulaSQLReflectsCurrentSchema(t *testing.T) {
 		t.Fatalf("ReadFile(%s): %v", path, err)
 	}
 
-	// Extract every ```sql ... ``` fence body and scan only those — prose
-	// warnings about the deprecated patterns are intentional and must not
+	// Extract fenced SQL examples and shell snippets containing SQL strings;
+	// prose warnings about deprecated patterns are intentional and must not
 	// trip this guard.
-	matches := sqlFenceRe.FindAllSubmatch(data, -1)
+	matches := formulaCodeFenceRe.FindAllSubmatch(data, -1)
 	if len(matches) == 0 {
-		t.Fatalf("no ```sql fences found in %s; test is no-op", filepath.Base(path))
+		t.Fatalf("no SQL-bearing code fences found in %s; test is no-op", filepath.Base(path))
 	}
 
 	for i, m := range matches {
@@ -3037,8 +3048,8 @@ func TestFormulaDoltSQLExamplesUseExplicitTarget(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadFile(%s): %v", path, err)
 			}
-			if match := rawDoltSQLCallRe.Find(data); match != nil {
-				t.Fatalf("formula contains unqualified Dolt SQL command %q; include host, port, user, and no-tls args", match)
+			if match := rawDoltSQLCall(data); match != nil {
+				t.Fatalf("formula contains raw Dolt SQL command %q; call gc dolt sql instead", match)
 			}
 		})
 	}

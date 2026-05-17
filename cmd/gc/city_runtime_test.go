@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -456,6 +459,8 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickLogsOwnershipError(t *testi
 func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
+	cityPath := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityPath)
 	orderEvents := &orderedRuntimeEvents{}
 	store := &managedDoltPreflightOrderStore{
 		Store:  beads.NewMemStore(),
@@ -463,7 +468,7 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 	}
 	sp := runtime.NewFake()
 	cr := &CityRuntime{
-		cityPath: t.TempDir(),
+		cityPath: cityPath,
 		cityName: "test-city",
 		cfg:      &config.City{},
 		sp:       sp,
@@ -507,6 +512,7 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T
 	t.Setenv("GC_BEADS", "bd")
 
 	cityPath := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityPath)
 	orderEvents := &orderedRuntimeEvents{}
 	store := &managedDoltPreflightOrderStore{
 		Store:  beads.NewMemStore(),
@@ -684,6 +690,7 @@ func TestNewCityRuntimePreflightsManagedDoltPublicationBeforeStartupStoreWork(t 
 
 	healthCalls := 0
 	cityPath := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityPath)
 	sp := runtime.NewFake()
 	_ = newCityRuntime(CityRuntimeParams{
 		CityPath: cityPath,
@@ -715,6 +722,78 @@ func TestNewCityRuntimePreflightsManagedDoltPublicationBeforeStartupStoreWork(t 
 	if healthCalls != 1 {
 		t.Fatalf("healthCalls = %d, want 1", healthCalls)
 	}
+}
+
+func TestNoLeakedDoltSqlServersAfterCityRuntimeShutdown(t *testing.T) {
+	before := childDoltSQLServers(t)
+
+	t.Run("managed dolt startup", func(t *testing.T) {
+		t.Setenv("GC_BEADS", "bd")
+
+		cityPath := t.TempDir()
+		cleanupManagedDoltTestCity(t, cityPath)
+		sp := runtime.NewFake()
+		_ = newCityRuntime(CityRuntimeParams{
+			CityPath: cityPath,
+			CityName: "test-city",
+			Cfg:      &config.City{},
+			SP:       sp,
+			BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+				return DesiredStateResult{State: map[string]TemplateParams{}}
+			},
+			Dops:   newDrainOps(sp),
+			Rec:    events.Discard,
+			Stdout: io.Discard,
+			Stderr: io.Discard,
+		})
+	})
+
+	after := childDoltSQLServers(t)
+	for pid := range before {
+		delete(after, pid)
+	}
+	if len(after) == 0 {
+		return
+	}
+	pids := make([]int, 0, len(after))
+	for pid := range after {
+		pids = append(pids, pid)
+	}
+	sort.Ints(pids)
+	var lines []string
+	for _, pid := range pids {
+		lines = append(lines, fmt.Sprintf("pid=%d argv=%q", pid, after[pid]))
+	}
+	t.Fatalf("leaked child dolt sql-server process(es):\n%s", strings.Join(lines, "\n"))
+}
+
+func childDoltSQLServers(t *testing.T) map[int]string {
+	t.Helper()
+	out, err := exec.Command("ps", "-eo", "pid=,ppid=,comm=,args=").Output()
+	if err != nil {
+		t.Fatalf("ps: %v", err)
+	}
+	self := os.Getpid()
+	procs := make(map[int]string)
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+		ppid, err := strconv.Atoi(fields[1])
+		if err != nil || ppid != self || fields[2] != "dolt" {
+			continue
+		}
+		argv := strings.Join(fields[3:], " ")
+		if strings.Contains(argv, "sql-server") {
+			procs[pid] = argv
+		}
+	}
+	return procs
 }
 
 func TestNewCityRuntimePreflightUsesResolvableProviderStateByDefault(t *testing.T) {

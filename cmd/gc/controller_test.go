@@ -1843,6 +1843,7 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 		}
 	}
 
+	writeCityTOML(t, dir, "test", "mayor")
 	cancel()
 	time.Sleep(50 * time.Millisecond) // let controllerLoop goroutine exit before TempDir cleanup
 

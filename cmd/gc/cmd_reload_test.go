@@ -688,6 +688,7 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 	if strings.Contains(strings.TrimPrefix(stdout.String(), stdoutBeforeInvalid), "Config reloaded:") {
 		t.Fatalf("stdout unexpectedly contains reload success: %q", stdout.String())
 	}
+	writeCityTOML(t, dir, "test", "mayor")
 }
 
 func readReloadSocketReply(t *testing.T, conn net.Conn) reloadControlReply {

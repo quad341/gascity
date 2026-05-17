@@ -174,17 +174,54 @@ func cleanupManagedDoltTestCity(t *testing.T, cityPath string) {
 
 func stopManagedDoltProcessesUnderTestCity(t *testing.T, cityPath string) {
 	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	idleDeadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if stopManagedDoltProcessesUnderTestCityOnce(t, cityPath) > 0 {
+			idleDeadline = time.Now().Add(250 * time.Millisecond)
+		}
+		if time.Now().After(idleDeadline) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	procs := managedDoltProcessesUnderTestCity(t, cityPath)
+	if len(procs) == 0 {
+		return
+	}
+	pids := make([]int, 0, len(procs))
+	for _, p := range procs {
+		pids = append(pids, p.PID)
+	}
+	sort.Ints(pids)
+	t.Fatalf("dolt test pid(s) still alive under %s after cleanup: %v", cityPath, pids)
+}
+
+func stopManagedDoltProcessesUnderTestCityOnce(t *testing.T, cityPath string) int {
+	t.Helper()
+	procs := managedDoltProcessesUnderTestCity(t, cityPath)
+	for _, p := range procs {
+		stopManagedDoltTestPID(t, p.PID)
+	}
+	return len(procs)
+}
+
+func managedDoltProcessesUnderTestCity(t *testing.T, cityPath string) []DoltProcInfo {
+	t.Helper()
 	procs, err := discoverDoltProcesses()
 	if err != nil {
 		t.Fatalf("discoverDoltProcesses: %v", err)
 	}
+	var out []DoltProcInfo
 	for _, p := range procs {
 		configPath := extractConfigPath(p.Argv)
 		if !pathutil.PathWithin(cityPath, configPath) {
 			continue
 		}
-		stopManagedDoltTestPID(t, p.PID)
+		out = append(out, p)
 	}
+	return out
 }
 
 func stopManagedDoltTestPID(t *testing.T, pid int) {

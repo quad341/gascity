@@ -31,6 +31,7 @@ type CachingStore struct {
 	mu              sync.RWMutex
 	beads           map[string]Bead
 	deps            map[string][]Dep
+	localMeta       map[string]map[string]string
 	depsComplete    bool
 	dirty           map[string]struct{}
 	beadSeq         map[string]uint64
@@ -222,6 +223,7 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 		idPrefix:    normalizeIDPrefix(idPrefix),
 		beads:       make(map[string]Bead),
 		deps:        make(map[string][]Dep),
+		localMeta:   make(map[string]map[string]string),
 		dirty:       make(map[string]struct{}),
 		beadSeq:     make(map[string]uint64),
 		localBeadAt: make(map[string]time.Time),
@@ -278,6 +280,36 @@ func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
 		c.localBeadAt[id] = now
 	}
 	return seq
+}
+
+func (c *CachingStore) cachedLocalStringLocked(beadID, key string) (string, bool) {
+	if c.localMeta == nil || c.localMeta[beadID] == nil {
+		return "", false
+	}
+	value, ok := c.localMeta[beadID][key]
+	return value, ok
+}
+
+func (c *CachingStore) setCachedLocalStringLocked(beadID, key, value string) {
+	if c.localMeta == nil {
+		c.localMeta = make(map[string]map[string]string)
+	}
+	if c.localMeta[beadID] == nil {
+		c.localMeta[beadID] = make(map[string]string)
+	}
+	c.localMeta[beadID][key] = value
+}
+
+func (c *CachingStore) deleteLocalMetaLocked(beadID string) {
+	delete(c.localMeta, beadID)
+}
+
+func (c *CachingStore) pruneLocalMetaLocked(beads map[string]Bead) {
+	for beadID := range c.localMeta {
+		if _, ok := beads[beadID]; !ok {
+			delete(c.localMeta, beadID)
+		}
+	}
 }
 
 // PrimeActive loads all non-closed beads (open + in_progress) into the
@@ -422,6 +454,7 @@ func (c *CachingStore) Prime(_ context.Context) error {
 			}
 		}
 		c.beads = nextBeads
+		c.pruneLocalMetaLocked(nextBeads)
 		c.deps = nextDeps
 		c.depsComplete = depsComplete && depErr == nil
 		c.dirty = nextDirty

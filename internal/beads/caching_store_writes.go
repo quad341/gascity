@@ -293,7 +293,13 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 
 // SetLocalString writes clone-local metadata through to the backing store.
 func (c *CachingStore) SetLocalString(beadID, key, value string) error {
-	return c.backing.SetLocalString(beadID, key, value)
+	if err := c.backing.SetLocalString(beadID, key, value); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.setCachedLocalStringLocked(beadID, key, value)
+	c.mu.Unlock()
+	return nil
 }
 
 type trackingTx struct {
@@ -357,6 +363,7 @@ func (c *CachingStore) Tx(commitMsg string, fn func(Tx) error) error {
 	for _, id := range tracker.touched {
 		delete(c.beads, id)
 		delete(c.deps, id)
+		c.deleteLocalMetaLocked(id)
 		delete(c.dirty, id)
 		delete(c.deletedSeq, id)
 	}
@@ -590,6 +597,7 @@ func (c *CachingStore) Delete(id string) error {
 	seq := c.noteLocalMutationLocked(id)
 	delete(c.beads, id)
 	delete(c.deps, id)
+	c.deleteLocalMetaLocked(id)
 	delete(c.dirty, id)
 	delete(c.beadSeq, id)
 	delete(c.localBeadAt, id)

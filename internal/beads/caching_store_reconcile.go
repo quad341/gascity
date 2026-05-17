@@ -362,6 +362,7 @@ func (c *CachingStore) runReconciliation() {
 			}
 			delete(c.beads, id)
 			delete(c.deps, id)
+			c.deleteLocalMetaLocked(id)
 			delete(c.dirty, id)
 			delete(c.deletedSeq, id)
 			delete(c.beadSeq, id)
@@ -458,6 +459,7 @@ func (c *CachingStore) runReconciliation() {
 	}
 
 	c.beads = nextBeads
+	c.pruneLocalMetaLocked(nextBeads)
 	c.deps = nextDeps
 	c.depsComplete = useFreshDeps
 	c.dirty = nextDirty

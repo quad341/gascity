@@ -37,6 +37,68 @@ func (c *countingBackingStore) Close(id string) error {
 	return c.Store.Close(id)
 }
 
+type localMetadataBackingStore struct {
+	Store
+	setLocalStringCalls int
+	getLocalStringCalls int
+	setLocalStringErr   error
+	getLocalStringErr   error
+	local               map[string]map[string]string
+}
+
+func (s *localMetadataBackingStore) SetLocalString(beadID, key, value string) error {
+	s.setLocalStringCalls++
+	if s.setLocalStringErr != nil {
+		return s.setLocalStringErr
+	}
+	if s.local == nil {
+		s.local = make(map[string]map[string]string)
+	}
+	if s.local[beadID] == nil {
+		s.local[beadID] = make(map[string]string)
+	}
+	s.local[beadID][key] = value
+	return nil
+}
+
+func (s *localMetadataBackingStore) GetLocalString(beadID, key string) (string, bool, error) {
+	s.getLocalStringCalls++
+	if s.getLocalStringErr != nil {
+		return "", false, s.getLocalStringErr
+	}
+	if s.local == nil || s.local[beadID] == nil {
+		return "", false, nil
+	}
+	value, ok := s.local[beadID][key]
+	return value, ok, nil
+}
+
+func requireCachedLocalString(t *testing.T, cache *CachingStore, beadID, key, want string) {
+	t.Helper()
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	values, ok := cache.localMeta[beadID]
+	if !ok {
+		t.Fatalf("localMeta[%q] missing", beadID)
+	}
+	got, ok := values[key]
+	if !ok {
+		t.Fatalf("localMeta[%q][%q] missing", beadID, key)
+	}
+	if got != want {
+		t.Fatalf("localMeta[%q][%q] = %q, want %q", beadID, key, got, want)
+	}
+}
+
+func requireNoCachedLocalMeta(t *testing.T, cache *CachingStore, beadID string) {
+	t.Helper()
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	if values, ok := cache.localMeta[beadID]; ok {
+		t.Fatalf("localMeta[%q] = %#v, want absent", beadID, values)
+	}
+}
+
 type txObservingBackingStore struct {
 	Store
 	txCalls   int
@@ -55,6 +117,248 @@ func (s *txObservingBackingStore) Tx(commitMsg string, fn func(Tx) error) error 
 		return err
 	}
 	return s.afterFn
+}
+
+func TestCachingStoreSetLocalStringCachesAfterBackingSuccess(t *testing.T) {
+	backing := &localMetadataBackingStore{Store: NewMemStore()}
+	cache := NewCachingStoreForTest(backing, nil)
+
+	if err := cache.SetLocalString("bd-1", "synced_at", "2026-05-17T22:00:00Z"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+
+	if backing.setLocalStringCalls != 1 {
+		t.Fatalf("backing SetLocalString calls = %d, want 1", backing.setLocalStringCalls)
+	}
+	if backing.local["bd-1"]["synced_at"] != "2026-05-17T22:00:00Z" {
+		t.Fatalf("backing local value = %q, want timestamp", backing.local["bd-1"]["synced_at"])
+	}
+	requireCachedLocalString(t, cache, "bd-1", "synced_at", "2026-05-17T22:00:00Z")
+}
+
+func TestCachingStoreSetLocalStringDoesNotCacheBackingErrors(t *testing.T) {
+	wantErr := errors.New("local write failed")
+	backing := &localMetadataBackingStore{Store: NewMemStore(), setLocalStringErr: wantErr}
+	cache := NewCachingStoreForTest(backing, nil)
+
+	if err := cache.SetLocalString("bd-1", "synced_at", "value"); !errors.Is(err, wantErr) {
+		t.Fatalf("SetLocalString error = %v, want %v", err, wantErr)
+	}
+
+	requireNoCachedLocalMeta(t, cache, "bd-1")
+}
+
+func TestCachingStoreSetLocalStringDoesNotCacheUnsupportedBacking(t *testing.T) {
+	cache := NewCachingStoreForTest(NewMemStore(), nil)
+
+	if err := cache.SetLocalString("bd-1", "synced_at", "value"); !errors.Is(err, ErrLocalMetadataNotSupported) {
+		t.Fatalf("SetLocalString error = %v, want ErrLocalMetadataNotSupported", err)
+	}
+
+	requireNoCachedLocalMeta(t, cache, "bd-1")
+}
+
+func TestCachingStoreGetLocalStringServesCacheHitWithoutBackingRead(t *testing.T) {
+	backing := &localMetadataBackingStore{Store: NewMemStore()}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.SetLocalString("bd-1", "last_woke_at", "cached"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+	backing.local["bd-1"]["last_woke_at"] = "backing"
+
+	value, ok, err := cache.GetLocalString("bd-1", "last_woke_at")
+	if err != nil {
+		t.Fatalf("GetLocalString: %v", err)
+	}
+	if !ok {
+		t.Fatal("GetLocalString ok = false, want true")
+	}
+	if value != "cached" {
+		t.Fatalf("GetLocalString value = %q, want cached", value)
+	}
+	if backing.getLocalStringCalls != 0 {
+		t.Fatalf("backing GetLocalString calls = %d, want 0", backing.getLocalStringCalls)
+	}
+}
+
+func TestCachingStoreGetLocalStringPopulatesCacheAfterBackingRead(t *testing.T) {
+	backing := &localMetadataBackingStore{
+		Store: NewMemStore(),
+		local: map[string]map[string]string{
+			"bd-1": {"pending_create_claim": "claim-1"},
+		},
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+
+	value, ok, err := cache.GetLocalString("bd-1", "pending_create_claim")
+	if err != nil {
+		t.Fatalf("GetLocalString: %v", err)
+	}
+	if !ok {
+		t.Fatal("GetLocalString ok = false, want true")
+	}
+	if value != "claim-1" {
+		t.Fatalf("GetLocalString value = %q, want claim-1", value)
+	}
+	requireCachedLocalString(t, cache, "bd-1", "pending_create_claim", "claim-1")
+
+	backing.local["bd-1"]["pending_create_claim"] = "claim-2"
+	value, ok, err = cache.GetLocalString("bd-1", "pending_create_claim")
+	if err != nil {
+		t.Fatalf("second GetLocalString: %v", err)
+	}
+	if !ok || value != "claim-1" {
+		t.Fatalf("second GetLocalString = %q, %v; want claim-1, true", value, ok)
+	}
+	if backing.getLocalStringCalls != 1 {
+		t.Fatalf("backing GetLocalString calls = %d, want 1", backing.getLocalStringCalls)
+	}
+}
+
+func TestCachingStoreGetLocalStringDoesNotCacheBackingErrors(t *testing.T) {
+	wantErr := errors.New("local read failed")
+	backing := &localMetadataBackingStore{Store: NewMemStore(), getLocalStringErr: wantErr}
+	cache := NewCachingStoreForTest(backing, nil)
+
+	if _, _, err := cache.GetLocalString("bd-1", "synced_at"); !errors.Is(err, wantErr) {
+		t.Fatalf("GetLocalString error = %v, want %v", err, wantErr)
+	}
+
+	requireNoCachedLocalMeta(t, cache, "bd-1")
+}
+
+func TestCachingStoreDeleteEvictsLocalMetadata(t *testing.T) {
+	backing := &localMetadataBackingStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "local metadata"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cache.SetLocalString(bead.ID, "synced_at", "value"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+
+	if err := cache.Delete(bead.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	requireNoCachedLocalMeta(t, cache, bead.ID)
+}
+
+func TestCachingStoreTxEvictsLocalMetadataForTouchedBeads(t *testing.T) {
+	backing := &localMetadataBackingStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "local metadata", Metadata: map[string]string{"phase": "old"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cache.SetLocalString(bead.ID, "synced_at", "value"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+
+	if err := cache.Tx("local metadata tx", func(tx Tx) error {
+		return tx.SetMetadataBatch(bead.ID, map[string]string{"phase": "new"})
+	}); err != nil {
+		t.Fatalf("Tx: %v", err)
+	}
+
+	requireNoCachedLocalMeta(t, cache, bead.ID)
+}
+
+func TestCachingStorePrimeEvictsLocalMetadataForDroppedBeads(t *testing.T) {
+	backing := &localMetadataBackingStore{Store: NewMemStore()}
+	dropped, err := backing.Create(Bead{Title: "dropped"})
+	if err != nil {
+		t.Fatalf("Create dropped: %v", err)
+	}
+	kept, err := backing.Create(Bead{Title: "kept"})
+	if err != nil {
+		t.Fatalf("Create kept: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cache.SetLocalString(dropped.ID, "synced_at", "dropped"); err != nil {
+		t.Fatalf("SetLocalString dropped: %v", err)
+	}
+	if err := cache.SetLocalString(kept.ID, "synced_at", "kept"); err != nil {
+		t.Fatalf("SetLocalString kept: %v", err)
+	}
+	if err := backing.Delete(dropped.ID); err != nil {
+		t.Fatalf("backing Delete: %v", err)
+	}
+
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime after delete: %v", err)
+	}
+
+	requireNoCachedLocalMeta(t, cache, dropped.ID)
+	requireCachedLocalString(t, cache, kept.ID, "synced_at", "kept")
+}
+
+func TestCachingStoreRunReconciliationEvictsLocalMetadataForDroppedBeads(t *testing.T) {
+	backing := &localMetadataBackingStore{Store: NewMemStore()}
+	dropped, err := backing.Create(Bead{Title: "dropped"})
+	if err != nil {
+		t.Fatalf("Create dropped: %v", err)
+	}
+	kept, err := backing.Create(Bead{Title: "kept"})
+	if err != nil {
+		t.Fatalf("Create kept: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cache.SetLocalString(dropped.ID, "synced_at", "dropped"); err != nil {
+		t.Fatalf("SetLocalString dropped: %v", err)
+	}
+	if err := cache.SetLocalString(kept.ID, "synced_at", "kept"); err != nil {
+		t.Fatalf("SetLocalString kept: %v", err)
+	}
+	if err := backing.Delete(dropped.ID); err != nil {
+		t.Fatalf("backing Delete: %v", err)
+	}
+
+	cache.runReconciliation()
+
+	requireNoCachedLocalMeta(t, cache, dropped.ID)
+	requireCachedLocalString(t, cache, kept.ID, "synced_at", "kept")
+}
+
+func TestCachingStoreParentRefreshEvictsLocalMetadataForRemovedChild(t *testing.T) {
+	backing := &localMetadataBackingStore{Store: NewMemStore()}
+	parent, err := backing.Create(Bead{Title: "parent"})
+	if err != nil {
+		t.Fatalf("Create parent: %v", err)
+	}
+	child, err := backing.Create(Bead{Title: "child", ParentID: parent.ID})
+	if err != nil {
+		t.Fatalf("Create child: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cache.SetLocalString(child.ID, "synced_at", "value"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+	if err := backing.Delete(child.ID); err != nil {
+		t.Fatalf("backing Delete: %v", err)
+	}
+
+	if _, err := cache.List(ListQuery{ParentID: parent.ID}); err != nil {
+		t.Fatalf("List parent: %v", err)
+	}
+
+	requireNoCachedLocalMeta(t, cache, child.ID)
 }
 
 func TestCachingStoreTxInvalidatesTouchedCacheEntriesAfterCommit(t *testing.T) {

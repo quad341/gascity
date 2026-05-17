@@ -134,9 +134,23 @@ func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
 	return cached, true
 }
 
-// GetLocalString retrieves clone-local metadata from the backing store.
+// GetLocalString retrieves clone-local metadata from cache or backing store.
 func (c *CachingStore) GetLocalString(beadID, key string) (string, bool, error) {
-	return c.backing.GetLocalString(beadID, key)
+	c.mu.RLock()
+	if value, ok := c.cachedLocalStringLocked(beadID, key); ok {
+		c.mu.RUnlock()
+		return value, true, nil
+	}
+	c.mu.RUnlock()
+
+	value, ok, err := c.backing.GetLocalString(beadID, key)
+	if err != nil || !ok {
+		return value, ok, err
+	}
+	c.mu.Lock()
+	c.setCachedLocalStringLocked(beadID, key, value)
+	c.mu.Unlock()
+	return value, true, nil
 }
 
 func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, items []Bead) []Bead {
@@ -223,6 +237,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		}
 		delete(c.beads, id)
 		delete(c.deps, id)
+		c.deleteLocalMetaLocked(id)
 		delete(c.dirty, id)
 		delete(c.deletedSeq, id)
 		delete(c.beadSeq, id)

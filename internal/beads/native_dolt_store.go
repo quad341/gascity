@@ -17,10 +17,9 @@ const nativeDoltStoreActor = "gascity"
 const nativeTxMaxAttempts = 3
 
 var (
-	nativeTxBackoffs = [3]time.Duration{
+	nativeTxBackoffs = [nativeTxMaxAttempts - 1]time.Duration{
 		50 * time.Millisecond,
 		200 * time.Millisecond,
-		1 * time.Second,
 	}
 	nativeTxSleep = time.Sleep
 )
@@ -441,6 +440,7 @@ func nativeUpdates(ctx context.Context, id string, opts UpdateOpts, reader nativ
 }
 
 func nativeUpdateParentTx(ctx context.Context, tx beadslib.Transaction, actor, id, parentID string) error {
+	// GetDependencyRecords is outbound-only, matching DepList(id, "down").
 	deps, err := tx.GetDependencyRecords(ctx, id)
 	if err != nil {
 		return err

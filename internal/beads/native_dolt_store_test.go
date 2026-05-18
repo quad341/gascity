@@ -216,6 +216,86 @@ func TestNativeDoltStoreTxDelegatesToUpstreamTransaction(t *testing.T) {
 	}
 }
 
+func TestNativeDoltStoreTxUpdateReplacesParentDependency(t *testing.T) {
+	type removedDependency struct {
+		issueID     string
+		dependsOnID string
+		actor       string
+	}
+
+	var queriedID string
+	var removed []removedDependency
+	var added *beadslib.Dependency
+	var addedActor string
+	tx := &nativeDoltTransactionSpy{
+		depRecords: func(_ context.Context, id string) ([]*beadslib.Dependency, error) {
+			queriedID = id
+			return []*beadslib.Dependency{
+				{
+					IssueID:     id,
+					DependsOnID: "ga-old-parent",
+					Type:        beadslib.DepParentChild,
+				},
+				{
+					IssueID:     id,
+					DependsOnID: "ga-blocker",
+					Type:        beadslib.DepBlocks,
+				},
+			}, nil
+		},
+		removeDep: func(_ context.Context, issueID, dependsOnID, actor string) error {
+			removed = append(removed, removedDependency{
+				issueID:     issueID,
+				dependsOnID: dependsOnID,
+				actor:       actor,
+			})
+			return nil
+		},
+		addDependency: func(_ context.Context, dep *beadslib.Dependency, actor string) error {
+			cloned := *dep
+			added = &cloned
+			addedActor = actor
+			return nil
+		},
+	}
+	storage := &nativeDoltStorageSpy{
+		runInTransaction: func(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
+			return fn(tx)
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	parentID := "ga-new-parent"
+	err := store.Tx("replace parent", func(tx Tx) error {
+		return tx.Update("gc-native", UpdateOpts{ParentID: &parentID})
+	})
+	if err != nil {
+		t.Fatalf("Tx: %v", err)
+	}
+
+	if queriedID != "gc-native" {
+		t.Fatalf("GetDependencyRecords issue ID = %q, want gc-native", queriedID)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("removed dependencies = %#v, want one parent-child removal", removed)
+	}
+	if removed[0].issueID != "gc-native" || removed[0].dependsOnID != "ga-old-parent" {
+		t.Fatalf("removed dependency = %#v, want gc-native -> ga-old-parent", removed[0])
+	}
+	if removed[0].actor != "native-test" {
+		t.Fatalf("RemoveDependency actor = %q, want native-test", removed[0].actor)
+	}
+	if added == nil {
+		t.Fatal("AddDependency was not called")
+	}
+	if added.IssueID != "gc-native" || added.DependsOnID != "ga-new-parent" || added.Type != beadslib.DepParentChild {
+		t.Fatalf("added dependency = %#v, want gc-native -> ga-new-parent parent-child", added)
+	}
+	if addedActor != "native-test" {
+		t.Fatalf("AddDependency actor = %q, want native-test", addedActor)
+	}
+}
+
 func TestNativeDoltStoreTxRetriesSerializationConflicts(t *testing.T) {
 	origSleep := nativeTxSleep
 	var slept []time.Duration

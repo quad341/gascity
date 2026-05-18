@@ -964,10 +964,12 @@ gc doctor
   gc doctor --fix
   gc doctor --verbose
   gc doctor --json
+  gc doctor --explain-postgres-macos-launchd-bootstrap
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--explain-postgres-macos-launchd-bootstrap` | bool |  | print the local PostgreSQL macOS launchd bootstrap runbook |
 | `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
 | `--json` | bool |  | emit structured JSON instead of human-readable output |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |

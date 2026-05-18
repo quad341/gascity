@@ -92,6 +92,22 @@ func TestPostgresContainerBootstrapDocOperatorContract(t *testing.T) {
 	}
 }
 
+func TestPostgresContainerBootstrapDocFixHintReference(t *testing.T) {
+	body, err := os.ReadFile("../../internal/doctor/checks_postgres.go")
+	if err != nil {
+		t.Fatalf("read postgres doctor check: %v", err)
+	}
+	source := string(body)
+	for _, want := range []string{
+		"beadsPostgresContainerRunning",
+		"engdocs/postgres-container-bootstrap.md",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("postgres doctor check missing container bootstrap reference %q", want)
+		}
+	}
+}
+
 func TestPostgresContainerBootstrapDocIdempotencyMessages(t *testing.T) {
 	doc := readPostgresContainerBootstrapDoc(t)
 	expected := []string{

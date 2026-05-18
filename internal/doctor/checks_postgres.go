@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"runtime"
@@ -25,9 +26,11 @@ const (
 	postgresServerBootstrapAmendment           = "local PG not installed yet — see engdocs/postgres-local-bootstrap.md for one-time setup"
 	postgresServerNonSystemdBootstrapAmendment = "local PG not installed yet — see engdocs/postgres-non-systemd-linux-bootstrap.md for one-time setup"
 	postgresServerMacOSBootstrapAmendment      = "local PG not installed yet — see engdocs/postgres-macos-launchd-bootstrap.md for one-time setup"
+	postgresServerContainerBootstrapAmendment  = "local container runtime PG not running — see engdocs/postgres-container-bootstrap.md for setup"
 	postgresServerRemoteHostHintSuffix         = "; or check the cloud provider's console / your VPN if this is a remote host"
 	postgresServerLingerAmendment              = "also run `loginctl enable-linger` so PG starts after reboot (per-user systemd otherwise stops on logout)"
 	postgresServerLingerDetail                 = "⚠ systemd-user linger is not enabled — PG will not start at boot"
+	beadsPostgresContainerName                 = "beads-postgres"
 )
 
 var (
@@ -45,6 +48,9 @@ var (
 	postgresServerDialContext    = func(ctx context.Context, network, address string) (net.Conn, error) {
 		dialer := net.Dialer{Timeout: 2 * time.Second}
 		return dialer.DialContext(ctx, network, address)
+	}
+	beadsPostgresContainerInspectExec = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return exec.CommandContext(ctx, name, args...).CombinedOutput()
 	}
 )
 
@@ -396,32 +402,45 @@ func postgresServerBootstrapFixHint(failingScopes []postgresServerScope, goos st
 	if !postgresServerHasLoopbackScope(failingScopes) {
 		return "", false
 	}
-	if goos == "linux" {
+	switch goos {
+	case "linux":
 		systemdPresent, err := postgresServerSystemdRuntimePresent()
 		if err != nil {
 			return "", false
 		}
 		if systemdPresent {
 			unitInstalled, err := beadsPostgresUnitInstalled()
-			if err != nil || unitInstalled {
+			if err != nil {
 				return "", false
 			}
-			return postgresServerBootstrapHintWithRemoteSuffix(postgresServerBootstrapAmendment, failingScopes), true
+			if !unitInstalled {
+				return postgresServerBootstrapHintWithRemoteSuffix(postgresServerBootstrapAmendment, failingScopes), true
+			}
+		} else {
+			nonSystemdInstalled, err := beadsPostgresNonSystemdServiceInstalled()
+			if err != nil {
+				return "", false
+			}
+			if !nonSystemdInstalled {
+				return postgresServerBootstrapHintWithRemoteSuffix(postgresServerNonSystemdBootstrapAmendment, failingScopes), true
+			}
 		}
-		nonSystemdInstalled, err := beadsPostgresNonSystemdServiceInstalled()
-		if err != nil || nonSystemdInstalled {
-			return "", false
-		}
-		return postgresServerBootstrapHintWithRemoteSuffix(postgresServerNonSystemdBootstrapAmendment, failingScopes), true
-	}
-	if goos == "darwin" {
+	case "darwin":
 		plistInstalled, err := beadsPostgresMacOSPlistInstalled()
-		if err != nil || plistInstalled {
+		if err != nil {
 			return "", false
 		}
-		return postgresServerBootstrapHintWithRemoteSuffix(postgresServerMacOSBootstrapAmendment, failingScopes), true
+		if !plistInstalled {
+			return postgresServerBootstrapHintWithRemoteSuffix(postgresServerMacOSBootstrapAmendment, failingScopes), true
+		}
+	default:
+		return "", false
 	}
-	return "", false
+	containerRunning, err := beadsPostgresContainerRunning()
+	if err != nil || containerRunning {
+		return "", false
+	}
+	return postgresServerBootstrapHintWithRemoteSuffix(postgresServerContainerBootstrapAmendment, failingScopes), true
 }
 
 func postgresServerBootstrapHintWithRemoteSuffix(base string, failingScopes []postgresServerScope) string {
@@ -539,6 +558,56 @@ func beadsPostgresMacOSPlistInstalled() (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+// beadsPostgresContainerRunning reports whether the local bootstrap container
+// exists and is running.
+func beadsPostgresContainerRunning() (bool, error) {
+	for _, runtimeName := range []string{"docker", "podman"} {
+		running, unavailable, err := inspectBeadsPostgresContainer(runtimeName)
+		if unavailable {
+			continue
+		}
+		return running, err
+	}
+	return false, nil
+}
+
+func inspectBeadsPostgresContainer(runtimeName string) (bool, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	output, err := beadsPostgresContainerInspectExec(ctx, runtimeName, "inspect", "--format", "{{.State.Running}}", beadsPostgresContainerName)
+	ctxErr := ctx.Err()
+	cancel()
+	if ctxErr != nil {
+		return false, false, ctxErr
+	}
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return false, true, nil
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return false, false, err
+		}
+		if postgresContainerInspectReportsMissing(output) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	state := strings.TrimSpace(string(output))
+	switch state {
+	case "true":
+		return true, false, nil
+	case "false":
+		return false, false, nil
+	default:
+		return false, false, fmt.Errorf("%s inspect %s returned unexpected running state %q", runtimeName, beadsPostgresContainerName, state)
+	}
+}
+
+func postgresContainerInspectReportsMissing(output []byte) bool {
+	normalized := strings.ToLower(string(output))
+	return strings.Contains(normalized, "no such object") ||
+		strings.Contains(normalized, "no such container")
 }
 
 // systemdUserLingerEnabled reports whether the current user has systemd-user

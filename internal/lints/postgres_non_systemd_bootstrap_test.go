@@ -12,7 +12,10 @@ import (
 	"testing"
 )
 
-const postgresNonSystemdDoc = "engdocs/postgres-non-systemd-linux-bootstrap.md"
+const (
+	postgresNonSystemdDoc = "engdocs/postgres-non-systemd-linux-bootstrap.md"
+	postgresDoctorSource  = "internal/doctor/checks_postgres.go"
+)
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
@@ -28,6 +31,15 @@ func readPostgresNonSystemdDoc(t *testing.T) string {
 	data, err := os.ReadFile(filepath.Join(repoRoot(t), postgresNonSystemdDoc))
 	if err != nil {
 		t.Fatalf("read %s: %v", postgresNonSystemdDoc, err)
+	}
+	return string(data)
+}
+
+func readPostgresDoctorSource(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), postgresDoctorSource))
+	if err != nil {
+		t.Fatalf("read %s: %v", postgresDoctorSource, err)
 	}
 	return string(data)
 }
@@ -89,6 +101,19 @@ func TestPostgresNonSystemdBootstrapDocShellBlocksParse(t *testing.T) {
 	}
 }
 
+func TestPostgresNonSystemdBootstrapDocFixHintReference(t *testing.T) {
+	source := readPostgresDoctorSource(t)
+	for _, want := range []string{
+		"beadsPostgresNonSystemdServiceInstalled",
+		"engdocs/postgres-non-systemd-linux-bootstrap.md",
+		"local PG not installed yet — see engdocs/postgres-non-systemd-linux-bootstrap.md for one-time setup",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("%s missing %q", postgresDoctorSource, want)
+		}
+	}
+}
+
 func TestPostgresNonSystemdBootstrapDocPort5433Pinned(t *testing.T) {
 	doc := readPostgresNonSystemdDoc(t)
 	if !strings.Contains(doc, "127.0.0.1:5433") {
@@ -122,6 +147,24 @@ func TestPostgresNonSystemdBootstrapDocInitSystemSections(t *testing.T) {
 	assertSectionContains(t, doc, "### 6.2 runit", "### 6.3 s6", "~/.local/sv/beads-postgres")
 	assertSectionContains(t, doc, "### 6.3 s6", "## 7.", `S6_USER_SERVICES_DIR="${HOME}/.s6/service"`)
 	assertSectionContains(t, doc, "### 6.3 s6", "## 7.", `${S6_USER_SERVICES_DIR}/beads-postgres`)
+}
+
+func TestPostgresNonSystemdBootstrapDocServicePathsMatchDoctorConstants(t *testing.T) {
+	source := readPostgresDoctorSource(t)
+	for _, want := range []string{
+		`beadsPostgresOpenRCServiceFile = "/etc/init.d/beads-postgres"`,
+		`beadsPostgresRunitServiceFile = ".local/sv/beads-postgres/run"`,
+		`beadsPostgresS6ServiceFile = ".s6/service/beads-postgres/run"`,
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("%s missing %q", postgresDoctorSource, want)
+		}
+	}
+
+	doc := readPostgresNonSystemdDoc(t)
+	assertSectionContains(t, doc, "### 6.1 OpenRC", "### 6.2 runit", "/etc/init.d/beads-postgres")
+	assertSectionContains(t, doc, "### 6.2 runit", "### 6.3 s6", `"$HOME/.local/sv/beads-postgres/run"`)
+	assertSectionContains(t, doc, "### 6.3 s6", "## 7.", `"${S6_USER_SERVICES_DIR}/beads-postgres/run"`)
 }
 
 func assertSectionContains(t *testing.T, doc, start, end, want string) {

@@ -22,7 +22,7 @@ var (
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
-	var fix, verbose, jsonOut bool
+	var fix, verbose, jsonOut, explainPostgresContainerBootstrap bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check workspace health",
@@ -37,9 +37,17 @@ branch.`,
 		Example: `  gc doctor
   gc doctor --fix
   gc doctor --verbose
-  gc doctor --json`,
+  gc doctor --json
+  gc doctor --explain-postgres-container-bootstrap`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if explainPostgresContainerBootstrap {
+				if err := writePostgresContainerBootstrapDoc(stdout); err != nil {
+					fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
+					return errExit
+				}
+				return nil
+			}
 			if doDoctor(fix, verbose, jsonOut, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -49,6 +57,7 @@ branch.`,
 	cmd.Flags().BoolVar(&fix, "fix", false, "attempt automatic repairs and safe mechanical migrations")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show extra diagnostic details")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit structured JSON instead of human-readable output")
+	cmd.Flags().BoolVar(&explainPostgresContainerBootstrap, "explain-postgres-container-bootstrap", false, "print the local PostgreSQL container bootstrap runbook")
 	return cmd
 }
 

@@ -964,10 +964,12 @@ gc doctor
   gc doctor --fix
   gc doctor --verbose
   gc doctor --json
+  gc doctor --explain-postgres-container-bootstrap
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--explain-postgres-container-bootstrap` | bool |  | print the local PostgreSQL container bootstrap runbook |
 | `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
 | `--json` | bool |  | emit structured JSON instead of human-readable output |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |

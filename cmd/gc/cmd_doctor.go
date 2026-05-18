@@ -17,8 +17,9 @@ import (
 )
 
 var (
-	newDoctorDoltServerCheck    = doctor.NewDoltServerCheck
-	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
+	newDoctorDoltServerCheck     = doctor.NewDoltServerCheck
+	newDoctorRigDoltServerCheck  = doctor.NewRigDoltServerCheck
+	newDoctorPostgresServerCheck = doctor.NewPostgresServerCheck
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -163,6 +164,9 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 		d.Register(newCodexHooksDriftCheck(codexHookWorkDirs(cityPath, cfg)))
 		d.Register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		d.Register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
+		if doctor.HasPostgresBackedScope(cityPath, cfg) {
+			d.Register(newDoctorPostgresServerCheck(cityPath, cfg))
+		}
 	}
 	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
 		d.Register(newImportStateDoctorCheck(cityPath))

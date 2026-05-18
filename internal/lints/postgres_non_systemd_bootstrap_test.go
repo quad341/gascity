@@ -151,13 +151,14 @@ func TestPostgresNonSystemdBootstrapDocInitSystemSections(t *testing.T) {
 
 func TestPostgresNonSystemdBootstrapDocServicePathsMatchDoctorConstants(t *testing.T) {
 	source := readPostgresDoctorSource(t)
-	for _, want := range []string{
-		`beadsPostgresOpenRCServiceFile = "/etc/init.d/beads-postgres"`,
-		`beadsPostgresRunitServiceFile = ".local/sv/beads-postgres/run"`,
-		`beadsPostgresS6ServiceFile = ".s6/service/beads-postgres/run"`,
+	for name, value := range map[string]string{
+		"beadsPostgresOpenRCServiceFile": "/etc/init.d/beads-postgres",
+		"beadsPostgresRunitServiceFile":  ".local/sv/beads-postgres/run",
+		"beadsPostgresS6ServiceFile":     ".s6/service/beads-postgres/run",
 	} {
-		if !strings.Contains(source, want) {
-			t.Fatalf("%s missing %q", postgresDoctorSource, want)
+		pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\s*=\s*"` + regexp.QuoteMeta(value) + `"`)
+		if !pattern.MatchString(source) {
+			t.Fatalf("%s missing assignment %s = %q", postgresDoctorSource, name, value)
 		}
 	}
 

@@ -968,6 +968,7 @@ gc doctor
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--explain-postgres-non-systemd-linux-bootstrap` | bool |  | print the non-systemd Linux PostgreSQL bootstrap runbook |
 | `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
 | `--json` | bool |  | emit structured JSON instead of human-readable output |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |

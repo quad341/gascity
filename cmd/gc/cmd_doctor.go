@@ -19,10 +19,11 @@ import (
 var (
 	newDoctorDoltServerCheck    = doctor.NewDoltServerCheck
 	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
+	runDoctor                   = doDoctor
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
-	var fix, verbose, jsonOut bool
+	var fix, verbose, jsonOut, explainPostgresNonSystemdBootstrap bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check workspace health",
@@ -40,7 +41,10 @@ branch.`,
   gc doctor --json`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doDoctor(fix, verbose, jsonOut, stdout, stderr) != 0 {
+			if explainPostgresNonSystemdBootstrap {
+				return writePostgresNonSystemdBootstrapExplain(stdout)
+			}
+			if runDoctor(fix, verbose, jsonOut, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -49,6 +53,7 @@ branch.`,
 	cmd.Flags().BoolVar(&fix, "fix", false, "attempt automatic repairs and safe mechanical migrations")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show extra diagnostic details")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit structured JSON instead of human-readable output")
+	cmd.Flags().BoolVar(&explainPostgresNonSystemdBootstrap, "explain-postgres-non-systemd-linux-bootstrap", false, "print the non-systemd Linux PostgreSQL bootstrap runbook")
 	return cmd
 }
 

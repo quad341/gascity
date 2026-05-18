@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,7 +83,11 @@ func TestPostgresServerCheck(t *testing.T) {
 			withPostgresServerDialResults(t, map[string]error{
 				net.JoinHostPort("127.0.0.1", "55432"): errors.New("connection refused"),
 			})
-			withSystemdUserLinger(t, tc.goos, true, true, nil)
+			if tc.goos == "darwin" {
+				withPostgresServerMacOSPlist(t, tc.goos, true, nil)
+			} else {
+				withSystemdUserLinger(t, tc.goos, true, true, nil)
+			}
 			cityPath, cfg := newPostgresServerCity(t, postgresServerScopeSpec{
 				kind: "rig",
 				name: "frontend",
@@ -422,11 +427,46 @@ func TestPostgresServerFixHint_LinuxLoopbackUnitInstalled_KeepsBaseHint(t *testi
 	}
 }
 
-func TestPostgresServerFixHint_NonLinuxUnitMissing_NoBootstrapAmendment(t *testing.T) {
+func TestPostgresServerFixHint_DarwinLoopbackPlistMissing_PointsAtMacOSBootstrapDoc(t *testing.T) {
 	withPostgresServerDialResults(t, map[string]error{
 		net.JoinHostPort("127.0.0.1", "5433"): errors.New("connection refused"),
 	})
-	withSystemdUserLingerAndPostgresUnit(t, "darwin", true, true, false, nil)
+	withPostgresServerMacOSPlist(t, "darwin", false, nil)
+	cityPath, cfg := newPostgresServerCity(t, postgresServerScopeSpec{
+		kind: "city",
+		host: "127.0.0.1",
+		port: "5433",
+	})
+
+	result := NewPostgresServerCheck(cityPath, cfg).Run(&CheckContext{CityPath: cityPath})
+	if result.FixHint != postgresServerMacOSBootstrapAmendment {
+		t.Fatalf("fix hint = %q, want %q", result.FixHint, postgresServerMacOSBootstrapAmendment)
+	}
+}
+
+func TestPostgresServerFixHint_DarwinLoopbackPlistMissingMixedRemote_AppendsCloudHint(t *testing.T) {
+	withPostgresServerDialResults(t, map[string]error{
+		net.JoinHostPort("127.0.0.1", "5433"):      errors.New("connection refused"),
+		net.JoinHostPort("db.example.com", "5432"): errors.New("connection refused"),
+	})
+	withPostgresServerMacOSPlist(t, "darwin", false, nil)
+	cityPath, cfg := newPostgresServerCity(t,
+		postgresServerScopeSpec{kind: "city", host: "127.0.0.1", port: "5433"},
+		postgresServerScopeSpec{kind: "rig", name: "remote", path: "rigs/remote", host: "db.example.com", port: "5432"},
+	)
+
+	result := NewPostgresServerCheck(cityPath, cfg).Run(&CheckContext{CityPath: cityPath})
+	want := postgresServerMacOSBootstrapAmendment + "; or check the cloud provider's console / your VPN if this is a remote host"
+	if result.FixHint != want {
+		t.Fatalf("fix hint = %q, want %q", result.FixHint, want)
+	}
+}
+
+func TestPostgresServerFixHint_DarwinLoopbackPlistInstalled_KeepsDarwinBaseHint(t *testing.T) {
+	withPostgresServerDialResults(t, map[string]error{
+		net.JoinHostPort("127.0.0.1", "5433"): errors.New("connection refused"),
+	})
+	withPostgresServerMacOSPlist(t, "darwin", true, nil)
 	cityPath, cfg := newPostgresServerCity(t, postgresServerScopeSpec{
 		kind: "city",
 		host: "127.0.0.1",
@@ -437,6 +477,37 @@ func TestPostgresServerFixHint_NonLinuxUnitMissing_NoBootstrapAmendment(t *testi
 	want := "start PG (e.g. brew services start postgresql@<version>, launch Postgres.app, or docker compose up -d postgres) then re-run gc doctor; expected listener: 127.0.0.1:5433"
 	if result.FixHint != want {
 		t.Fatalf("fix hint = %q, want %q", result.FixHint, want)
+	}
+}
+
+func TestPostgresServerFixHint_NonDarwinPlistProbeNotCalled(t *testing.T) {
+	withPostgresServerDialResults(t, map[string]error{
+		net.JoinHostPort("127.0.0.1", "5433"): errors.New("connection refused"),
+	})
+	withSystemdUserLingerSeams(t,
+		func() string { return "linux" },
+		func(path string) (os.FileInfo, error) {
+			if path == systemdRuntimeDir {
+				return fakePostgresServerFileInfo{}, nil
+			}
+			if strings.Contains(path, "Library/LaunchAgents") {
+				t.Fatalf("macOS plist path should not be probed on Linux: %s", path)
+			}
+			return nil, fs.ErrNotExist
+		},
+		func() (*user.User, error) {
+			return &user.User{Username: "alice", HomeDir: "/home/alice"}, nil
+		},
+	)
+	cityPath, cfg := newPostgresServerCity(t, postgresServerScopeSpec{
+		kind: "city",
+		host: "127.0.0.1",
+		port: "5433",
+	})
+
+	result := NewPostgresServerCheck(cityPath, cfg).Run(&CheckContext{CityPath: cityPath})
+	if result.FixHint == postgresServerMacOSBootstrapAmendment {
+		t.Fatalf("fix hint = %q, want macOS bootstrap amendment suppressed on Linux", result.FixHint)
 	}
 }
 
@@ -455,6 +526,21 @@ func TestPostgresServerFixHint_LinuxNonLoopbackUnitMissing_NoBootstrapAmendment(
 	want := "start PG (e.g. systemctl --user start postgresql, sudo systemctl start postgresql, or docker compose up -d postgres) then re-run gc doctor; expected listener: db.example.com:5432; or check the cloud provider's console / your VPN if this is a remote host"
 	if result.FixHint != want {
 		t.Fatalf("fix hint = %q, want %q", result.FixHint, want)
+	}
+}
+
+func TestPostgresServerFixHint_DarwinOK_NoFixHint(t *testing.T) {
+	withPostgresServerDialResults(t, nil)
+	withPostgresServerMacOSPlist(t, "darwin", false, nil)
+	cityPath, cfg := newPostgresServerCity(t, postgresServerScopeSpec{
+		kind: "city",
+		host: "127.0.0.1",
+		port: "5433",
+	})
+
+	result := NewPostgresServerCheck(cityPath, cfg).Run(&CheckContext{CityPath: cityPath})
+	if result.FixHint != "" {
+		t.Fatalf("fix hint = %q, want empty", result.FixHint)
 	}
 }
 
@@ -533,6 +619,70 @@ func TestBeadsPostgresUnitInstalled_UserCurrentFails_DegradesGracefully(t *testi
 func TestBeadsPostgresUnitPath_MatchesEngdocReference(t *testing.T) {
 	if got, want := "~/"+beadsPostgresUnitFile, "~/.config/systemd/user/beads-postgres.service"; got != want {
 		t.Fatalf("beadsPostgresUnitFile = %q, want %q", got, want)
+	}
+}
+
+func TestBeadsPostgresMacOSPlistInstalled_True(t *testing.T) {
+	withPostgresServerMacOSPlist(t, "darwin", true, nil)
+
+	got, err := beadsPostgresMacOSPlistInstalled()
+	if err != nil || !got {
+		t.Fatalf("beadsPostgresMacOSPlistInstalled() = (%t, %v), want (true, nil)", got, err)
+	}
+}
+
+func TestBeadsPostgresMacOSPlistInstalled_False(t *testing.T) {
+	withPostgresServerMacOSPlist(t, "darwin", false, nil)
+
+	got, err := beadsPostgresMacOSPlistInstalled()
+	if err != nil || got {
+		t.Fatalf("beadsPostgresMacOSPlistInstalled() = (%t, %v), want (false, nil)", got, err)
+	}
+}
+
+func TestBeadsPostgresMacOSPlistInstalled_NonDarwin_SkipsFilesystem(t *testing.T) {
+	withSystemdUserLingerSeams(t,
+		func() string { return "linux" },
+		func(path string) (os.FileInfo, error) {
+			t.Fatalf("stat probe should not run on non-Darwin: %s", path)
+			return nil, nil
+		},
+		func() (*user.User, error) {
+			t.Fatal("current user probe should not run on non-Darwin")
+			return nil, nil
+		},
+	)
+
+	got, err := beadsPostgresMacOSPlistInstalled()
+	if err != nil || got {
+		t.Fatalf("beadsPostgresMacOSPlistInstalled() = (%t, %v), want (false, nil)", got, err)
+	}
+}
+
+func TestBeadsPostgresMacOSPlistInstalled_UserCurrentFails_DegradesGracefully(t *testing.T) {
+	withPostgresServerDialResults(t, map[string]error{
+		net.JoinHostPort("127.0.0.1", "5433"): errors.New("connection refused"),
+	})
+	withPostgresServerMacOSPlist(t, "darwin", false, errors.New("whoami failed"))
+	cityPath, cfg := newPostgresServerCity(t, postgresServerScopeSpec{
+		kind: "city",
+		host: "127.0.0.1",
+		port: "5433",
+	})
+
+	got, err := beadsPostgresMacOSPlistInstalled()
+	if err == nil || got {
+		t.Fatalf("beadsPostgresMacOSPlistInstalled() = (%t, %v), want (false, error)", got, err)
+	}
+	result := NewPostgresServerCheck(cityPath, cfg).Run(&CheckContext{CityPath: cityPath})
+	if result.FixHint == postgresServerMacOSBootstrapAmendment {
+		t.Fatalf("fix hint = %q, want macOS bootstrap amendment suppressed on user lookup failure", result.FixHint)
+	}
+}
+
+func TestBeadsPostgresMacOSPlistPath_MatchesEngdocReference(t *testing.T) {
+	if got, want := beadsPostgresMacOSPlistFile, "Library/LaunchAgents/com.beads.postgres.plist"; got != want {
+		t.Fatalf("beadsPostgresMacOSPlistFile = %q, want %q", got, want)
 	}
 }
 
@@ -758,6 +908,28 @@ func withSystemdUserLingerAndPostgresUnit(t *testing.T, goos string, systemdPres
 				return nil, currentErr
 			}
 			return &user.User{Username: "alice", HomeDir: "/home/alice"}, nil
+		},
+	)
+}
+
+func withPostgresServerMacOSPlist(t *testing.T, goos string, plistExists bool, currentErr error) {
+	t.Helper()
+	withSystemdUserLingerSeams(t,
+		func() string { return goos },
+		func(path string) (os.FileInfo, error) {
+			if path == filepath.Join("/Users/alice", beadsPostgresMacOSPlistFile) {
+				if plistExists {
+					return fakePostgresServerFileInfo{}, nil
+				}
+				return nil, fs.ErrNotExist
+			}
+			return nil, fs.ErrNotExist
+		},
+		func() (*user.User, error) {
+			if currentErr != nil {
+				return nil, currentErr
+			}
+			return &user.User{Username: "alice", HomeDir: "/Users/alice"}, nil
 		},
 	)
 }

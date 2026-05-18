@@ -22,13 +22,15 @@ const (
 	systemdRuntimeDir = "/run/systemd/system"
 	systemdLingerDir  = "/var/lib/systemd/linger"
 
-	postgresServerBootstrapAmendment = "local PG not installed yet — see engdocs/postgres-local-bootstrap.md for one-time setup"
-	postgresServerLingerAmendment    = "also run `loginctl enable-linger` so PG starts after reboot (per-user systemd otherwise stops on logout)"
-	postgresServerLingerDetail       = "⚠ systemd-user linger is not enabled — PG will not start at boot"
+	postgresServerBootstrapAmendment      = "local PG not installed yet — see engdocs/postgres-local-bootstrap.md for one-time setup"
+	postgresServerMacOSBootstrapAmendment = "local PG not installed yet — see engdocs/postgres-macos-launchd-bootstrap.md for one-time setup"
+	postgresServerLingerAmendment         = "also run `loginctl enable-linger` so PG starts after reboot (per-user systemd otherwise stops on logout)"
+	postgresServerLingerDetail            = "⚠ systemd-user linger is not enabled — PG will not start at boot"
 )
 
 var (
 	beadsPostgresUnitFile        = ".config/systemd/user/beads-postgres.service"
+	beadsPostgresMacOSPlistFile  = "Library/LaunchAgents/com.beads.postgres.plist"
 	systemdUserLingerStatProbe   = os.Stat
 	systemdUserLingerCurrentUser = user.Current
 	systemdUserLingerGOOS        = func() string { return runtime.GOOS }
@@ -365,7 +367,21 @@ func postgresServerLoopbackHost(host string) bool {
 }
 
 func postgresServerBootstrapFixHint(failingScopes []postgresServerScope, goos string) (string, bool) {
-	if goos != "linux" || !postgresServerHasLoopbackScope(failingScopes) {
+	if !postgresServerHasLoopbackScope(failingScopes) {
+		return "", false
+	}
+	if goos == "darwin" {
+		plistInstalled, err := beadsPostgresMacOSPlistInstalled()
+		if err != nil || plistInstalled {
+			return "", false
+		}
+		hint := postgresServerMacOSBootstrapAmendment
+		if postgresServerHasNonLoopbackScope(failingScopes) {
+			hint += "; or check the cloud provider's console / your VPN if this is a remote host"
+		}
+		return hint, true
+	}
+	if goos != "linux" {
 		return "", false
 	}
 	systemdPresent, err := postgresServerSystemdRuntimePresent()
@@ -422,6 +438,27 @@ func beadsPostgresUnitInstalled() (bool, error) {
 		return false, err
 	}
 	_, err = systemdUserLingerStatProbe(filepath.Join(current.HomeDir, beadsPostgresUnitFile))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
+
+// beadsPostgresMacOSPlistInstalled reports whether the macOS LaunchAgent plist
+// exists for the current user. It performs only file probes and never executes
+// commands.
+func beadsPostgresMacOSPlistInstalled() (bool, error) {
+	if systemdUserLingerGOOS() != "darwin" {
+		return false, nil
+	}
+	current, err := systemdUserLingerCurrentUser()
+	if err != nil {
+		return false, err
+	}
+	_, err = systemdUserLingerStatProbe(filepath.Join(current.HomeDir, beadsPostgresMacOSPlistFile))
 	if err == nil {
 		return true, nil
 	}

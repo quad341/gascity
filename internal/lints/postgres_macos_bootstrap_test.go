@@ -9,13 +9,25 @@ import (
 	"testing"
 )
 
-const macOSBootstrapDocPath = "../../engdocs/postgres-macos-launchd-bootstrap.md"
+const (
+	macOSBootstrapDocPath          = "../../engdocs/postgres-macos-launchd-bootstrap.md"
+	macOSBootstrapDoctorSourcePath = "../../internal/doctor/checks_postgres.go"
+)
 
 func readPostgresMacOSBootstrapDoc(t *testing.T) string {
 	t.Helper()
 	body, err := os.ReadFile(macOSBootstrapDocPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", macOSBootstrapDocPath, err)
+	}
+	return string(body)
+}
+
+func readPostgresMacOSBootstrapDoctorSource(t *testing.T) string {
+	t.Helper()
+	body, err := os.ReadFile(macOSBootstrapDoctorSourcePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", macOSBootstrapDoctorSourcePath, err)
 	}
 	return string(body)
 }
@@ -91,6 +103,18 @@ func TestPostgresMacOSBootstrapDocPlistPathConsistent(t *testing.T) {
 	}
 	if strings.Contains(doc, "LaunchDaemons/com.beads.postgres.plist") {
 		t.Fatal("doc should not reference a LaunchDaemon plist")
+	}
+	src := readPostgresMacOSBootstrapDoctorSource(t)
+	if !strings.Contains(src, "beadsPostgresMacOSPlistFile") ||
+		!strings.Contains(src, `"Library/LaunchAgents/com.beads.postgres.plist"`) {
+		t.Fatal("macOS plist helper path does not match doc LaunchAgent path")
+	}
+}
+
+func TestPostgresMacOSBootstrapDocFixHintReference(t *testing.T) {
+	src := readPostgresMacOSBootstrapDoctorSource(t)
+	if !strings.Contains(src, "engdocs/postgres-macos-launchd-bootstrap.md") {
+		t.Fatalf("internal/doctor/checks_postgres.go missing %q", "engdocs/postgres-macos-launchd-bootstrap.md")
 	}
 }
 

@@ -1102,7 +1102,12 @@ func (c *DoltRuntimeDiscoverableCheck) Run(_ *CheckContext) *CheckResult {
 	}
 
 	stateFile := filepath.Join(doctorDoltPackStateDir(c.cityPath), "dolt-state.json")
-	data, err := os.ReadFile(stateFile) //nolint:gosec // path is derived from managed city layout
+	return runDoltRuntimeStateFileCheck(c.Name(), stateFile)
+}
+
+func runDoltRuntimeStateFileCheck(name, stateFile string) *CheckResult {
+	r := &CheckResult{Name: name}
+	data, err := os.ReadFile(stateFile) //nolint:gosec // path is derived from managed scope layout
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			r.Status = StatusError
@@ -1262,51 +1267,7 @@ func (c *RigDoltRuntimeDiscoverableCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	stateFile := filepath.Join(doctorDoltPackStateDir(rigPath), "dolt-state.json")
-	data, err := os.ReadFile(stateFile) //nolint:gosec // path is derived from managed rig layout
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			r.Status = StatusError
-			r.Message = "dolt runtime state not published (file missing)"
-			r.FixHint = doltRuntimeDiscoverableFixHint
-			return r
-		}
-		r.Status = StatusError
-		r.Message = fmt.Sprintf("dolt runtime state unreadable: %v", err)
-		r.FixHint = doltRuntimeDiscoverableFixHint
-		return r
-	}
-
-	var state managedDoltDoctorRuntimeState
-	if err := json.Unmarshal(data, &state); err != nil {
-		r.Status = StatusError
-		r.Message = fmt.Sprintf("dolt runtime state malformed: %v", err)
-		r.FixHint = doltRuntimeDiscoverableFixHint
-		return r
-	}
-
-	if !state.Running {
-		r.Status = StatusError
-		r.Message = "dolt runtime state present but server marked stopped"
-		r.FixHint = doltRuntimeDiscoverableFixHint
-		return r
-	}
-	if state.PID <= 0 || !pidutil.Alive(state.PID) {
-		r.Status = StatusError
-		r.Message = fmt.Sprintf("dolt runtime state stale: pid %d not alive", state.PID)
-		r.FixHint = doltRuntimeDiscoverableFixHint
-		return r
-	}
-	if state.Port < 1 || state.Port > 65535 {
-		r.Status = StatusError
-		r.Message = fmt.Sprintf("dolt runtime state invalid: port %d out of range", state.Port)
-		r.FixHint = doltRuntimeDiscoverableFixHint
-		return r
-	}
-
-	r.Status = StatusOK
-	r.Message = fmt.Sprintf("dolt runtime state published: port %d, pid %d", state.Port, state.PID)
-	return r
+	return runDoltRuntimeStateFileCheck(c.Name(), filepath.Join(doctorDoltPackStateDir(rigPath), "dolt-state.json"))
 }
 
 // CanFix returns false.

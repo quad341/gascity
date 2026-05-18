@@ -1433,7 +1433,8 @@ func TestRigDoltRuntimeDiscoverableCheck_Inherits(t *testing.T) {
 	}
 }
 
-func TestRigDoltRuntimeDiscoverableCheck_ExplicitFileMissing(t *testing.T) {
+func setupExplicitRigDoltRuntimeDiscoverable(t *testing.T) (string, string, config.Rig) {
+	t.Helper()
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "frontend")
 	fs := fsys.OSFS{}
@@ -1445,13 +1446,82 @@ func TestRigDoltRuntimeDiscoverableCheck_ExplicitFileMissing(t *testing.T) {
 		DoltPort:       "3307",
 	})
 	writeDoctorCanonicalMetadata(t, fs, rigDir, "fe")
+	return cityDir, rigDir, config.Rig{Name: "fe", Path: rigDir}
+}
 
-	c := NewRigDoltRuntimeDiscoverableCheck(cityDir, config.Rig{Name: "fe", Path: rigDir}, false)
+func TestRigDoltRuntimeDiscoverableCheck_ExplicitFileMissing(t *testing.T) {
+	cityDir, _, rig := setupExplicitRigDoltRuntimeDiscoverable(t)
+	c := NewRigDoltRuntimeDiscoverableCheck(cityDir, rig, false)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusError {
 		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
 	}
 	if r.Message != "dolt runtime state not published (file missing)" {
+		t.Fatalf("message = %q", r.Message)
+	}
+}
+
+func TestRigDoltRuntimeDiscoverableCheck_Malformed(t *testing.T) {
+	cityDir, rigDir, rig := setupExplicitRigDoltRuntimeDiscoverable(t)
+	writeDoltRuntimeDiscoverableState(t, rigDir, "{not valid json}")
+	c := NewRigDoltRuntimeDiscoverableCheck(cityDir, rig, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	}
+	if !strings.HasPrefix(r.Message, "dolt runtime state malformed: ") {
+		t.Fatalf("message = %q, want malformed prefix", r.Message)
+	}
+}
+
+func TestRigDoltRuntimeDiscoverableCheck_RunningFalse(t *testing.T) {
+	cityDir, rigDir, rig := setupExplicitRigDoltRuntimeDiscoverable(t)
+	writeDoltRuntimeDiscoverableState(t, rigDir, fmt.Sprintf(`{"running":false,"pid":1,"port":47823,"data_dir":%q}`, filepath.Join(rigDir, ".beads", "dolt")))
+	c := NewRigDoltRuntimeDiscoverableCheck(cityDir, rig, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	}
+	if r.Message != "dolt runtime state present but server marked stopped" {
+		t.Fatalf("message = %q", r.Message)
+	}
+}
+
+func TestRigDoltRuntimeDiscoverableCheck_InvalidPID(t *testing.T) {
+	cityDir, rigDir, rig := setupExplicitRigDoltRuntimeDiscoverable(t)
+	writeDoltRuntimeDiscoverableState(t, rigDir, fmt.Sprintf(`{"running":true,"pid":0,"port":47823,"data_dir":%q}`, filepath.Join(rigDir, ".beads", "dolt")))
+	c := NewRigDoltRuntimeDiscoverableCheck(cityDir, rig, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	}
+	if r.Message != "dolt runtime state invalid: pid 0 not a process" {
+		t.Fatalf("message = %q", r.Message)
+	}
+}
+
+func TestRigDoltRuntimeDiscoverableCheck_DeadPID(t *testing.T) {
+	cityDir, rigDir, rig := setupExplicitRigDoltRuntimeDiscoverable(t)
+	writeDoltRuntimeDiscoverableState(t, rigDir, fmt.Sprintf(`{"running":true,"pid":999999,"port":47823,"data_dir":%q}`, filepath.Join(rigDir, ".beads", "dolt")))
+	c := NewRigDoltRuntimeDiscoverableCheck(cityDir, rig, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	}
+	if r.Message != "dolt runtime state stale: pid 999999 not alive" {
+		t.Fatalf("message = %q", r.Message)
+	}
+}
+
+func TestRigDoltRuntimeDiscoverableCheck_PortOutOfRange(t *testing.T) {
+	cityDir, rigDir, rig := setupExplicitRigDoltRuntimeDiscoverable(t)
+	writeDoltRuntimeDiscoverableState(t, rigDir, fmt.Sprintf(`{"running":true,"pid":%d,"port":70000,"data_dir":%q}`, os.Getpid(), filepath.Join(rigDir, ".beads", "dolt")))
+	c := NewRigDoltRuntimeDiscoverableCheck(cityDir, rig, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	}
+	if r.Message != "dolt runtime state invalid: port 70000 out of range" {
 		t.Fatalf("message = %q", r.Message)
 	}
 }

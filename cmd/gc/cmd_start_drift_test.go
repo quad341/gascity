@@ -142,7 +142,7 @@ func TestRunStartDriftCheckWalkErrorIdentityFirst(t *testing.T) {
 	}
 	out := combined.String()
 	if !strings.HasPrefix(out, "Supervisor:") {
-		t.Fatalf("combined output should start with Supervisor identity; got %q", firstDriftLine(out))
+		t.Fatalf("combined output should start with Supervisor identity; got %q", strings.SplitN(out, "\n", 2)[0])
 	}
 	if !strings.Contains(out, "\nwarning: pack-root walk failed:") {
 		t.Fatalf("combined output missing warning after identity:\n%s", out)
@@ -488,7 +488,7 @@ func TestRunStartDriftCheck_ErrorReturnsTerminal(t *testing.T) {
 	if cont {
 		t.Errorf("cont = true on --no-auto-restart error; should be terminal")
 	}
-	if !strings.Contains(stderr.String(), "supervisor binary drift") {
+	if !strings.Contains(stderr.String(), "supervisor binary/pack drift") {
 		t.Errorf("stderr missing drift error:\n%s", stderr.String())
 	}
 }

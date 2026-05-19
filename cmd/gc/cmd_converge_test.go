@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 func TestConvergeCreateRejectsRigFlagBeforeSocketWork(t *testing.T) {
@@ -37,8 +39,7 @@ func TestConvergeListRejectsGCRigBeforeStoreWork(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	cmd := newConvergeListCmd(&stdout, &stderr)
-	cmd.SilenceErrors = true
-	cmd.SilenceUsage = true
+	silenceCobraUsage(cmd)
 
 	err := cmd.Execute()
 	requireConvergeRigUnsupported(t, err, stderr.String(), "list")
@@ -47,18 +48,59 @@ func TestConvergeListRejectsGCRigBeforeStoreWork(t *testing.T) {
 	}
 }
 
-func TestConvergeApproveRejectsRigFlagBeforeDial(t *testing.T) {
+func TestConvergeStatusRejectsRigFlagBeforeStoreWork(t *testing.T) {
 	resetFlags(t)
 	t.Setenv("GC_RIG", "")
-	cityFlag = setupCity(t, "converge-approve-rig")
+	t.Setenv("GC_BEADS", "file")
+	cityFlag = setupCity(t, "converge-status-rig")
 	rigFlag = "rig-under-test"
 
 	var stdout, stderr bytes.Buffer
-	err := convergeSocketCmd("ga-converge-1", "approve", nil, &stdout, &stderr)
+	cmd := newConvergeStatusCmd(&stdout, &stderr)
+	silenceCobraUsage(cmd)
+	cmd.SetArgs([]string{"ga-converge-1"})
 
-	requireConvergeRigUnsupported(t, err, stderr.String(), "approve")
+	err := cmd.Execute()
+	requireConvergeRigUnsupported(t, err, stderr.String(), "status")
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
+	}
+}
+
+func TestConvergeTestGateRejectsGCRigBeforeStoreWork(t *testing.T) {
+	resetFlags(t)
+	t.Setenv("GC_RIG", "rig-under-test")
+	t.Setenv("GC_BEADS", "file")
+	cityFlag = setupCity(t, "converge-test-gate-rig")
+
+	var stdout, stderr bytes.Buffer
+	cmd := newConvergeTestGateCmd(&stdout, &stderr)
+	silenceCobraUsage(cmd)
+	cmd.SetArgs([]string{"ga-converge-1"})
+
+	err := cmd.Execute()
+	requireConvergeRigUnsupported(t, err, stderr.String(), "test-gate")
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
+	}
+}
+
+func TestConvergeSocketCommandsRejectRigFlagBeforeDial(t *testing.T) {
+	for _, command := range []string{"approve", "iterate", "stop"} {
+		t.Run(command, func(t *testing.T) {
+			resetFlags(t)
+			t.Setenv("GC_RIG", "")
+			cityFlag = setupCity(t, "converge-"+command+"-rig")
+			rigFlag = "rig-under-test"
+
+			var stdout, stderr bytes.Buffer
+			err := convergeSocketCmd("ga-converge-1", command, nil, &stdout, &stderr)
+
+			requireConvergeRigUnsupported(t, err, stderr.String(), command)
+			if got := stdout.String(); got != "" {
+				t.Fatalf("stdout = %q, want empty", got)
+			}
+		})
 	}
 }
 
@@ -80,6 +122,11 @@ func TestConvergeRetryRejectsRigFlagBeforeSocketWork(t *testing.T) {
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
 	}
+}
+
+func silenceCobraUsage(cmd *cobra.Command) {
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
 }
 
 func requireConvergeRigUnsupported(t *testing.T, err error, stderr, command string) {

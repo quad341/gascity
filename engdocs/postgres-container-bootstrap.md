@@ -19,8 +19,8 @@ port (5433) and credentials file format are identical. No host-side `initdb`,
 `postgresql.conf` edits, or service unit installation is needed — the official
 `postgres:16` image handles all of that.
 
-`gc doctor --explain-postgres-container-bootstrap` prints the same sequence as a
-copy-pastable shell script (see §10).
+The numbered sections below are the copy-pastable bootstrap sequence. `gc doctor`
+only verifies the completed setup; it does not print or run this bootstrap.
 
 ## 1. Audience and prerequisites
 
@@ -282,8 +282,9 @@ If `postgres-server` reports a `✗` error:
 | `local container runtime PG not running — see engdocs/postgres-container-bootstrap.md for setup` | This doc was not run | Run this doc |
 | `auth failed` | Credentials file unreadable or wrong password | Confirm `chmod 600 ~/.config/beads/credentials`; recreate if needed |
 
-`gc doctor --explain-postgres-container-bootstrap` reprints this document as a
-copy-pastable shell script.
+If the checks still fail after rerunning the relevant section above, use the
+container logs and the credentials file permissions as the source of truth; there
+is no separate `gc doctor` bootstrap-printing mode.
 
 ## 8. Uninstallation
 

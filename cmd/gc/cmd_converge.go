@@ -129,6 +129,9 @@ func newConvergeStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Show convergence loop status",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if rejectConvergeRigScope(stderr, "status") {
+				return errExit
+			}
 			beadID := args[0]
 			store, code := openCityStore(stderr, "gc converge status")
 			if code != 0 {
@@ -319,6 +322,9 @@ func newConvergeTestGateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Dry-run the gate condition (no state changes)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if rejectConvergeRigScope(stderr, "test-gate") {
+				return errExit
+			}
 			beadID := args[0]
 			store, code := openCityStore(stderr, "gc converge test-gate")
 			if code != 0 {

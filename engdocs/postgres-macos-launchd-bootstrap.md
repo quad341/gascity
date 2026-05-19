@@ -19,8 +19,8 @@ This doc is the macOS launchd analogue of `engdocs/postgres-local-bootstrap.md`
 (Linux systemd-user). The postgres data directory, port, and credentials file are
 identical; only the service-management layer differs.
 
-`gc doctor --explain-postgres-macos-launchd-bootstrap` prints the same sequence
-as a single copy-pastable shell script (see §10).
+The numbered sections below are the copy-pastable bootstrap sequence. `gc doctor`
+only verifies the completed setup; it does not print or run this bootstrap.
 
 ## 1. Audience and prerequisites
 
@@ -337,8 +337,9 @@ If `postgres-server` reports a `✗` error:
 | `metadata missing postgres host/port; cannot probe` | scope metadata does not have `PostgresHost`/`PostgresPort`     | edit scope metadata or re-run `gc init` for the scope         |
 | `auth failed`                                       | postgres-auth cannot read the credentials file                  | confirm `chmod 600 ~/.config/beads/credentials`               |
 
-`gc doctor --explain-postgres-macos-launchd-bootstrap` reprints this document as a
-copy-pastable shell script.
+If the checks still fail after rerunning the relevant section above, use the
+launchd logs and the credentials file permissions as the source of truth; there
+is no separate `gc doctor` bootstrap-printing mode.
 
 ## 11. Uninstallation
 

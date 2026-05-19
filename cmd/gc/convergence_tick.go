@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/user"
+	"sort"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
@@ -95,51 +97,95 @@ func (cr *CityRuntime) cityConvergenceStoreAdapter() *convergenceStoreAdapter {
 	return cr.convStoreAdapters[cityConvergenceStoreKey]
 }
 
+func (cr *CityRuntime) hasConvergenceHandlers() bool {
+	return len(cr.convHandlers) > 0
+}
+
+func (cr *CityRuntime) convergenceStoreKeysCityFirst() []string {
+	if len(cr.convHandlers) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(cr.convHandlers))
+	if _, ok := cr.convHandlers[cityConvergenceStoreKey]; ok {
+		keys = append(keys, cityConvergenceStoreKey)
+	}
+	rigKeys := make([]string, 0, len(cr.convHandlers))
+	for key := range cr.convHandlers {
+		if key == cityConvergenceStoreKey {
+			continue
+		}
+		rigKeys = append(rigKeys, key)
+	}
+	sort.Strings(rigKeys)
+	keys = append(keys, rigKeys...)
+	return keys
+}
+
+func (cr *CityRuntime) convergenceHandlerForBead(beadID string) (*convergence.Handler, error) {
+	for _, key := range cr.convergenceStoreKeysCityFirst() {
+		handler := cr.convHandlers[key]
+		if handler == nil {
+			continue
+		}
+		if _, err := handler.Store.GetMetadata(beadID); err == nil {
+			return handler, nil
+		} else if !errors.Is(err, beads.ErrNotFound) {
+			return nil, fmt.Errorf("reading convergence bead %q in store %q: %w", beadID, key, err)
+		}
+	}
+	return nil, fmt.Errorf("convergence bead %q not found", beadID)
+}
+
+func unavailableConvergenceRigError(rigName string) string {
+	return fmt.Sprintf("rig %q is not available; check that it is configured and that its store is reachable", rigName)
+}
+
 // convergenceTick processes active convergence loops by checking indexed
 // beads for closed wisps and calling HandleWispClosed. Called from tick().
 // Uses the in-memory active index (O(active) instead of O(all beads)).
 func (cr *CityRuntime) convergenceTick(ctx context.Context) {
-	handler := cr.cityConvergenceHandler()
-	if handler == nil || cr.convergenceReqCh == nil {
+	if !cr.hasConvergenceHandlers() || cr.convergenceReqCh == nil {
 		return
 	}
-	adapter := cr.cityConvergenceStoreAdapter()
-	if adapter == nil || adapter.activeIndex == nil {
-		return
-	}
-
-	for _, beadID := range adapter.activeBeadIDs() {
-		meta, err := adapter.GetMetadata(beadID)
-		if err != nil {
+	for _, key := range cr.convergenceStoreKeysCityFirst() {
+		handler := cr.convHandlers[key]
+		adapter := cr.convStoreAdapters[key]
+		if handler == nil || adapter == nil || adapter.activeIndex == nil {
 			continue
 		}
-		// Only process active beads; skip others like waiting_manual
-		// that are indexed for CountActiveConvergenceLoops but not for tick.
-		if meta[convergence.FieldState] != convergence.StateActive {
-			continue
-		}
-		activeWisp := meta[convergence.FieldActiveWisp]
-		if activeWisp == "" {
-			continue
-		}
-		// Check if the active wisp is closed.
-		wispInfo, wErr := adapter.GetBead(activeWisp)
-		if wErr != nil {
-			continue // wisp may not exist yet
-		}
-		if wispInfo.Status != "closed" {
-			continue
-		}
-		// Process the closed wisp.
-		result, hErr := handler.HandleWispClosed(ctx, beadID, activeWisp)
-		if hErr != nil {
-			fmt.Fprintf(cr.stderr, "%s: convergence: HandleWispClosed(%s, %s): %v\n", //nolint:errcheck
-				cr.logPrefix, beadID, activeWisp, hErr)
-			continue
-		}
-		if result.Action != convergence.ActionSkipped {
-			fmt.Fprintf(cr.stdout, "Convergence %s: %s (iteration %d)\n", //nolint:errcheck
-				beadID, result.Action, result.Iteration)
+		for _, beadID := range adapter.activeBeadIDs() {
+			meta, err := adapter.GetMetadata(beadID)
+			if err != nil {
+				continue
+			}
+			// Only process active beads; skip others like waiting_manual
+			// that are indexed for CountActiveConvergenceLoops but not for tick.
+			if meta[convergence.FieldState] != convergence.StateActive {
+				continue
+			}
+			activeWisp := meta[convergence.FieldActiveWisp]
+			if activeWisp == "" {
+				continue
+			}
+			// Check if the active wisp is closed.
+			wispInfo, wErr := adapter.GetBead(activeWisp)
+			if wErr != nil {
+				continue // wisp may not exist yet
+			}
+			if wispInfo.Status != "closed" {
+				continue
+			}
+			// Process the closed wisp.
+			result, hErr := handler.HandleWispClosed(ctx, beadID, activeWisp)
+			if hErr != nil {
+				fmt.Fprintf(cr.stderr, "%s: convergence: HandleWispClosed(%s, %s): %v\n", //nolint:errcheck
+					cr.logPrefix, beadID, activeWisp, hErr)
+				continue
+			}
+			if result.Action != convergence.ActionSkipped {
+				fmt.Fprintf(cr.stdout, "Convergence %s: %s (iteration %d)\n", //nolint:errcheck
+					beadID, result.Action, result.Iteration)
+			}
 		}
 	}
 }
@@ -148,7 +194,7 @@ func (cr *CityRuntime) convergenceTick(ctx context.Context) {
 // processes each command serially. Called from the event loop to serialize
 // CLI commands with tick-based processing.
 func (cr *CityRuntime) processConvergenceRequests(ctx context.Context) {
-	if cr.cityConvergenceHandler() == nil || cr.convergenceReqCh == nil {
+	if !cr.hasConvergenceHandlers() || cr.convergenceReqCh == nil {
 		return
 	}
 	for {
@@ -183,8 +229,7 @@ func (cr *CityRuntime) safeHandleConvergenceRequest(ctx context.Context, req con
 
 // handleConvergenceRequest dispatches a single convergence command.
 func (cr *CityRuntime) handleConvergenceRequest(ctx context.Context, req convergenceRequest) convergenceReply {
-	handler := cr.cityConvergenceHandler()
-	if handler == nil {
+	if !cr.hasConvergenceHandlers() {
 		return convergenceReply{Error: "convergence not available (no bead store)"}
 	}
 
@@ -199,18 +244,30 @@ func (cr *CityRuntime) handleConvergenceRequest(ctx context.Context, req converg
 	case "create":
 		return cr.handleConvergenceCreate(ctx, req)
 	case "approve":
+		handler, err := cr.convergenceHandlerForBead(req.BeadID)
+		if err != nil {
+			return convergenceReply{Error: err.Error()}
+		}
 		result, err := handler.ApproveHandler(ctx, req.BeadID, username, "")
 		if err != nil {
 			return convergenceReply{Error: err.Error()}
 		}
 		return marshalReply(result)
 	case "iterate":
+		handler, err := cr.convergenceHandlerForBead(req.BeadID)
+		if err != nil {
+			return convergenceReply{Error: err.Error()}
+		}
 		result, err := handler.IterateHandler(ctx, req.BeadID, username, "")
 		if err != nil {
 			return convergenceReply{Error: err.Error()}
 		}
 		return marshalReply(result)
 	case "stop":
+		handler, err := cr.convergenceHandlerForBead(req.BeadID)
+		if err != nil {
+			return convergenceReply{Error: err.Error()}
+		}
 		result, err := handler.StopHandler(ctx, req.BeadID, username, "")
 		if err != nil {
 			return convergenceReply{Error: err.Error()}
@@ -225,8 +282,12 @@ func (cr *CityRuntime) handleConvergenceRequest(ctx context.Context, req converg
 
 // handleConvergenceCreate processes a create command.
 func (cr *CityRuntime) handleConvergenceCreate(ctx context.Context, req convergenceRequest) convergenceReply {
-	handler := cr.cityConvergenceHandler()
+	rigName := req.Params["rig"]
+	handler := cr.convHandlers[rigName]
 	if handler == nil {
+		if rigName != "" {
+			return convergenceReply{Error: unavailableConvergenceRigError(rigName)}
+		}
 		return convergenceReply{Error: "convergence not available (no bead store)"}
 	}
 
@@ -282,9 +343,9 @@ func (cr *CityRuntime) handleConvergenceCreate(ctx context.Context, req converge
 
 // handleConvergenceRetry processes a retry command.
 func (cr *CityRuntime) handleConvergenceRetry(ctx context.Context, req convergenceRequest) convergenceReply {
-	handler := cr.cityConvergenceHandler()
-	if handler == nil {
-		return convergenceReply{Error: "convergence not available (no bead store)"}
+	handler, findErr := cr.convergenceHandlerForBead(req.BeadID)
+	if findErr != nil {
+		return convergenceReply{Error: findErr.Error()}
 	}
 
 	sourceBeadID := req.BeadID
@@ -335,44 +396,45 @@ func (cr *CityRuntime) handleConvergenceRetry(ctx context.Context, req convergen
 // convergenceStartupReconcile runs convergence bead reconciliation on startup
 // and then populates the in-memory active index.
 func (cr *CityRuntime) convergenceStartupReconcile(ctx context.Context) {
-	handler := cr.cityConvergenceHandler()
-	if handler == nil || cr.convergenceReqCh == nil {
-		return
-	}
-	store := cr.cityBeadStore()
-	if store == nil {
+	if !cr.hasConvergenceHandlers() || cr.convergenceReqCh == nil {
 		return
 	}
 
-	all, err := store.List()
-	if err != nil {
-		fmt.Fprintf(cr.stderr, "%s: convergence reconcile: listing beads: %v\n", cr.logPrefix, err) //nolint:errcheck
-		return
-	}
-
-	var beadIDs []string
-	for _, b := range all {
-		if b.Type == "convergence" && b.Status != "closed" {
-			beadIDs = append(beadIDs, b.ID)
+	for _, key := range cr.convergenceStoreKeysCityFirst() {
+		handler := cr.convHandlers[key]
+		adapter := cr.convStoreAdapters[key]
+		if handler == nil || adapter == nil {
+			continue
 		}
-	}
 
-	if len(beadIDs) > 0 {
-		reconciler := &convergence.Reconciler{Handler: handler}
-		report, err := reconciler.ReconcileBeads(ctx, beadIDs)
+		all, err := adapter.store.List()
 		if err != nil {
-			fmt.Fprintf(cr.stderr, "%s: convergence reconciliation: %v\n", cr.logPrefix, err) //nolint:errcheck
-			return
+			fmt.Fprintf(cr.stderr, "%s: convergence reconcile: listing beads: %v\n", cr.logPrefix, err) //nolint:errcheck
+			continue
 		}
-		if report.Recovered > 0 || report.Errors > 0 {
-			fmt.Fprintf(cr.stdout, "Convergence recovery: %d scanned, %d recovered, %d errors\n", //nolint:errcheck
-				report.Scanned, report.Recovered, report.Errors)
-		}
-	}
 
-	// Populate the active index after reconciliation so it reflects
-	// post-recovery state.
-	if adapter := cr.cityConvergenceStoreAdapter(); adapter != nil {
+		var beadIDs []string
+		for _, b := range all {
+			if b.Type == "convergence" && b.Status != "closed" {
+				beadIDs = append(beadIDs, b.ID)
+			}
+		}
+
+		if len(beadIDs) > 0 {
+			reconciler := &convergence.Reconciler{Handler: handler}
+			report, err := reconciler.ReconcileBeads(ctx, beadIDs)
+			if err != nil {
+				fmt.Fprintf(cr.stderr, "%s: convergence reconciliation: %v\n", cr.logPrefix, err) //nolint:errcheck
+				continue
+			}
+			if report.Recovered > 0 || report.Errors > 0 {
+				fmt.Fprintf(cr.stdout, "Convergence recovery: %d scanned, %d recovered, %d errors\n", //nolint:errcheck
+					report.Scanned, report.Recovered, report.Errors)
+			}
+		}
+
+		// Populate the active index after reconciliation so it reflects
+		// post-recovery state.
 		if err := adapter.populateIndex(); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: convergence: populating active index: %v\n", cr.logPrefix, err) //nolint:errcheck
 		}

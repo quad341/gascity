@@ -378,6 +378,224 @@ func TestInitConvergenceHandlersSkipsFailingRigStore(t *testing.T) {
 	}
 }
 
+func TestHandleConvergenceCreateRoutesToRigHandler(t *testing.T) {
+	cr, cityStore, rigStore := setupConvergenceRuntimeWithRig(t)
+
+	reply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "create",
+		Params: map[string]string{
+			"formula":        "test-formula",
+			"target":         "rig-agent",
+			"max_iterations": "3",
+			"rig":            "rig-a",
+		},
+	})
+	if reply.Error != "" {
+		t.Fatalf("create error: %s", reply.Error)
+	}
+	var created convergence.CreateResult
+	if err := json.Unmarshal(reply.Result, &created); err != nil {
+		t.Fatalf("unmarshaling create result: %v", err)
+	}
+	if _, err := rigStore.Get(created.BeadID); err != nil {
+		t.Fatalf("created bead missing from rig store: %v", err)
+	}
+	if _, err := cityStore.Get(created.BeadID); err == nil {
+		t.Fatalf("created bead %q should not be in city store", created.BeadID)
+	}
+}
+
+func TestHandleConvergenceCreateUnknownRig(t *testing.T) {
+	cr, _, _ := setupConvergenceRuntimeWithRig(t)
+
+	reply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "create",
+		Params: map[string]string{
+			"formula":        "test-formula",
+			"target":         "rig-agent",
+			"max_iterations": "3",
+			"rig":            "missing-rig",
+		},
+	})
+	want := `rig "missing-rig" is not available; check that it is configured and that its store is reachable`
+	if reply.Error != want {
+		t.Fatalf("reply error = %q, want %q", reply.Error, want)
+	}
+}
+
+func TestConvergenceCommandFindsRigBeadByID(t *testing.T) {
+	cr, _, rigStore := setupConvergenceRuntimeWithRig(t)
+	created := createConvergenceLoop(t, cr, "rig-a", "rig-agent")
+
+	reply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "stop",
+		BeadID:  created.BeadID,
+		User:    "test-operator",
+	})
+	if reply.Error != "" {
+		t.Fatalf("stop error: %s", reply.Error)
+	}
+
+	updated, err := rigStore.Get(created.BeadID)
+	if err != nil {
+		t.Fatalf("getting rig bead: %v", err)
+	}
+	if updated.Status != "closed" {
+		t.Fatalf("rig bead status = %q, want closed", updated.Status)
+	}
+	if got := updated.Metadata[convergence.FieldTerminalReason]; got != convergence.TerminalStopped {
+		t.Fatalf("terminal_reason = %q, want %q", got, convergence.TerminalStopped)
+	}
+}
+
+func TestConvergenceTickProcessesAllHandlers(t *testing.T) {
+	cr, cityStore, rigStore := setupConvergenceRuntimeWithRig(t)
+	cityCreated := createConvergenceLoop(t, cr, "", "city-agent")
+	rigCreated := createConvergenceLoop(t, cr, "rig-a", "rig-agent")
+
+	for key, adapter := range cr.convStoreAdapters {
+		if err := adapter.populateIndex(); err != nil {
+			t.Fatalf("populateIndex(%q): %v", key, err)
+		}
+	}
+	if err := cityStore.Close(cityCreated.FirstWispID); err != nil {
+		t.Fatalf("closing city wisp: %v", err)
+	}
+	if err := rigStore.Close(rigCreated.FirstWispID); err != nil {
+		t.Fatalf("closing rig wisp: %v", err)
+	}
+
+	cr.convergenceTick(context.Background())
+
+	cityMeta, err := cr.convStoreAdapters[""].GetMetadata(cityCreated.BeadID)
+	if err != nil {
+		t.Fatalf("city metadata: %v", err)
+	}
+	rigMeta, err := cr.convStoreAdapters["rig-a"].GetMetadata(rigCreated.BeadID)
+	if err != nil {
+		t.Fatalf("rig metadata: %v", err)
+	}
+	if cityMeta[convergence.FieldState] != convergence.StateWaitingManual {
+		t.Fatalf("city state = %q, want %q", cityMeta[convergence.FieldState], convergence.StateWaitingManual)
+	}
+	if rigMeta[convergence.FieldState] != convergence.StateWaitingManual {
+		t.Fatalf("rig state = %q, want %q", rigMeta[convergence.FieldState], convergence.StateWaitingManual)
+	}
+}
+
+func TestConvergenceStartupReconcileScansAllStores(t *testing.T) {
+	cr, cityStore, rigStore := setupConvergenceRuntimeWithRig(t)
+	cityInterrupted := createInterruptedConvergenceBead(t, cityStore, "city interrupted")
+	rigInterrupted := createInterruptedConvergenceBead(t, rigStore, "rig interrupted")
+
+	cr.convergenceStartupReconcile(context.Background())
+
+	assertTerminatedClosed(t, cityStore, cityInterrupted)
+	assertTerminatedClosed(t, rigStore, rigInterrupted)
+	if cr.convStoreAdapters[""].activeIndex == nil {
+		t.Fatal("city active index was not populated")
+	}
+	if cr.convStoreAdapters["rig-a"].activeIndex == nil {
+		t.Fatal("rig active index was not populated")
+	}
+}
+
+func setupConvergenceRuntimeWithRig(t *testing.T) (*CityRuntime, *beads.MemStore, *beads.MemStore) {
+	t.Helper()
+
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "rig-a"},
+		},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{sharedTestFormulaDir},
+			Rigs: map[string][]string{
+				"rig-a": {sharedTestFormulaDir},
+			},
+		},
+	}
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "test",
+		cfg:                 cfg,
+		sp:                  runtime.NewFake(),
+		buildFn:             func(_ *config.City, _ runtime.Provider, _ beads.Store) map[string]TemplateParams { return nil },
+		rec:                 events.Discard,
+		convergenceReqCh:    make(chan convergenceRequest, 16),
+		standaloneCityStore: cityStore,
+		logPrefix:           "gc test",
+		stdout:              &bytes.Buffer{},
+		stderr:              &bytes.Buffer{},
+	}
+	cs := &controllerState{
+		cfg: cfg,
+		beadStores: map[string]beads.Store{
+			"rig-a": rigStore,
+		},
+		cityBeadStore: cityStore,
+	}
+	cr.setControllerState(cs)
+	cr.initConvergenceHandlers()
+	return cr, cityStore, rigStore
+}
+
+func createConvergenceLoop(t *testing.T, cr *CityRuntime, rigName, target string) convergence.CreateResult {
+	t.Helper()
+	params := map[string]string{
+		"formula":        "test-formula",
+		"target":         target,
+		"max_iterations": "3",
+	}
+	if rigName != "" {
+		params["rig"] = rigName
+	}
+	reply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "create",
+		Params:  params,
+	})
+	if reply.Error != "" {
+		t.Fatalf("create %q error: %s", rigName, reply.Error)
+	}
+	var created convergence.CreateResult
+	if err := json.Unmarshal(reply.Result, &created); err != nil {
+		t.Fatalf("unmarshaling create result: %v", err)
+	}
+	return created
+}
+
+func createInterruptedConvergenceBead(t *testing.T, store *beads.MemStore, title string) string {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Title:  title,
+		Type:   "convergence",
+		Status: "in_progress",
+	})
+	if err != nil {
+		t.Fatalf("creating interrupted bead: %v", err)
+	}
+	if err := store.SetMetadata(b.ID, convergence.FieldState, convergence.StateCreating); err != nil {
+		t.Fatalf("setting state: %v", err)
+	}
+	return b.ID
+}
+
+func assertTerminatedClosed(t *testing.T, store *beads.MemStore, beadID string) {
+	t.Helper()
+	updated, err := store.Get(beadID)
+	if err != nil {
+		t.Fatalf("getting bead %q: %v", beadID, err)
+	}
+	if updated.Status != "closed" {
+		t.Fatalf("%s status = %q, want closed", beadID, updated.Status)
+	}
+	if updated.Metadata[convergence.FieldState] != convergence.StateTerminated {
+		t.Fatalf("%s state = %q, want %q", beadID, updated.Metadata[convergence.FieldState], convergence.StateTerminated)
+	}
+}
+
 type pingFailStore struct {
 	beads.Store
 	err error

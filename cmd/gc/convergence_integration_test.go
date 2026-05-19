@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,7 +26,8 @@ func setupConvergenceRuntime(t *testing.T) (*CityRuntime, *beads.MemStore) {
 
 	store := beads.NewMemStore()
 	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test"},
+		Workspace:     config.Workspace{Name: "test"},
+		FormulaLayers: config.FormulaLayers{City: []string{sharedTestFormulaDir}},
 	}
 	sp := runtime.NewFake()
 	convergenceReqCh := make(chan convergenceRequest, 16)
@@ -42,14 +46,8 @@ func setupConvergenceRuntime(t *testing.T) (*CityRuntime, *beads.MemStore) {
 		stderr:              &bytes.Buffer{},
 	}
 
-	// Initialize convergence handler (mimics initConvergenceHandler).
-	adapter := newConvergenceStoreAdapter(store, []string{sharedTestFormulaDir})
-	emitter := &convergenceEventEmitter{rec: cr.rec}
-	cr.convStoreAdapter = adapter
-	cr.convHandler = &convergence.Handler{
-		Store:   adapter,
-		Emitter: emitter,
-	}
+	// Initialize convergence handlers (mimics initConvergenceHandlers).
+	cr.initConvergenceHandlers()
 
 	return cr, store
 }
@@ -121,7 +119,7 @@ func TestConvergence_StopCommand(t *testing.T) {
 	}
 
 	// Verify state is terminated.
-	meta, err := cr.convHandler.Store.GetMetadata(created.BeadID)
+	meta, err := cr.cityConvergenceHandler().Store.GetMetadata(created.BeadID)
 	if err != nil {
 		t.Fatalf("GetMetadata: %v", err)
 	}
@@ -144,10 +142,10 @@ func TestConvergence_UnknownCommand(t *testing.T) {
 func TestConvergence_PanicRecovery(t *testing.T) {
 	cr, _ := setupConvergenceRuntime(t)
 
-	// Temporarily replace convHandler with nil to cause a panic
-	// when handleConvergenceRequest tries to access it for "approve".
-	savedHandler := cr.convHandler
-	cr.convHandler = nil
+	// Temporarily remove convergence handlers to exercise the guarded error
+	// path used by socket command processing.
+	savedHandlers := cr.convHandlers
+	cr.convHandlers = nil
 
 	reply := cr.safeHandleConvergenceRequest(context.Background(), convergenceRequest{
 		Command: "approve",
@@ -158,7 +156,7 @@ func TestConvergence_PanicRecovery(t *testing.T) {
 		t.Error("expected error reply from nil handler")
 	}
 
-	cr.convHandler = savedHandler
+	cr.convHandlers = savedHandlers
 }
 
 func TestConvergence_TickProcessesClosedWisp(t *testing.T) {
@@ -182,7 +180,7 @@ func TestConvergence_TickProcessesClosedWisp(t *testing.T) {
 	}
 
 	// Populate the active index so convergenceTick works.
-	adapter := cr.convHandler.Store.(*convergenceStoreAdapter)
+	adapter := cr.cityConvergenceHandler().Store.(*convergenceStoreAdapter)
 	if err := adapter.populateIndex(); err != nil {
 		t.Fatalf("populateIndex: %v", err)
 	}
@@ -197,7 +195,7 @@ func TestConvergence_TickProcessesClosedWisp(t *testing.T) {
 
 	// After processing, active_wisp should have changed (iterated to next wisp
 	// or terminated, depending on gate mode — manual mode transitions to waiting_manual).
-	meta, _ := cr.convHandler.Store.GetMetadata(created.BeadID)
+	meta, _ := cr.cityConvergenceHandler().Store.GetMetadata(created.BeadID)
 	state := meta[convergence.FieldState]
 	// With manual gate mode, closing a wisp transitions to waiting_manual.
 	if state != convergence.StateWaitingManual {
@@ -237,7 +235,7 @@ func TestConvergence_StartupReconcile(t *testing.T) {
 	}
 
 	// The active index should be populated after startup reconcile.
-	adapter := cr.convHandler.Store.(*convergenceStoreAdapter)
+	adapter := cr.cityConvergenceHandler().Store.(*convergenceStoreAdapter)
 	if adapter.activeIndex == nil {
 		t.Error("active index should be populated after startup reconcile")
 	}
@@ -281,6 +279,124 @@ func TestConvergence_EnqueueTimeout(t *testing.T) {
 	for len(cr.convergenceReqCh) > 0 {
 		<-cr.convergenceReqCh
 	}
+}
+
+func TestInitConvergenceHandlersBuildsCityAndRigHandlers(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "rig-a"},
+		},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{"/city-formulas"},
+			Rigs: map[string][]string{
+				"rig-a": {"/rig-a-formulas"},
+			},
+		},
+	}
+	cr := &CityRuntime{
+		cfg:                 cfg,
+		rec:                 events.Discard,
+		convergenceReqCh:    make(chan convergenceRequest, 1),
+		standaloneCityStore: cityStore,
+		stderr:              &bytes.Buffer{},
+	}
+	cs := &controllerState{
+		cfg:           cfg,
+		beadStores:    map[string]beads.Store{"rig-a": rigStore},
+		cityBeadStore: cityStore,
+	}
+	cr.setControllerState(cs)
+
+	cr.initConvergenceHandlers()
+
+	if len(cr.convHandlers) != 2 {
+		t.Fatalf("convHandlers len = %d, want 2", len(cr.convHandlers))
+	}
+	if cr.convHandlers[""] == nil {
+		t.Fatal("city convergence handler not initialized at empty key")
+	}
+	if cr.convHandlers["rig-a"] == nil {
+		t.Fatal("rig convergence handler not initialized at rig name key")
+	}
+	if got, want := cr.convStoreAdapters[""].formulaSearchPaths, []string{"/city-formulas"}; !equalStrings(got, want) {
+		t.Fatalf("city formulaSearchPaths = %v, want %v", got, want)
+	}
+	if got, want := cr.convStoreAdapters["rig-a"].formulaSearchPaths, []string{"/rig-a-formulas"}; !equalStrings(got, want) {
+		t.Fatalf("rig formulaSearchPaths = %v, want %v", got, want)
+	}
+}
+
+func TestInitConvergenceHandlersSkipsFailingRigStore(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	healthyRigStore := beads.NewMemStore()
+	failingRigStore := pingFailStore{
+		Store: beads.NewMemStore(),
+		err:   errors.New("rig db unavailable"),
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "bad-rig"},
+			{Name: "good-rig"},
+		},
+	}
+	var stderr bytes.Buffer
+	cr := &CityRuntime{
+		cfg:                 cfg,
+		rec:                 events.Discard,
+		convergenceReqCh:    make(chan convergenceRequest, 1),
+		standaloneCityStore: cityStore,
+		logPrefix:           "gc test",
+		stderr:              &stderr,
+	}
+	cs := &controllerState{
+		cfg: cfg,
+		beadStores: map[string]beads.Store{
+			"bad-rig":  failingRigStore,
+			"good-rig": healthyRigStore,
+		},
+		cityBeadStore: cityStore,
+	}
+	cr.setControllerState(cs)
+
+	cr.initConvergenceHandlers()
+
+	if cr.convHandlers[""] == nil {
+		t.Fatal("city convergence handler should remain initialized")
+	}
+	if cr.convHandlers["good-rig"] == nil {
+		t.Fatal("healthy rig convergence handler should be initialized")
+	}
+	if cr.convHandlers["bad-rig"] != nil {
+		t.Fatal("failing rig convergence handler should be skipped")
+	}
+	if got := stderr.String(); !strings.Contains(got, `gc test: convergence: rig "bad-rig" unavailable`) || !strings.Contains(got, "rig db unavailable") {
+		t.Fatalf("stderr = %q, want failing rig init log", got)
+	}
+}
+
+type pingFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s pingFailStore) Ping() error {
+	return fmt.Errorf("ping failed: %w", s.err)
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // --- Active index tests ---

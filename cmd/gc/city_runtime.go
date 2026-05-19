@@ -58,12 +58,12 @@ type CityRuntime struct {
 	// Bead-driven reconciler state (Phase 2f).
 	sessionDrains *drainTracker // in-memory drain tracker; nil when bead reconciler disabled
 
-	convHandler      *convergence.Handler     // nil until bead store available
-	convStoreAdapter *convergenceStoreAdapter // typed reference; avoids type assertions in tick/reconcile
-	convergenceReqCh chan convergenceRequest  // receives CLI commands from controller.sock
-	pokeCh           chan struct{}            // non-blocking signal to trigger immediate reconciler tick
-	onStarted        func()
-	onStatus         func(string)
+	convHandlers      map[string]*convergence.Handler     // key: "" for city store, rig name for rig stores
+	convStoreAdapters map[string]*convergenceStoreAdapter // key: "" for city store, rig name for rig stores
+	convergenceReqCh  chan convergenceRequest             // receives CLI commands from controller.sock
+	pokeCh            chan struct{}                       // non-blocking signal to trigger immediate reconciler tick
+	onStarted         func()
+	onStatus          func(string)
 
 	shutdownOnce   sync.Once
 	logPrefix      string // "gc start" or "gc supervisor"
@@ -247,8 +247,8 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}
 	}
 
-	// Initialize convergence handler (requires bead store).
-	cr.initConvergenceHandler()
+	// Initialize convergence handlers (requires bead stores).
+	cr.initConvergenceHandlers()
 
 	// Session bead sync BEFORE reconciliation: ensures beads exist for
 	// the reconciler to read/write hashes. Bead "state" metadata reflects
@@ -550,6 +550,7 @@ func (cr *CityRuntime) reloadConfig(
 	if cr.cityBeadStore() != nil && cr.tomlPath != "" && cr.sessionDrains == nil {
 		cr.sessionDrains = newDrainTracker()
 	}
+	cr.initConvergenceHandlers()
 	cr.configRev = result.Revision
 
 	fmt.Fprintf(cr.stdout, "Config reloaded: %s (rev %s)\n", //nolint:errcheck
@@ -618,6 +619,21 @@ func (cr *CityRuntime) cityBeadStore() beads.Store {
 		return cr.cs.CityBeadStore()
 	}
 	return cr.standaloneCityStore
+}
+
+func (cr *CityRuntime) rigBeadStore(rig config.Rig) (beads.Store, error) {
+	if cr.cs == nil {
+		cityRoot := cr.cityPath
+		if cityRoot == "" && cr.tomlPath != "" {
+			cityRoot = filepath.Dir(cr.tomlPath)
+		}
+		store, err := openStoreAtForCity(rig.Path, cityRoot)
+		if err != nil {
+			return nil, err
+		}
+		return store, nil
+	}
+	return cr.cs.BeadStore(rig.Name), nil
 }
 
 func (cr *CityRuntime) loadSessionBeadSnapshot() *sessionBeadSnapshot {

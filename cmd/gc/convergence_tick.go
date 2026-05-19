@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os/user"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
 )
+
+const cityConvergenceStoreKey = ""
 
 // convergenceRequest is a command sent from the controller socket to the
 // event loop for serialized processing.
@@ -25,35 +28,88 @@ type convergenceReply struct {
 	Error  string          `json:"error,omitempty"`
 }
 
-// initConvergenceHandler creates the convergence handler if a bead store is
-// available. Called once during CityRuntime.run() initialization.
-func (cr *CityRuntime) initConvergenceHandler() {
-	store := cr.cityBeadStore()
-	if store == nil {
+// initConvergenceHandlers creates convergence handlers for the city store and
+// configured rig stores. It is called during CityRuntime.run() initialization
+// and again on config reload.
+func (cr *CityRuntime) initConvergenceHandlers() {
+	cr.convStoreAdapters = make(map[string]*convergenceStoreAdapter)
+	cr.convHandlers = make(map[string]*convergence.Handler)
+
+	if cr.cfg == nil {
 		return
 	}
-	adapter := newConvergenceStoreAdapter(store, cr.cfg.FormulaLayers.City)
+	if store := cr.cityBeadStore(); store != nil {
+		if err := cr.wireConvergenceHandler(cityConvergenceStoreKey, store, cr.cfg.FormulaLayers.City); err != nil {
+			cr.logConvergenceInitError("city", err)
+		}
+	}
+	for _, rig := range cr.cfg.Rigs {
+		store, err := cr.rigBeadStore(rig)
+		if err != nil {
+			cr.logConvergenceInitError(fmt.Sprintf("rig %q", rig.Name), err)
+			continue
+		}
+		if err := cr.wireConvergenceHandler(rig.Name, store, cr.cfg.FormulaLayers.SearchPaths(rig.Name)); err != nil {
+			cr.logConvergenceInitError(fmt.Sprintf("rig %q", rig.Name), err)
+		}
+	}
+}
+
+func (cr *CityRuntime) wireConvergenceHandler(key string, store beads.Store, formulaSearchPaths []string) error {
+	if store == nil {
+		return fmt.Errorf("bead store is nil")
+	}
+	if key != cityConvergenceStoreKey {
+		if err := store.Ping(); err != nil {
+			return err
+		}
+	}
+	adapter := newConvergenceStoreAdapter(store, formulaSearchPaths)
 	emitter := &convergenceEventEmitter{rec: cr.rec}
-	cr.convStoreAdapter = adapter
-	cr.convHandler = &convergence.Handler{
+	cr.convStoreAdapters[key] = adapter
+	cr.convHandlers[key] = &convergence.Handler{
 		Store:   adapter,
 		Emitter: emitter,
 	}
+	return nil
+}
+
+func (cr *CityRuntime) logConvergenceInitError(scope string, err error) {
+	if cr.stderr == nil {
+		return
+	}
+	fmt.Fprintf(cr.stderr, "%s: convergence: %s unavailable: %v\n", cr.logPrefix, scope, err) //nolint:errcheck
+}
+
+func (cr *CityRuntime) cityConvergenceHandler() *convergence.Handler {
+	if cr.convHandlers == nil {
+		return nil
+	}
+	return cr.convHandlers[cityConvergenceStoreKey]
+}
+
+func (cr *CityRuntime) cityConvergenceStoreAdapter() *convergenceStoreAdapter {
+	if cr.convStoreAdapters == nil {
+		return nil
+	}
+	return cr.convStoreAdapters[cityConvergenceStoreKey]
 }
 
 // convergenceTick processes active convergence loops by checking indexed
 // beads for closed wisps and calling HandleWispClosed. Called from tick().
 // Uses the in-memory active index (O(active) instead of O(all beads)).
 func (cr *CityRuntime) convergenceTick(ctx context.Context) {
-	if cr.convHandler == nil || cr.convergenceReqCh == nil {
+	handler := cr.cityConvergenceHandler()
+	if handler == nil || cr.convergenceReqCh == nil {
 		return
 	}
-	if cr.convStoreAdapter == nil || cr.convStoreAdapter.activeIndex == nil {
+	adapter := cr.cityConvergenceStoreAdapter()
+	if adapter == nil || adapter.activeIndex == nil {
 		return
 	}
 
-	for _, beadID := range cr.convStoreAdapter.activeBeadIDs() {
-		meta, err := cr.convStoreAdapter.GetMetadata(beadID)
+	for _, beadID := range adapter.activeBeadIDs() {
+		meta, err := adapter.GetMetadata(beadID)
 		if err != nil {
 			continue
 		}
@@ -67,7 +123,7 @@ func (cr *CityRuntime) convergenceTick(ctx context.Context) {
 			continue
 		}
 		// Check if the active wisp is closed.
-		wispInfo, wErr := cr.convStoreAdapter.GetBead(activeWisp)
+		wispInfo, wErr := adapter.GetBead(activeWisp)
 		if wErr != nil {
 			continue // wisp may not exist yet
 		}
@@ -75,7 +131,7 @@ func (cr *CityRuntime) convergenceTick(ctx context.Context) {
 			continue
 		}
 		// Process the closed wisp.
-		result, hErr := cr.convHandler.HandleWispClosed(ctx, beadID, activeWisp)
+		result, hErr := handler.HandleWispClosed(ctx, beadID, activeWisp)
 		if hErr != nil {
 			fmt.Fprintf(cr.stderr, "%s: convergence: HandleWispClosed(%s, %s): %v\n", //nolint:errcheck
 				cr.logPrefix, beadID, activeWisp, hErr)
@@ -92,7 +148,7 @@ func (cr *CityRuntime) convergenceTick(ctx context.Context) {
 // processes each command serially. Called from the event loop to serialize
 // CLI commands with tick-based processing.
 func (cr *CityRuntime) processConvergenceRequests(ctx context.Context) {
-	if cr.convHandler == nil || cr.convergenceReqCh == nil {
+	if cr.cityConvergenceHandler() == nil || cr.convergenceReqCh == nil {
 		return
 	}
 	for {
@@ -127,7 +183,8 @@ func (cr *CityRuntime) safeHandleConvergenceRequest(ctx context.Context, req con
 
 // handleConvergenceRequest dispatches a single convergence command.
 func (cr *CityRuntime) handleConvergenceRequest(ctx context.Context, req convergenceRequest) convergenceReply {
-	if cr.convHandler == nil {
+	handler := cr.cityConvergenceHandler()
+	if handler == nil {
 		return convergenceReply{Error: "convergence not available (no bead store)"}
 	}
 
@@ -142,19 +199,19 @@ func (cr *CityRuntime) handleConvergenceRequest(ctx context.Context, req converg
 	case "create":
 		return cr.handleConvergenceCreate(ctx, req)
 	case "approve":
-		result, err := cr.convHandler.ApproveHandler(ctx, req.BeadID, username, "")
+		result, err := handler.ApproveHandler(ctx, req.BeadID, username, "")
 		if err != nil {
 			return convergenceReply{Error: err.Error()}
 		}
 		return marshalReply(result)
 	case "iterate":
-		result, err := cr.convHandler.IterateHandler(ctx, req.BeadID, username, "")
+		result, err := handler.IterateHandler(ctx, req.BeadID, username, "")
 		if err != nil {
 			return convergenceReply{Error: err.Error()}
 		}
 		return marshalReply(result)
 	case "stop":
-		result, err := cr.convHandler.StopHandler(ctx, req.BeadID, username, "")
+		result, err := handler.StopHandler(ctx, req.BeadID, username, "")
 		if err != nil {
 			return convergenceReply{Error: err.Error()}
 		}
@@ -168,6 +225,11 @@ func (cr *CityRuntime) handleConvergenceRequest(ctx context.Context, req converg
 
 // handleConvergenceCreate processes a create command.
 func (cr *CityRuntime) handleConvergenceCreate(ctx context.Context, req convergenceRequest) convergenceReply {
+	handler := cr.cityConvergenceHandler()
+	if handler == nil {
+		return convergenceReply{Error: "convergence not available (no bead store)"}
+	}
+
 	formula := req.Params["formula"]
 	target := req.Params["target"]
 	maxIter := 5
@@ -182,10 +244,10 @@ func (cr *CityRuntime) handleConvergenceCreate(ctx context.Context, req converge
 
 	// Concurrency checks.
 	maxPerAgent := cr.cfg.Convergence.MaxPerAgentOrDefault()
-	if err := convergence.CheckConcurrencyLimits(cr.convHandler.Store, target, maxPerAgent); err != nil {
+	if err := convergence.CheckConcurrencyLimits(handler.Store, target, maxPerAgent); err != nil {
 		return convergenceReply{Error: err.Error()}
 	}
-	if err := convergence.CheckNestedConvergence(cr.convHandler.Store, "", target); err != nil {
+	if err := convergence.CheckNestedConvergence(handler.Store, "", target); err != nil {
 		return convergenceReply{Error: err.Error()}
 	}
 
@@ -211,7 +273,7 @@ func (cr *CityRuntime) handleConvergenceCreate(ctx context.Context, req converge
 		EvaluatePrompt:    req.Params["evaluate_prompt"],
 	}
 
-	result, err := cr.convHandler.CreateHandler(ctx, params)
+	result, err := handler.CreateHandler(ctx, params)
 	if err != nil {
 		return convergenceReply{Error: err.Error()}
 	}
@@ -220,6 +282,11 @@ func (cr *CityRuntime) handleConvergenceCreate(ctx context.Context, req converge
 
 // handleConvergenceRetry processes a retry command.
 func (cr *CityRuntime) handleConvergenceRetry(ctx context.Context, req convergenceRequest) convergenceReply {
+	handler := cr.cityConvergenceHandler()
+	if handler == nil {
+		return convergenceReply{Error: "convergence not available (no bead store)"}
+	}
+
 	sourceBeadID := req.BeadID
 	maxIter := 0
 	if v, ok := convergence.DecodeInt(req.Params["max_iterations"]); ok && v > 0 {
@@ -227,7 +294,7 @@ func (cr *CityRuntime) handleConvergenceRetry(ctx context.Context, req convergen
 	}
 
 	// Read source bead metadata once for both max_iterations and target.
-	meta, err := cr.convHandler.Store.GetMetadata(sourceBeadID)
+	meta, err := handler.Store.GetMetadata(sourceBeadID)
 	if err != nil {
 		return convergenceReply{Error: fmt.Sprintf("reading source bead: %v", err)}
 	}
@@ -246,10 +313,10 @@ func (cr *CityRuntime) handleConvergenceRetry(ctx context.Context, req convergen
 
 	// Concurrency checks.
 	maxPerAgent := cr.cfg.Convergence.MaxPerAgentOrDefault()
-	if err := convergence.CheckConcurrencyLimits(cr.convHandler.Store, target, maxPerAgent); err != nil {
+	if err := convergence.CheckConcurrencyLimits(handler.Store, target, maxPerAgent); err != nil {
 		return convergenceReply{Error: err.Error()}
 	}
-	if err := convergence.CheckNestedConvergence(cr.convHandler.Store, "", target); err != nil {
+	if err := convergence.CheckNestedConvergence(handler.Store, "", target); err != nil {
 		return convergenceReply{Error: err.Error()}
 	}
 
@@ -258,7 +325,7 @@ func (cr *CityRuntime) handleConvergenceRetry(ctx context.Context, req convergen
 		username = currentUsername()
 	}
 
-	result, err := cr.convHandler.RetryHandler(ctx, sourceBeadID, username, maxIter)
+	result, err := handler.RetryHandler(ctx, sourceBeadID, username, maxIter)
 	if err != nil {
 		return convergenceReply{Error: err.Error()}
 	}
@@ -268,7 +335,8 @@ func (cr *CityRuntime) handleConvergenceRetry(ctx context.Context, req convergen
 // convergenceStartupReconcile runs convergence bead reconciliation on startup
 // and then populates the in-memory active index.
 func (cr *CityRuntime) convergenceStartupReconcile(ctx context.Context) {
-	if cr.convHandler == nil || cr.convergenceReqCh == nil {
+	handler := cr.cityConvergenceHandler()
+	if handler == nil || cr.convergenceReqCh == nil {
 		return
 	}
 	store := cr.cityBeadStore()
@@ -290,7 +358,7 @@ func (cr *CityRuntime) convergenceStartupReconcile(ctx context.Context) {
 	}
 
 	if len(beadIDs) > 0 {
-		reconciler := &convergence.Reconciler{Handler: cr.convHandler}
+		reconciler := &convergence.Reconciler{Handler: handler}
 		report, err := reconciler.ReconcileBeads(ctx, beadIDs)
 		if err != nil {
 			fmt.Fprintf(cr.stderr, "%s: convergence reconciliation: %v\n", cr.logPrefix, err) //nolint:errcheck
@@ -304,8 +372,8 @@ func (cr *CityRuntime) convergenceStartupReconcile(ctx context.Context) {
 
 	// Populate the active index after reconciliation so it reflects
 	// post-recovery state.
-	if cr.convStoreAdapter != nil {
-		if err := cr.convStoreAdapter.populateIndex(); err != nil {
+	if adapter := cr.cityConvergenceStoreAdapter(); adapter != nil {
+		if err := adapter.populateIndex(); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: convergence: populating active index: %v\n", cr.logPrefix, err) //nolint:errcheck
 		}
 	}

@@ -107,9 +107,80 @@ func TestCityRuntimeReloadSameRevisionIsNoOp(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeReloadRebuildsConvergenceHandlers(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	rigPath := filepath.Join(cityPath, "rigs", "alpha")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+
+	sp := runtime.NewFake()
+	var stdout, stderr bytes.Buffer
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		ConfigRev: configRev,
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) map[string]TemplateParams {
+			return map[string]TemplateParams{}
+		},
+		Dops:             newDrainOps(sp),
+		Rec:              events.Discard,
+		ConvergenceReqCh: make(chan convergenceRequest, 1),
+		Stdout:           &stdout,
+		Stderr:           &stderr,
+	})
+
+	cs := newControllerState(cfg, sp, events.NewFake(), "test-city", cityPath)
+	cr.setControllerState(cs)
+	cr.initConvergenceHandlers()
+	if len(cr.convHandlers) != 1 || cr.convHandlers[""] == nil {
+		t.Fatalf("initial convHandlers = %#v, want only city handler", cr.convHandlers)
+	}
+
+	writeCityRuntimeConfigWithRig(t, tomlPath, "fake", "alpha", rigPath)
+	lastProviderName := "fake"
+	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+	if cr.convHandlers[""] == nil {
+		t.Fatal("city handler missing after config reload")
+	}
+	if cr.convHandlers["alpha"] == nil {
+		t.Fatalf("rig handler missing after config reload; stderr=%q", stderr.String())
+	}
+
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+	if _, ok := cr.convHandlers["alpha"]; ok {
+		t.Fatal("stale rig handler survived config reload that removed the rig")
+	}
+	if cr.convHandlers[""] == nil {
+		t.Fatal("city handler missing after reload that removed the rig")
+	}
+}
+
 func writeCityRuntimeConfig(t *testing.T, tomlPath, provider string) {
 	t.Helper()
 	data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n")
+	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+func writeCityRuntimeConfigWithRig(t *testing.T, tomlPath, provider, rigName, rigPath string) {
+	t.Helper()
+	data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n\n[[rigs]]\nname = \"" + rigName + "\"\npath = \"" + rigPath + "\"\n")
 	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}

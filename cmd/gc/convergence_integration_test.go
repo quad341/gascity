@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -507,6 +509,58 @@ func TestConvergenceTickProcessesAllHandlers(t *testing.T) {
 	}
 }
 
+func TestRigConvergenceLoopCreateTickTerminates(t *testing.T) {
+	cr, cityStore, rigStore := setupConvergenceRuntimeWithRig(t)
+	gatePath := writePassingGate(t, cr.cityPath)
+
+	reply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "create",
+		Params: map[string]string{
+			"formula":        "test-formula",
+			"target":         "rig-agent",
+			"max_iterations": "3",
+			"rig":            "rig-a",
+			"gate_mode":      convergence.GateModeCondition,
+			"gate_condition": gatePath,
+		},
+	})
+	if reply.Error != "" {
+		t.Fatalf("create error: %s", reply.Error)
+	}
+	var created convergence.CreateResult
+	if err := json.Unmarshal(reply.Result, &created); err != nil {
+		t.Fatalf("unmarshaling create result: %v", err)
+	}
+	if _, err := cityStore.Get(created.BeadID); err == nil {
+		t.Fatalf("created bead %q should not be in city store", created.BeadID)
+	}
+	if err := cr.convStoreAdapters["rig-a"].populateIndex(); err != nil {
+		t.Fatalf("populateIndex: %v", err)
+	}
+	if err := rigStore.Close(created.FirstWispID); err != nil {
+		t.Fatalf("closing rig wisp: %v", err)
+	}
+
+	cr.convergenceTick(context.Background())
+
+	updated, err := rigStore.Get(created.BeadID)
+	if err != nil {
+		t.Fatalf("getting rig convergence bead: %v", err)
+	}
+	if updated.Status != "closed" {
+		t.Fatalf("rig convergence status = %q, want closed", updated.Status)
+	}
+	if updated.Metadata[convergence.FieldState] != convergence.StateTerminated {
+		t.Fatalf("rig convergence state = %q, want %q", updated.Metadata[convergence.FieldState], convergence.StateTerminated)
+	}
+	if updated.Metadata[convergence.FieldTerminalReason] != convergence.TerminalApproved {
+		t.Fatalf("terminal_reason = %q, want %q", updated.Metadata[convergence.FieldTerminalReason], convergence.TerminalApproved)
+	}
+	if updated.Metadata[convergence.FieldGateOutcome] != convergence.GatePass {
+		t.Fatalf("gate_outcome = %q, want %q", updated.Metadata[convergence.FieldGateOutcome], convergence.GatePass)
+	}
+}
+
 func TestConvergenceStartupReconcileScansAllStores(t *testing.T) {
 	cr, cityStore, rigStore := setupConvergenceRuntimeWithRig(t)
 	cityInterrupted := createInterruptedConvergenceBead(t, cityStore, "city interrupted")
@@ -569,6 +623,18 @@ func setupConvergenceRuntimeWithRigRecorder(t *testing.T, rec events.Recorder) (
 	cr.setControllerState(cs)
 	cr.initConvergenceHandlers()
 	return cr, cityStore, rigStore
+}
+
+func writePassingGate(t *testing.T, cityPath string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(cityPath, "gates"), 0o755); err != nil {
+		t.Fatalf("creating gate dir: %v", err)
+	}
+	scriptPath := filepath.Join(cityPath, "gates", "pass.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("writing gate script: %v", err)
+	}
+	return filepath.Join("gates", "pass.sh")
 }
 
 func findRecordedConvergenceCreatedEvent(t *testing.T, rec *events.Fake, beadID string) events.Event {

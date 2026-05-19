@@ -16,10 +16,10 @@ func TestConvergeCreateRejectsRigFlagBeforeSocketWork(t *testing.T) {
 	cmd := newRootCmd(&stdout, &stderr)
 	cmd.SetArgs([]string{
 		"--city", cityPath,
-		"--rig", "frontend",
+		"--rig", "rig-under-test",
 		"converge", "create",
 		"--formula", "mol-tdd-build",
-		"--target", "gascity/builder",
+		"--target", "agent-under-test",
 	})
 
 	err := cmd.Execute()
@@ -31,7 +31,7 @@ func TestConvergeCreateRejectsRigFlagBeforeSocketWork(t *testing.T) {
 
 func TestConvergeListRejectsGCRigBeforeStoreWork(t *testing.T) {
 	resetFlags(t)
-	t.Setenv("GC_RIG", "frontend")
+	t.Setenv("GC_RIG", "rig-under-test")
 	t.Setenv("GC_BEADS", "file")
 	cityFlag = setupCity(t, "converge-list-rig")
 
@@ -49,7 +49,7 @@ func TestConvergeApproveRejectsRigFlagBeforeDial(t *testing.T) {
 	resetFlags(t)
 	t.Setenv("GC_RIG", "")
 	cityFlag = setupCity(t, "converge-approve-rig")
-	rigFlag = "frontend"
+	rigFlag = "rig-under-test"
 
 	var stdout, stderr bytes.Buffer
 	err := convergeSocketCmd("ga-converge-1", "approve", nil, &stdout, &stderr)
@@ -69,7 +69,7 @@ func TestConvergeRetryRejectsRigFlagBeforeSocketWork(t *testing.T) {
 	cmd := newRootCmd(&stdout, &stderr)
 	cmd.SetArgs([]string{
 		"--city", cityPath,
-		"--rig", "frontend",
+		"--rig", "rig-under-test",
 		"converge", "retry", "ga-converge-1",
 	})
 

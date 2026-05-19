@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/convergence"
@@ -51,6 +52,9 @@ func newConvergeCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Use:   "create",
 		Short: "Create a convergence loop",
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if rejectConvergeRigScope(stderr, "create") {
+				return errExit
+			}
 			cityPath, err := resolveCity()
 			if err != nil {
 				fmt.Fprintf(stderr, "gc converge create: %v\n", err) //nolint:errcheck
@@ -231,6 +235,9 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 		Use:   "list",
 		Short: "List convergence loops",
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if rejectConvergeRigScope(stderr, "list") {
+				return errExit
+			}
 			store, code := openCityStore(stderr, "gc converge list")
 			if code != 0 {
 				return errExit
@@ -385,6 +392,9 @@ func newConvergeRetryCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Retry a terminated convergence loop",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if rejectConvergeRigScope(stderr, "retry") {
+				return errExit
+			}
 			cityPath, err := resolveCity()
 			if err != nil {
 				fmt.Fprintf(stderr, "gc converge retry: %v\n", err) //nolint:errcheck
@@ -428,6 +438,9 @@ func newConvergeRetryCmd(stdout, stderr io.Writer) *cobra.Command {
 // convergeSocketCmd sends a simple convergence command (approve, iterate, stop)
 // through the controller socket and prints the result.
 func convergeSocketCmd(beadID, command string, params map[string]string, stdout, stderr io.Writer) error {
+	if rejectConvergeRigScope(stderr, command) {
+		return errExit
+	}
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc converge %s: %v\n", command, err) //nolint:errcheck
@@ -455,4 +468,15 @@ func convergeSocketCmd(beadID, command string, params map[string]string, stdout,
 		fmt.Fprintf(stdout, "%s: %s\n", beadID, result.Action) //nolint:errcheck
 	}
 	return nil
+}
+
+func rejectConvergeRigScope(stderr io.Writer, command string) bool {
+	if rigFlag == "" && os.Getenv("GC_RIG") == "" {
+		return false
+	}
+	_, _ = fmt.Fprintf(stderr, "gc converge %s: --rig is not supported; convergence loops are city-scoped.\n"+
+		"Use a city-scoped formula whose wisps target rig-bound agents; "+
+		"the wisp executes inside the rig even though the root bead lives in city/HQ.\n",
+		command)
+	return true
 }

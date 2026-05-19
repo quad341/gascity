@@ -67,7 +67,7 @@ func (cr *CityRuntime) wireConvergenceHandler(key string, store beads.Store, for
 		}
 	}
 	adapter := newConvergenceStoreAdapter(store, formulaSearchPaths)
-	emitter := &convergenceEventEmitter{rec: cr.rec}
+	emitter := &convergenceEventEmitter{rec: cr.rec, storeKey: key}
 	cr.convStoreAdapters[key] = adapter
 	cr.convHandlers[key] = &convergence.Handler{
 		Store:   adapter,

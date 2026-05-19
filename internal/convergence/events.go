@@ -79,6 +79,7 @@ type CreatedPayload struct {
 	Title         string  `json:"title"`
 	FirstWispID   string  `json:"first_wisp_id"`
 	RetrySource   *string `json:"retry_source"` // null if not a retry
+	StoreKey      string  `json:"store_key,omitempty"`
 }
 
 // GateResultPayload is the gate execution result included in iteration events.

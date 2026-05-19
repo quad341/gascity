@@ -287,17 +287,35 @@ func extractParentIDFromKey(key string) string {
 
 // convergenceEventEmitter wraps events.Recorder to implement convergence.EventEmitter.
 type convergenceEventEmitter struct {
-	rec events.Recorder
+	rec      events.Recorder
+	storeKey string
 }
 
 var _ convergence.EventEmitter = (*convergenceEventEmitter)(nil)
 
 func (e *convergenceEventEmitter) Emit(eventType, eventID, beadID string, payload json.RawMessage, _ bool) {
+	recordedPayload := e.payloadForRecord(eventType, payload)
 	e.rec.Record(events.Event{
 		Type:    eventType,
 		Actor:   "convergence",
 		Subject: beadID,
-		Message: string(payload),
+		Message: string(recordedPayload),
 	})
 	_ = eventID // used for deduplication by consumers, not the recorder
+}
+
+func (e *convergenceEventEmitter) payloadForRecord(eventType string, payload json.RawMessage) json.RawMessage {
+	if eventType != convergence.EventCreated || e.storeKey == "" {
+		return payload
+	}
+	var created convergence.CreatedPayload
+	if err := json.Unmarshal(payload, &created); err != nil {
+		return payload
+	}
+	created.StoreKey = e.storeKey
+	data := convergence.MarshalPayload(created)
+	if data == nil {
+		return payload
+	}
+	return data
 }

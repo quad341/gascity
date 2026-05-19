@@ -32,6 +32,32 @@ func TestMarshalPayload_CreatedPayload(t *testing.T) {
 	if decoded.RetrySource == nil || *decoded.RetrySource != retrySource {
 		t.Errorf("retry_source = %v, want %q", decoded.RetrySource, retrySource)
 	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+	if _, ok := raw["store_key"]; ok {
+		t.Error("store_key should be omitted when empty")
+	}
+
+	p.StoreKey = "rig-a"
+	data = MarshalPayload(p)
+	if data == nil {
+		t.Fatal("MarshalPayload with store key returned nil")
+	}
+	raw = nil
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal raw with store key: %v", err)
+	}
+	if string(raw["store_key"]) != `"rig-a"` {
+		t.Errorf("store_key = %s, want %q", raw["store_key"], `"rig-a"`)
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal with store key: %v", err)
+	}
+	if decoded.StoreKey != "rig-a" {
+		t.Errorf("decoded store_key = %q, want %q", decoded.StoreKey, "rig-a")
+	}
 }
 
 func TestMarshalPayload_IterationPayload_NullFields(t *testing.T) {

@@ -423,6 +423,30 @@ func TestHandleConvergenceCreateUnknownRig(t *testing.T) {
 	}
 }
 
+func TestConvergenceCreatedEventsCarryStoreKeyOnlyForRigStore(t *testing.T) {
+	rec := events.NewFake()
+	cr, _, _ := setupConvergenceRuntimeWithRigRecorder(t, rec)
+	cityCreated := createConvergenceLoop(t, cr, "", "city-agent")
+	cityEvent := findRecordedConvergenceCreatedEvent(t, rec, cityCreated.BeadID)
+	var cityRaw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(cityEvent.Message), &cityRaw); err != nil {
+		t.Fatalf("unmarshal city created event message: %v", err)
+	}
+	if _, ok := cityRaw["store_key"]; ok {
+		t.Fatalf("city created event should omit store_key: %s", cityEvent.Message)
+	}
+
+	rigCreated := createConvergenceLoop(t, cr, "rig-a", "rig-agent")
+	rigEvent := findRecordedConvergenceCreatedEvent(t, rec, rigCreated.BeadID)
+	var rigPayload convergence.CreatedPayload
+	if err := json.Unmarshal([]byte(rigEvent.Message), &rigPayload); err != nil {
+		t.Fatalf("unmarshal rig created event message: %v", err)
+	}
+	if rigPayload.StoreKey != "rig-a" {
+		t.Fatalf("rig created event store_key = %q, want %q", rigPayload.StoreKey, "rig-a")
+	}
+}
+
 func TestConvergenceCommandFindsRigBeadByID(t *testing.T) {
 	cr, _, rigStore := setupConvergenceRuntimeWithRig(t)
 	created := createConvergenceLoop(t, cr, "rig-a", "rig-agent")
@@ -502,6 +526,11 @@ func TestConvergenceStartupReconcileScansAllStores(t *testing.T) {
 
 func setupConvergenceRuntimeWithRig(t *testing.T) (*CityRuntime, *beads.MemStore, *beads.MemStore) {
 	t.Helper()
+	return setupConvergenceRuntimeWithRigRecorder(t, events.Discard)
+}
+
+func setupConvergenceRuntimeWithRigRecorder(t *testing.T, rec events.Recorder) (*CityRuntime, *beads.MemStore, *beads.MemStore) {
+	t.Helper()
 
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
@@ -523,7 +552,7 @@ func setupConvergenceRuntimeWithRig(t *testing.T) (*CityRuntime, *beads.MemStore
 		cfg:                 cfg,
 		sp:                  runtime.NewFake(),
 		buildFn:             func(_ *config.City, _ runtime.Provider, _ beads.Store) map[string]TemplateParams { return nil },
-		rec:                 events.Discard,
+		rec:                 rec,
 		convergenceReqCh:    make(chan convergenceRequest, 16),
 		standaloneCityStore: cityStore,
 		logPrefix:           "gc test",
@@ -540,6 +569,22 @@ func setupConvergenceRuntimeWithRig(t *testing.T) (*CityRuntime, *beads.MemStore
 	cr.setControllerState(cs)
 	cr.initConvergenceHandlers()
 	return cr, cityStore, rigStore
+}
+
+func findRecordedConvergenceCreatedEvent(t *testing.T, rec *events.Fake, beadID string) events.Event {
+	t.Helper()
+	recordedEvents, err := rec.List(events.Filter{Type: convergence.EventCreated})
+	if err != nil {
+		t.Fatalf("list recorded events: %v", err)
+	}
+	for i := len(recordedEvents) - 1; i >= 0; i-- {
+		event := recordedEvents[i]
+		if event.Type == convergence.EventCreated && event.Subject == beadID {
+			return event
+		}
+	}
+	t.Fatalf("recorded %s event for %s not found in %#v", convergence.EventCreated, beadID, recordedEvents)
+	return events.Event{}
 }
 
 func createConvergenceLoop(t *testing.T, cr *CityRuntime, rigName, target string) convergence.CreateResult {

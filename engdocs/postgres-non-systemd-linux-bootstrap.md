@@ -15,8 +15,8 @@ that doc instead; this doc is exclusively for non-systemd Linux.
 This bootstrap is **opt-in** and **manual**. `gc init` and `gc destroy` do not
 invoke any of the steps below.
 
-`gc doctor --explain-postgres-non-systemd-linux-bootstrap` prints the same sequence
-as a copy-pastable shell script (see §10).
+The numbered sections below are the copy-pastable bootstrap sequence. `gc doctor`
+only verifies the completed setup; it does not print or run this bootstrap.
 
 ## 1. Audience and prerequisites
 
@@ -392,8 +392,9 @@ If `postgres-server` reports a `✗` error:
 | `local PG not installed yet — see engdocs/postgres-non-systemd-linux-bootstrap.md for one-time setup` | This doc was not run | Run this doc |
 | `auth failed` | postgres-auth cannot read the credentials file | Confirm `chmod 600 ~/.config/beads/credentials` |
 
-`gc doctor --explain-postgres-non-systemd-linux-bootstrap` reprints this document
-as a copy-pastable shell script.
+If the checks still fail after rerunning the relevant section above, use the
+init-system logs and the credentials file permissions as the source of truth;
+there is no separate `gc doctor` bootstrap-printing mode.
 
 ## 11. Uninstallation
 

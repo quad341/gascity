@@ -37,6 +37,8 @@ func TestConvergeListRejectsGCRigBeforeStoreWork(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	cmd := newConvergeListCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
 
 	err := cmd.Execute()
 	requireConvergeRigUnsupported(t, err, stderr.String(), "list")

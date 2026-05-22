@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -287,6 +288,10 @@ func driftCheckEnv(t *testing.T, supervisorBuildID string) (cityPath string, res
 // (which was the previous behavior on the success arm) left the
 // requested city un-registered after the supervisor came back up.
 func TestRunStartDriftCheck_RestartReturnsContinue(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("supervisor auto-restart reads /proc/<pid>/exe; Linux-only deployment target")
+	}
+
 	cityPath, setCommit := driftCheckEnv(t, "old-build-id")
 	setCommit("new-build-id") // local commit differs → drift detected → Restart disposition
 
@@ -378,6 +383,10 @@ func TestDoStartJSONAlreadyRunningSupervisorKeepsStdoutJSONOnly(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "drift restart" && runtime.GOOS != "linux" {
+				t.Skip("supervisor auto-restart reads /proc/<pid>/exe; Linux-only deployment target")
+			}
+
 			cityPath, setCommit := driftCheckEnv(t, tc.supervisorBuildID)
 			setCommit(tc.localBuildID)
 			if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestDiscoverPathPrefersClaudeSessionID(t *testing.T) {
@@ -155,10 +156,7 @@ func TestDiscoverPathKimiPrefersSessionKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := DiscoverPath([]string{base}, "kimi/tmux-cli", workDir, "session-key")
-	if got != keyed {
-		t.Fatalf("DiscoverPath() = %q, want keyed Kimi transcript %q", got, keyed)
-	}
+	testutil.AssertSamePath(t, DiscoverPath([]string{base}, "kimi/tmux-cli", workDir, "session-key"), keyed)
 }
 
 func TestDiscoverPathKimiSessionKeyMissDoesNotUseNewestWorkdirTranscript(t *testing.T) {

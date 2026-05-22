@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestReadKimiFilePreservesNativeToolRows(t *testing.T) {
@@ -232,12 +234,8 @@ func TestFindKimiSessionFileByIDUsesSessionKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := FindKimiSessionFile([]string{base}, workDir); got != newPath {
-		t.Fatalf("FindKimiSessionFile() = %q, want newest %q", got, newPath)
-	}
-	if got := FindKimiSessionFileByID([]string{base}, workDir, "old-session"); got != oldPath {
-		t.Fatalf("FindKimiSessionFileByID() = %q, want keyed %q", got, oldPath)
-	}
+	testutil.AssertSamePath(t, FindKimiSessionFile([]string{base}, workDir), newPath)
+	testutil.AssertSamePath(t, FindKimiSessionFileByID([]string{base}, workDir, "old-session"), oldPath)
 }
 
 func TestFindKimiSessionFileFollowsSymlinkedRoots(t *testing.T) {
@@ -252,12 +250,8 @@ func TestFindKimiSessionFileFollowsSymlinkedRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := FindKimiSessionFile([]string{base}, workDir); got != want {
-		t.Fatalf("FindKimiSessionFile() = %q, want symlinked root transcript %q", got, want)
-	}
-	if got := FindKimiSessionFileByID([]string{base}, workDir, "session-key"); got != want {
-		t.Fatalf("FindKimiSessionFileByID() = %q, want symlinked root transcript %q", got, want)
-	}
+	testutil.AssertSamePath(t, FindKimiSessionFile([]string{base}, workDir), want)
+	testutil.AssertSamePath(t, FindKimiSessionFileByID([]string{base}, workDir, "session-key"), want)
 }
 
 func TestFindKimiSessionFileLogsMissingWorkDirHashDiagnostic(t *testing.T) {

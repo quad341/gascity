@@ -1312,9 +1312,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "local-rig" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "local-rig")
 		}
@@ -1348,9 +1346,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "local-load-error-rig" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "local-load-error-rig")
 		}
@@ -1385,9 +1381,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "local-load-error-path-rig" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "local-load-error-path-rig")
 		}
@@ -1452,9 +1446,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "local-path-rig" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "local-path-rig")
 		}
@@ -1481,9 +1473,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "b-deep" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "b-deep")
 		}
@@ -1509,9 +1499,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "relative-rig" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "relative-rig")
 		}
@@ -1582,9 +1570,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "local-flag-rig" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "local-flag-rig")
 		}
@@ -1631,9 +1617,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "local-env-rig" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "local-env-rig")
 		}
@@ -1662,9 +1646,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveRigToContext: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "local-gc-dir-rig" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "local-gc-dir-rig")
 		}

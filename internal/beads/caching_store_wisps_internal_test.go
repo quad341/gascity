@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 func TestCachingStorePrimeLoadsOpenWispsAndServesTierWispsFromCache(t *testing.T) {
@@ -33,9 +35,7 @@ func TestCachingStorePrimeLoadsOpenWispsAndServesTierWispsFromCache(t *testing.T
 	assertNoCachedWisp(t, cache, closedWisp.ID)
 
 	direct := NewCachingStoreForTest(backing, nil)
-	if err := direct.PrimeWisps(); err != nil {
-		t.Fatalf("PrimeWisps: %v", err)
-	}
+	primeWispsForTest(t, direct)
 	assertCachedWisp(t, direct, openWisp.ID, "open wisp", "open")
 
 	backing.resetListCalls()
@@ -83,11 +83,9 @@ func TestCachingStoreTierWispsFallbacksBypassCache(t *testing.T) {
 			t.Fatalf("Create wisp: %v", err)
 		}
 		cache := NewCachingStoreForTest(backing, nil)
-		if err := cache.PrimeWisps(); err != nil {
-			t.Fatalf("PrimeWisps: %v", err)
-		}
+		primeWispsForTest(t, cache)
 		cache.mu.Lock()
-		cache.wispsState = cacheDegraded
+		setCacheField(t, cache, "wispsState", cacheDegraded)
 		cache.mu.Unlock()
 		backing.resetListCalls()
 
@@ -108,9 +106,7 @@ func TestCachingStoreTierWispsFallbacksBypassCache(t *testing.T) {
 			t.Fatalf("Create wisp: %v", err)
 		}
 		cache := NewCachingStoreForTest(backing, nil)
-		if err := cache.PrimeWisps(); err != nil {
-			t.Fatalf("PrimeWisps: %v", err)
-		}
+		primeWispsForTest(t, cache)
 		after := "after"
 		if err := backing.Update(wisp.ID, UpdateOpts{Title: &after}); err != nil {
 			t.Fatalf("Update backing: %v", err)
@@ -137,9 +133,7 @@ func TestCachingStoreTierWispsFallbacksBypassCache(t *testing.T) {
 			t.Fatalf("Create wisp: %v", err)
 		}
 		cache := NewCachingStoreForTest(backing, nil)
-		if err := cache.PrimeWisps(); err != nil {
-			t.Fatalf("PrimeWisps: %v", err)
-		}
+		primeWispsForTest(t, cache)
 		if err := backing.Close(wisp.ID); err != nil {
 			t.Fatalf("Close backing: %v", err)
 		}
@@ -210,9 +204,9 @@ func TestCachingStoreTierBothUsesIndependentTierCacheFallbacks(t *testing.T) {
 			t.Fatalf("Prime: %v", err)
 		}
 		cache.mu.Lock()
-		cache.wisps = make(map[string]Bead)
-		cache.wispsState = cacheUninitialized
-		cache.wispsLastFreshAt = time.Time{}
+		setCacheField(t, cache, "wisps", make(map[string]Bead))
+		setCacheField(t, cache, "wispsState", cacheUninitialized)
+		setCacheField(t, cache, "wispsLastFreshAt", time.Time{})
 		cache.mu.Unlock()
 
 		issueChanged := "issue changed in backing"
@@ -346,9 +340,7 @@ func TestCachingStoreEphemeralWritesUpdateWispsCache(t *testing.T) {
 func TestCachingStoreApplyEventUpdatesWispsCache(t *testing.T) {
 	backing := NewMemStore()
 	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.PrimeWisps(); err != nil {
-		t.Fatalf("PrimeWisps: %v", err)
-	}
+	primeWispsForTest(t, cache)
 
 	created, err := backing.Create(Bead{Title: "created", Ephemeral: true})
 	if err != nil {
@@ -375,9 +367,7 @@ func TestCachingStoreRunWispsReconciliationReplacesWispsCache(t *testing.T) {
 		t.Fatalf("Create stale: %v", err)
 	}
 	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.PrimeWisps(); err != nil {
-		t.Fatalf("PrimeWisps: %v", err)
-	}
+	primeWispsForTest(t, cache)
 	if err := backing.Close(stale.ID); err != nil {
 		t.Fatalf("Close stale backing: %v", err)
 	}
@@ -386,7 +376,7 @@ func TestCachingStoreRunWispsReconciliationReplacesWispsCache(t *testing.T) {
 		t.Fatalf("Create fresh: %v", err)
 	}
 
-	cache.runWispsReconciliation()
+	runWispsReconciliationForTest(t, cache)
 
 	assertNoCachedWisp(t, cache, stale.ID)
 	assertCachedWisp(t, cache, fresh.ID, "fresh", "open")
@@ -396,7 +386,7 @@ func TestCachingStoreWispsReconciliationFailureAndRecovery(t *testing.T) {
 	backing := &wispsRecordingStore{Store: NewMemStore()}
 	cache := NewCachingStoreForTest(backing, nil)
 	cache.mu.Lock()
-	cache.wispsState = cacheLive
+	setCacheField(t, cache, "wispsState", cacheLive)
 	cache.mu.Unlock()
 
 	backing.listErr = func(query ListQuery) error {
@@ -406,19 +396,19 @@ func TestCachingStoreWispsReconciliationFailureAndRecovery(t *testing.T) {
 		return nil
 	}
 	for i := 0; i < maxCacheSyncFailures; i++ {
-		cache.runWispsReconciliation()
+		runWispsReconciliationForTest(t, cache)
 	}
 	stats := cache.Stats()
-	if stats.WispsSyncFailures != maxCacheSyncFailures {
-		t.Fatalf("WispsSyncFailures = %d, want %d", stats.WispsSyncFailures, maxCacheSyncFailures)
+	if got := cacheStatsInt(t, stats, "WispsSyncFailures"); got != maxCacheSyncFailures {
+		t.Fatalf("WispsSyncFailures = %d, want %d", got, maxCacheSyncFailures)
 	}
-	if stats.WispsState != "degraded" {
-		t.Fatalf("WispsState = %q, want degraded", stats.WispsState)
+	if got := cacheStatsString(t, stats, "WispsState"); got != "degraded" {
+		t.Fatalf("WispsState = %q, want degraded", got)
 	}
-	if stats.WispsLastProblemAt.IsZero() {
+	if cacheStatsTime(t, stats, "WispsLastProblemAt").IsZero() {
 		t.Fatal("WispsLastProblemAt is zero after repeated reconcile failures")
 	}
-	if delay := cache.nextWispsReconcileDelay(time.Now()); delay <= 0 {
+	if delay := nextWispsReconcileDelayForTest(t, cache, time.Now()); delay <= 0 {
 		t.Fatalf("nextWispsReconcileDelay after degradation = %s, want positive backoff", delay)
 	}
 
@@ -427,14 +417,14 @@ func TestCachingStoreWispsReconciliationFailureAndRecovery(t *testing.T) {
 		t.Fatalf("Create recovered wisp: %v", err)
 	}
 	backing.listErr = nil
-	cache.runWispsReconciliation()
+	runWispsReconciliationForTest(t, cache)
 
 	stats = cache.Stats()
-	if stats.WispsSyncFailures != 0 {
-		t.Fatalf("WispsSyncFailures after recovery = %d, want 0", stats.WispsSyncFailures)
+	if got := cacheStatsInt(t, stats, "WispsSyncFailures"); got != 0 {
+		t.Fatalf("WispsSyncFailures after recovery = %d, want 0", got)
 	}
-	if stats.WispsState != "live" {
-		t.Fatalf("WispsState after recovery = %q, want live", stats.WispsState)
+	if got := cacheStatsString(t, stats, "WispsState"); got != "live" {
+		t.Fatalf("WispsState after recovery = %q, want live", got)
 	}
 	assertCachedWisp(t, cache, wisp.ID, "recovered", "open")
 }
@@ -445,23 +435,62 @@ func TestCachingStoreStatsExposeWispsState(t *testing.T) {
 		t.Fatalf("Create wisp: %v", err)
 	}
 	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.PrimeWisps(); err != nil {
-		t.Fatalf("PrimeWisps: %v", err)
-	}
+	primeWispsForTest(t, cache)
 
 	stats := cache.Stats()
-	if stats.WispsState != "live" {
-		t.Fatalf("WispsState = %q, want live", stats.WispsState)
+	if got := cacheStatsString(t, stats, "WispsState"); got != "live" {
+		t.Fatalf("WispsState = %q, want live", got)
 	}
-	if stats.WispsBeadCount != 1 {
-		t.Fatalf("WispsBeadCount = %d, want 1", stats.WispsBeadCount)
+	if got := cacheStatsInt(t, stats, "WispsBeadCount"); got != 1 {
+		t.Fatalf("WispsBeadCount = %d, want 1", got)
 	}
-	if stats.WispsSyncFailures != 0 {
-		t.Fatalf("WispsSyncFailures = %d, want 0", stats.WispsSyncFailures)
+	if got := cacheStatsInt(t, stats, "WispsSyncFailures"); got != 0 {
+		t.Fatalf("WispsSyncFailures = %d, want 0", got)
 	}
-	if stats.WispsLastFreshAt.IsZero() {
+	if cacheStatsTime(t, stats, "WispsLastFreshAt").IsZero() {
 		t.Fatal("WispsLastFreshAt is zero")
 	}
+}
+
+type cachingStoreWispsPrimer interface {
+	PrimeWisps() error
+}
+
+func primeWispsForTest(t *testing.T, cache *CachingStore) {
+	t.Helper()
+	primer, ok := any(cache).(cachingStoreWispsPrimer)
+	if !ok {
+		t.Fatal("CachingStore is missing PrimeWisps()")
+	}
+	if err := primer.PrimeWisps(); err != nil {
+		t.Fatalf("PrimeWisps: %v", err)
+	}
+}
+
+type cachingStoreWispsReconciler interface {
+	runWispsReconciliation()
+}
+
+func runWispsReconciliationForTest(t *testing.T, cache *CachingStore) {
+	t.Helper()
+	reconciler, ok := any(cache).(cachingStoreWispsReconciler)
+	if !ok {
+		t.Fatal("CachingStore is missing runWispsReconciliation()")
+	}
+	reconciler.runWispsReconciliation()
+}
+
+type cachingStoreWispsDelay interface {
+	nextWispsReconcileDelay(time.Time) time.Duration
+}
+
+func nextWispsReconcileDelayForTest(t *testing.T, cache *CachingStore, now time.Time) time.Duration {
+	t.Helper()
+	delayer, ok := any(cache).(cachingStoreWispsDelay)
+	if !ok {
+		t.Fatal("CachingStore is missing nextWispsReconcileDelay(time.Time)")
+	}
+	return delayer.nextWispsReconcileDelay(now)
 }
 
 type wispsRecordingStore struct {
@@ -501,7 +530,7 @@ func assertCachedWisp(t *testing.T, cache *CachingStore, id, title, status strin
 	t.Helper()
 	cache.mu.RLock()
 	defer cache.mu.RUnlock()
-	got, ok := cache.wisps[id]
+	got, ok := cachedWispByID(t, cache, id)
 	if !ok {
 		t.Fatalf("wisp %s not cached in wisps map", id)
 	}
@@ -514,9 +543,22 @@ func assertNoCachedWisp(t *testing.T, cache *CachingStore, id string) {
 	t.Helper()
 	cache.mu.RLock()
 	defer cache.mu.RUnlock()
-	if got, ok := cache.wisps[id]; ok {
+	if got, ok := cachedWispByID(t, cache, id); ok {
 		t.Fatalf("wisp %s cached unexpectedly: %+v", id, got)
 	}
+}
+
+func cachedWispByID(t *testing.T, cache *CachingStore, id string) (Bead, bool) {
+	t.Helper()
+	field := cacheField(t, cache, "wisps")
+	if field.Kind() != reflect.Map || field.Type().Key().Kind() != reflect.String || field.Type().Elem() != reflect.TypeOf(Bead{}) {
+		t.Fatalf("CachingStore.wisps has type %s, want map[string]Bead", field.Type())
+	}
+	got := field.MapIndex(reflect.ValueOf(id))
+	if !got.IsValid() {
+		return Bead{}, false
+	}
+	return got.Interface().(Bead), true
 }
 
 func assertNoCachedIssue(t *testing.T, cache *CachingStore, id string) {
@@ -561,4 +603,65 @@ func beadIDCounts(ids map[string]int) map[string]int {
 		out[id] = count
 	}
 	return out
+}
+
+func setCacheField(t *testing.T, cache *CachingStore, name string, value any) {
+	t.Helper()
+	field := cacheField(t, cache, name)
+	next := reflect.ValueOf(value)
+	if !next.Type().AssignableTo(field.Type()) {
+		t.Fatalf("cannot assign %s to CachingStore.%s (%s)", next.Type(), name, field.Type())
+	}
+	field.Set(next)
+}
+
+func cacheField(t *testing.T, cache *CachingStore, name string) reflect.Value {
+	t.Helper()
+	field := reflect.ValueOf(cache).Elem().FieldByName(name)
+	if !field.IsValid() {
+		t.Fatalf("CachingStore is missing field %s", name)
+	}
+	if !field.CanAddr() {
+		t.Fatalf("CachingStore.%s is not addressable", name)
+	}
+	return reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
+}
+
+func cacheStatsInt(t *testing.T, stats CacheStats, name string) int {
+	t.Helper()
+	field := cacheStatsField(t, stats, name)
+	switch field.Kind() {
+	case reflect.Int:
+		return int(field.Int())
+	default:
+		t.Fatalf("CacheStats.%s has kind %s, want int", name, field.Kind())
+		return 0
+	}
+}
+
+func cacheStatsString(t *testing.T, stats CacheStats, name string) string {
+	t.Helper()
+	field := cacheStatsField(t, stats, name)
+	if field.Kind() != reflect.String {
+		t.Fatalf("CacheStats.%s has kind %s, want string", name, field.Kind())
+	}
+	return field.String()
+}
+
+func cacheStatsTime(t *testing.T, stats CacheStats, name string) time.Time {
+	t.Helper()
+	field := cacheStatsField(t, stats, name)
+	if field.Type() != reflect.TypeOf(time.Time{}) {
+		t.Fatalf("CacheStats.%s has type %s, want time.Time", name, field.Type())
+	}
+	return field.Interface().(time.Time)
+}
+
+func cacheStatsField(t *testing.T, stats CacheStats, name string) reflect.Value {
+	t.Helper()
+	field := reflect.ValueOf(stats).FieldByName(name)
+	if !field.IsValid() {
+		t.Fatalf("CacheStats is missing field %s", name)
+	}
+	return field
 }

@@ -1,0 +1,564 @@
+package beads
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+	"time"
+)
+
+func TestCachingStorePrimeLoadsOpenWispsAndServesTierWispsFromCache(t *testing.T) {
+	backing := &wispsRecordingStore{Store: NewMemStore()}
+	if _, err := backing.Create(Bead{Title: "issue", Labels: []string{"k"}}); err != nil {
+		t.Fatalf("Create issue: %v", err)
+	}
+	openWisp, err := backing.Create(Bead{Title: "open wisp", Labels: []string{"k"}, Ephemeral: true})
+	if err != nil {
+		t.Fatalf("Create open wisp: %v", err)
+	}
+	closedWisp, err := backing.Create(Bead{Title: "closed wisp", Labels: []string{"k"}, Ephemeral: true})
+	if err != nil {
+		t.Fatalf("Create closed wisp: %v", err)
+	}
+	if err := backing.Close(closedWisp.ID); err != nil {
+		t.Fatalf("Close closed wisp: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	assertCachedWisp(t, cache, openWisp.ID, "open wisp", "open")
+	assertNoCachedWisp(t, cache, closedWisp.ID)
+
+	direct := NewCachingStoreForTest(backing, nil)
+	if err := direct.PrimeWisps(); err != nil {
+		t.Fatalf("PrimeWisps: %v", err)
+	}
+	assertCachedWisp(t, direct, openWisp.ID, "open wisp", "open")
+
+	backing.resetListCalls()
+	updatedTitle := "backing changed after prime"
+	if err := backing.Update(openWisp.ID, UpdateOpts{Title: &updatedTitle}); err != nil {
+		t.Fatalf("Update backing: %v", err)
+	}
+
+	got, err := cache.List(ListQuery{Label: "k", TierMode: TierWisps, Sort: SortCreatedAsc})
+	if err != nil {
+		t.Fatalf("List(TierWisps): %v", err)
+	}
+	requireBeadIDs(t, got, openWisp.ID)
+	if got[0].Title != "open wisp" {
+		t.Fatalf("TierWisps title = %q, want cached title", got[0].Title)
+	}
+	if calls := backing.listCallsForTier(TierWisps); calls != 0 {
+		t.Fatalf("TierWisps cache hit made %d backing List calls, want 0", calls)
+	}
+}
+
+func TestCachingStoreTierWispsFallbacksBypassCache(t *testing.T) {
+	t.Run("uninitialized", func(t *testing.T) {
+		backing := &wispsRecordingStore{Store: NewMemStore()}
+		wisp, err := backing.Create(Bead{Title: "wisp", Labels: []string{"k"}, Ephemeral: true})
+		if err != nil {
+			t.Fatalf("Create wisp: %v", err)
+		}
+		cache := NewCachingStoreForTest(backing, nil)
+
+		got, err := cache.List(ListQuery{Label: "k", TierMode: TierWisps})
+		if err != nil {
+			t.Fatalf("List(TierWisps): %v", err)
+		}
+		requireBeadIDs(t, got, wisp.ID)
+		if calls := backing.listCallsForTier(TierWisps); calls != 1 {
+			t.Fatalf("backing TierWisps calls = %d, want 1", calls)
+		}
+	})
+
+	t.Run("degraded", func(t *testing.T) {
+		backing := &wispsRecordingStore{Store: NewMemStore()}
+		wisp, err := backing.Create(Bead{Title: "wisp", Labels: []string{"k"}, Ephemeral: true})
+		if err != nil {
+			t.Fatalf("Create wisp: %v", err)
+		}
+		cache := NewCachingStoreForTest(backing, nil)
+		if err := cache.PrimeWisps(); err != nil {
+			t.Fatalf("PrimeWisps: %v", err)
+		}
+		cache.mu.Lock()
+		cache.wispsState = cacheDegraded
+		cache.mu.Unlock()
+		backing.resetListCalls()
+
+		got, err := cache.List(ListQuery{Label: "k", TierMode: TierWisps})
+		if err != nil {
+			t.Fatalf("List(TierWisps): %v", err)
+		}
+		requireBeadIDs(t, got, wisp.ID)
+		if calls := backing.listCallsForTier(TierWisps); calls != 1 {
+			t.Fatalf("backing TierWisps calls = %d, want 1", calls)
+		}
+	})
+
+	t.Run("live query", func(t *testing.T) {
+		backing := &wispsRecordingStore{Store: NewMemStore()}
+		wisp, err := backing.Create(Bead{Title: "before", Labels: []string{"k"}, Ephemeral: true})
+		if err != nil {
+			t.Fatalf("Create wisp: %v", err)
+		}
+		cache := NewCachingStoreForTest(backing, nil)
+		if err := cache.PrimeWisps(); err != nil {
+			t.Fatalf("PrimeWisps: %v", err)
+		}
+		after := "after"
+		if err := backing.Update(wisp.ID, UpdateOpts{Title: &after}); err != nil {
+			t.Fatalf("Update backing: %v", err)
+		}
+		backing.resetListCalls()
+
+		got, err := cache.List(ListQuery{Label: "k", TierMode: TierWisps, Live: true})
+		if err != nil {
+			t.Fatalf("List(TierWisps live): %v", err)
+		}
+		requireBeadIDs(t, got, wisp.ID)
+		if got[0].Title != after {
+			t.Fatalf("live TierWisps title = %q, want backing title %q", got[0].Title, after)
+		}
+		if calls := backing.listCallsForTier(TierWisps); calls != 1 {
+			t.Fatalf("backing TierWisps calls = %d, want 1", calls)
+		}
+	})
+
+	t.Run("closed query", func(t *testing.T) {
+		backing := &wispsRecordingStore{Store: NewMemStore()}
+		wisp, err := backing.Create(Bead{Title: "wisp", Labels: []string{"k"}, Ephemeral: true})
+		if err != nil {
+			t.Fatalf("Create wisp: %v", err)
+		}
+		cache := NewCachingStoreForTest(backing, nil)
+		if err := cache.PrimeWisps(); err != nil {
+			t.Fatalf("PrimeWisps: %v", err)
+		}
+		if err := backing.Close(wisp.ID); err != nil {
+			t.Fatalf("Close backing: %v", err)
+		}
+		backing.resetListCalls()
+
+		got, err := cache.List(ListQuery{Status: "closed", TierMode: TierWisps})
+		if err != nil {
+			t.Fatalf("List(TierWisps closed): %v", err)
+		}
+		requireBeadIDs(t, got, wisp.ID)
+		if calls := backing.listCallsForTier(TierWisps); calls != 1 {
+			t.Fatalf("backing TierWisps calls = %d, want 1", calls)
+		}
+	})
+}
+
+func TestCachingStoreTierBothUsesIndependentTierCacheFallbacks(t *testing.T) {
+	t.Run("both live", func(t *testing.T) {
+		backing := &wispsRecordingStore{Store: NewMemStore()}
+		issue, err := backing.Create(Bead{Title: "issue", Labels: []string{"k"}})
+		if err != nil {
+			t.Fatalf("Create issue: %v", err)
+		}
+		wisp, err := backing.Create(Bead{Title: "wisp", Labels: []string{"k"}, Ephemeral: true})
+		if err != nil {
+			t.Fatalf("Create wisp: %v", err)
+		}
+		cache := NewCachingStoreForTest(backing, nil)
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+		changed := "changed in backing"
+		if err := backing.Update(issue.ID, UpdateOpts{Title: &changed}); err != nil {
+			t.Fatalf("Update issue backing: %v", err)
+		}
+		if err := backing.Update(wisp.ID, UpdateOpts{Title: &changed}); err != nil {
+			t.Fatalf("Update wisp backing: %v", err)
+		}
+		backing.resetListCalls()
+
+		got, err := cache.List(ListQuery{Label: "k", TierMode: TierBoth, Sort: SortCreatedAsc})
+		if err != nil {
+			t.Fatalf("List(TierBoth): %v", err)
+		}
+		requireBeadIDs(t, got, issue.ID, wisp.ID)
+		for _, bead := range got {
+			if bead.Title == changed {
+				t.Fatalf("List(TierBoth) returned backing-mutated bead %+v, want cached snapshot", bead)
+			}
+		}
+		if backing.listCalls != 0 {
+			t.Fatalf("TierBoth both-live cache hit made %d backing List calls, want 0", backing.listCalls)
+		}
+	})
+
+	t.Run("issues live wisps uninitialized", func(t *testing.T) {
+		backing := &wispsRecordingStore{Store: NewMemStore()}
+		issue, err := backing.Create(Bead{Title: "issue", Labels: []string{"k"}})
+		if err != nil {
+			t.Fatalf("Create issue: %v", err)
+		}
+		wisp, err := backing.Create(Bead{Title: "wisp", Labels: []string{"k"}, Ephemeral: true})
+		if err != nil {
+			t.Fatalf("Create wisp: %v", err)
+		}
+		cache := NewCachingStoreForTest(backing, nil)
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+		cache.mu.Lock()
+		cache.wisps = make(map[string]Bead)
+		cache.wispsState = cacheUninitialized
+		cache.wispsLastFreshAt = time.Time{}
+		cache.mu.Unlock()
+
+		issueChanged := "issue changed in backing"
+		wispChanged := "wisp changed in backing"
+		if err := backing.Update(issue.ID, UpdateOpts{Title: &issueChanged}); err != nil {
+			t.Fatalf("Update issue backing: %v", err)
+		}
+		if err := backing.Update(wisp.ID, UpdateOpts{Title: &wispChanged}); err != nil {
+			t.Fatalf("Update wisp backing: %v", err)
+		}
+		backing.resetListCalls()
+
+		got, err := cache.List(ListQuery{Label: "k", TierMode: TierBoth, Sort: SortCreatedAsc})
+		if err != nil {
+			t.Fatalf("List(TierBoth): %v", err)
+		}
+		requireBeadIDs(t, got, issue.ID, wisp.ID)
+		if gotTitle(t, got, issue.ID) != "issue" {
+			t.Fatalf("issue title = %q, want cached title", gotTitle(t, got, issue.ID))
+		}
+		if gotTitle(t, got, wisp.ID) != wispChanged {
+			t.Fatalf("wisp title = %q, want backing fallback title %q", gotTitle(t, got, wisp.ID), wispChanged)
+		}
+		if calls := backing.listCallsForTier(TierWisps); calls != 1 {
+			t.Fatalf("backing TierWisps calls = %d, want 1", calls)
+		}
+		if calls := backing.listCallsForTier(TierBoth); calls != 0 {
+			t.Fatalf("backing TierBoth calls = %d, want 0 independent tier fallback", calls)
+		}
+		if calls := backing.listCallsForTier(TierIssues); calls != 0 {
+			t.Fatalf("backing TierIssues calls = %d, want 0 for cacheable issues tier", calls)
+		}
+	})
+
+	t.Run("both uninitialized", func(t *testing.T) {
+		backing := &wispsRecordingStore{Store: NewMemStore()}
+		issue, err := backing.Create(Bead{Title: "issue", Labels: []string{"k"}})
+		if err != nil {
+			t.Fatalf("Create issue: %v", err)
+		}
+		wisp, err := backing.Create(Bead{Title: "wisp", Labels: []string{"k"}, Ephemeral: true})
+		if err != nil {
+			t.Fatalf("Create wisp: %v", err)
+		}
+		cache := NewCachingStoreForTest(backing, nil)
+
+		got, err := cache.List(ListQuery{Label: "k", TierMode: TierBoth, Sort: SortCreatedAsc})
+		if err != nil {
+			t.Fatalf("List(TierBoth): %v", err)
+		}
+		requireBeadIDs(t, got, issue.ID, wisp.ID)
+		if calls := backing.listCallsForTier(TierBoth); calls != 1 {
+			t.Fatalf("backing TierBoth calls = %d, want 1 full fallback", calls)
+		}
+	})
+}
+
+func TestCachingStoreCachedListSupportsWispsAndBothTiers(t *testing.T) {
+	backing := &wispsRecordingStore{Store: NewMemStore()}
+	issue, err := backing.Create(Bead{Title: "issue", Labels: []string{"k"}})
+	if err != nil {
+		t.Fatalf("Create issue: %v", err)
+	}
+	wisp, err := backing.Create(Bead{Title: "wisp", Labels: []string{"k"}, Ephemeral: true})
+	if err != nil {
+		t.Fatalf("Create wisp: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	backing.resetListCalls()
+
+	wisps, ok := cache.CachedList(ListQuery{Label: "k", TierMode: TierWisps})
+	if !ok {
+		t.Fatal("CachedList(TierWisps) ok=false, want true")
+	}
+	requireBeadIDs(t, wisps, wisp.ID)
+
+	both, ok := cache.CachedList(ListQuery{Label: "k", TierMode: TierBoth, Sort: SortCreatedAsc})
+	if !ok {
+		t.Fatal("CachedList(TierBoth) ok=false, want true")
+	}
+	requireBeadIDs(t, both, issue.ID, wisp.ID)
+	if backing.listCalls != 0 {
+		t.Fatalf("CachedList made %d backing List calls, want 0", backing.listCalls)
+	}
+
+	closed, ok := cache.CachedList(ListQuery{Status: "closed", TierMode: TierWisps})
+	if ok {
+		t.Fatalf("CachedList(TierWisps closed) ok=true rows=%+v, want ok=false", closed)
+	}
+}
+
+func TestCachingStoreEphemeralWritesUpdateWispsCache(t *testing.T) {
+	backing := NewMemStore()
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	created, err := cache.Create(Bead{Title: "created", Ephemeral: true})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	assertCachedWisp(t, cache, created.ID, "created", "open")
+	assertNoCachedIssue(t, cache, created.ID)
+
+	updatedTitle := "updated"
+	if err := cache.Update(created.ID, UpdateOpts{Title: &updatedTitle}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	assertCachedWisp(t, cache, created.ID, updatedTitle, "open")
+
+	if err := cache.Close(created.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	assertCachedWisp(t, cache, created.ID, updatedTitle, "closed")
+
+	if err := cache.Reopen(created.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	assertCachedWisp(t, cache, created.ID, updatedTitle, "open")
+
+	if err := cache.Delete(created.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	assertNoCachedWisp(t, cache, created.ID)
+}
+
+func TestCachingStoreApplyEventUpdatesWispsCache(t *testing.T) {
+	backing := NewMemStore()
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeWisps(); err != nil {
+		t.Fatalf("PrimeWisps: %v", err)
+	}
+
+	created, err := backing.Create(Bead{Title: "created", Ephemeral: true})
+	if err != nil {
+		t.Fatalf("Create backing wisp: %v", err)
+	}
+	createdPayload, err := json.Marshal(created)
+	if err != nil {
+		t.Fatalf("Marshal created: %v", err)
+	}
+	cache.ApplyEvent("bead.created", createdPayload)
+	assertCachedWisp(t, cache, created.ID, "created", "open")
+
+	cache.ApplyEvent("bead.updated", json.RawMessage(`{"id":"`+created.ID+`","title":"updated"}`))
+	assertCachedWisp(t, cache, created.ID, "updated", "open")
+
+	cache.ApplyEvent("bead.closed", json.RawMessage(`{"id":"`+created.ID+`","status":"closed"}`))
+	assertCachedWisp(t, cache, created.ID, "updated", "closed")
+}
+
+func TestCachingStoreRunWispsReconciliationReplacesWispsCache(t *testing.T) {
+	backing := NewMemStore()
+	stale, err := backing.Create(Bead{Title: "stale", Ephemeral: true})
+	if err != nil {
+		t.Fatalf("Create stale: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeWisps(); err != nil {
+		t.Fatalf("PrimeWisps: %v", err)
+	}
+	if err := backing.Close(stale.ID); err != nil {
+		t.Fatalf("Close stale backing: %v", err)
+	}
+	fresh, err := backing.Create(Bead{Title: "fresh", Ephemeral: true})
+	if err != nil {
+		t.Fatalf("Create fresh: %v", err)
+	}
+
+	cache.runWispsReconciliation()
+
+	assertNoCachedWisp(t, cache, stale.ID)
+	assertCachedWisp(t, cache, fresh.ID, "fresh", "open")
+}
+
+func TestCachingStoreWispsReconciliationFailureAndRecovery(t *testing.T) {
+	backing := &wispsRecordingStore{Store: NewMemStore()}
+	cache := NewCachingStoreForTest(backing, nil)
+	cache.mu.Lock()
+	cache.wispsState = cacheLive
+	cache.mu.Unlock()
+
+	backing.listErr = func(query ListQuery) error {
+		if query.TierMode == TierWisps {
+			return errors.New("wisps unavailable")
+		}
+		return nil
+	}
+	for i := 0; i < maxCacheSyncFailures; i++ {
+		cache.runWispsReconciliation()
+	}
+	stats := cache.Stats()
+	if stats.WispsSyncFailures != maxCacheSyncFailures {
+		t.Fatalf("WispsSyncFailures = %d, want %d", stats.WispsSyncFailures, maxCacheSyncFailures)
+	}
+	if stats.WispsState != "degraded" {
+		t.Fatalf("WispsState = %q, want degraded", stats.WispsState)
+	}
+	if stats.WispsLastProblemAt.IsZero() {
+		t.Fatal("WispsLastProblemAt is zero after repeated reconcile failures")
+	}
+	if delay := cache.nextWispsReconcileDelay(time.Now()); delay <= 0 {
+		t.Fatalf("nextWispsReconcileDelay after degradation = %s, want positive backoff", delay)
+	}
+
+	wisp, err := backing.Create(Bead{Title: "recovered", Ephemeral: true})
+	if err != nil {
+		t.Fatalf("Create recovered wisp: %v", err)
+	}
+	backing.listErr = nil
+	cache.runWispsReconciliation()
+
+	stats = cache.Stats()
+	if stats.WispsSyncFailures != 0 {
+		t.Fatalf("WispsSyncFailures after recovery = %d, want 0", stats.WispsSyncFailures)
+	}
+	if stats.WispsState != "live" {
+		t.Fatalf("WispsState after recovery = %q, want live", stats.WispsState)
+	}
+	assertCachedWisp(t, cache, wisp.ID, "recovered", "open")
+}
+
+func TestCachingStoreStatsExposeWispsState(t *testing.T) {
+	backing := NewMemStore()
+	if _, err := backing.Create(Bead{Title: "wisp", Ephemeral: true}); err != nil {
+		t.Fatalf("Create wisp: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeWisps(); err != nil {
+		t.Fatalf("PrimeWisps: %v", err)
+	}
+
+	stats := cache.Stats()
+	if stats.WispsState != "live" {
+		t.Fatalf("WispsState = %q, want live", stats.WispsState)
+	}
+	if stats.WispsBeadCount != 1 {
+		t.Fatalf("WispsBeadCount = %d, want 1", stats.WispsBeadCount)
+	}
+	if stats.WispsSyncFailures != 0 {
+		t.Fatalf("WispsSyncFailures = %d, want 0", stats.WispsSyncFailures)
+	}
+	if stats.WispsLastFreshAt.IsZero() {
+		t.Fatal("WispsLastFreshAt is zero")
+	}
+}
+
+type wispsRecordingStore struct {
+	Store
+	listCalls   int
+	listQueries []ListQuery
+	listErr     func(ListQuery) error
+}
+
+func (s *wispsRecordingStore) List(query ListQuery) ([]Bead, error) {
+	s.listCalls++
+	s.listQueries = append(s.listQueries, query)
+	if s.listErr != nil {
+		if err := s.listErr(query); err != nil {
+			return nil, err
+		}
+	}
+	return s.Store.List(query)
+}
+
+func (s *wispsRecordingStore) resetListCalls() {
+	s.listCalls = 0
+	s.listQueries = nil
+}
+
+func (s *wispsRecordingStore) listCallsForTier(tier TierMode) int {
+	var count int
+	for _, query := range s.listQueries {
+		if query.TierMode == tier {
+			count++
+		}
+	}
+	return count
+}
+
+func assertCachedWisp(t *testing.T, cache *CachingStore, id, title, status string) {
+	t.Helper()
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	got, ok := cache.wisps[id]
+	if !ok {
+		t.Fatalf("wisp %s not cached in wisps map", id)
+	}
+	if got.Title != title || got.Status != status || !got.Ephemeral {
+		t.Fatalf("cached wisp = %+v, want title=%q status=%q ephemeral=true", got, title, status)
+	}
+}
+
+func assertNoCachedWisp(t *testing.T, cache *CachingStore, id string) {
+	t.Helper()
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	if got, ok := cache.wisps[id]; ok {
+		t.Fatalf("wisp %s cached unexpectedly: %+v", id, got)
+	}
+}
+
+func assertNoCachedIssue(t *testing.T, cache *CachingStore, id string) {
+	t.Helper()
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	if got, ok := cache.beads[id]; ok {
+		t.Fatalf("ephemeral bead %s cached in issues map: %+v", id, got)
+	}
+}
+
+func requireBeadIDs(t *testing.T, got []Bead, want ...string) {
+	t.Helper()
+	ids := make(map[string]int, len(got))
+	for _, bead := range got {
+		ids[bead.ID]++
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got ids %v, want %v", beadIDCounts(ids), want)
+	}
+	for _, id := range want {
+		if ids[id] != 1 {
+			t.Fatalf("got ids %v, want %v", beadIDCounts(ids), want)
+		}
+	}
+}
+
+func gotTitle(t *testing.T, got []Bead, id string) string {
+	t.Helper()
+	for _, bead := range got {
+		if bead.ID == id {
+			return bead.Title
+		}
+	}
+	t.Fatalf("missing bead %s in %+v", id, got)
+	return ""
+}
+
+func beadIDCounts(ids map[string]int) map[string]int {
+	out := make(map[string]int, len(ids))
+	for id, count := range ids {
+		out[id] = count
+	}
+	return out
+}

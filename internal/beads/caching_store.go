@@ -130,13 +130,15 @@ type CacheStats struct {
 }
 
 const (
-	maxCacheSyncFailures         = 5
-	cacheReconcilePollInterval   = 5 * time.Second
-	cacheReconcileIntervalSmall  = 30 * time.Second
-	cacheReconcileIntervalMedium = 60 * time.Second
-	cacheReconcileIntervalLarge  = 120 * time.Second
-	cacheProblemLogWindow        = time.Minute
-	cacheReconcileFailureBackoff = time.Minute
+	maxCacheSyncFailures            = 5
+	cacheReconcilePollInterval      = 5 * time.Second
+	cacheReconcileIntervalSmall     = 30 * time.Second
+	cacheReconcileIntervalMedium    = 60 * time.Second
+	cacheReconcileIntervalLarge     = 120 * time.Second
+	cacheProblemLogWindow           = time.Minute
+	cacheReconcileFailureBackoff    = time.Minute
+	cacheWispsReconcileInterval     = 10 * time.Second
+	cacheWispsReconcilePollInterval = 2 * time.Second
 )
 
 // StaggerOption configures the deterministic startup stagger applied

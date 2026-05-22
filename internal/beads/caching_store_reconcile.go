@@ -37,26 +37,37 @@ func (c *CachingStore) reconcileLoop(ctx context.Context, stagger time.Duration)
 		}
 	}
 
-	timer := time.NewTimer(cacheReconcilePollInterval)
-	defer timer.Stop()
+	issueTimer := time.NewTimer(cacheReconcilePollInterval)
+	wispsTimer := time.NewTimer(cacheWispsReconcilePollInterval)
+	defer issueTimer.Stop()
+	defer wispsTimer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-timer.C:
-		}
+		case <-issueTimer.C:
+			if c.nextReconcileDelay(time.Now()) == 0 && c.reconciling.CompareAndSwap(false, true) {
+				c.runReconciliation()
+				c.reconciling.Store(false)
+			}
 
-		if c.nextReconcileDelay(time.Now()) == 0 && c.reconciling.CompareAndSwap(false, true) {
-			c.runReconciliation()
-			c.reconciling.Store(false)
-		}
+			next := c.nextReconcileDelay(time.Now())
+			if next <= 0 || next > cacheReconcilePollInterval {
+				next = cacheReconcilePollInterval
+			}
+			issueTimer.Reset(next)
+		case <-wispsTimer.C:
+			if c.nextWispsReconcileDelay(time.Now()) == 0 {
+				c.runWispsReconciliation()
+			}
 
-		next := c.nextReconcileDelay(time.Now())
-		if next <= 0 || next > cacheReconcilePollInterval {
-			next = cacheReconcilePollInterval
+			next := c.nextWispsReconcileDelay(time.Now())
+			if next <= 0 || next > cacheWispsReconcilePollInterval {
+				next = cacheWispsReconcilePollInterval
+			}
+			wispsTimer.Reset(next)
 		}
-		timer.Reset(next)
 	}
 }
 
@@ -246,6 +257,64 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 		return 0
 	}
 	return dueAt.Sub(now)
+}
+
+func (c *CachingStore) nextWispsReconcileDelay(now time.Time) time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.wispsState == cacheDegraded {
+		if !c.stats.WispsLastProblemAt.IsZero() {
+			dueAt := c.stats.WispsLastProblemAt.Add(cacheReconcileFailureBackoff)
+			if now.Before(dueAt) {
+				return dueAt.Sub(now)
+			}
+		}
+		return 0
+	}
+
+	if c.wispsLastFreshAt.IsZero() {
+		return 0
+	}
+	dueAt := c.wispsLastFreshAt.Add(cacheWispsReconcileInterval)
+	if !now.Before(dueAt) {
+		return 0
+	}
+	return dueAt.Sub(now)
+}
+
+func (c *CachingStore) runWispsReconciliation() {
+	fresh, err := c.backing.List(ListQuery{
+		TierMode:  TierWisps,
+		AllowScan: true,
+		Status:    "open",
+	})
+	if err != nil {
+		c.mu.Lock()
+		c.wispsSyncFailures++
+		if c.wispsSyncFailures >= maxCacheSyncFailures {
+			c.wispsState = cacheDegraded
+		}
+		c.stats.WispsLastProblemAt = time.Now()
+		c.recordProblemLocked("wisps reconcile", err)
+		c.updateStatsLocked()
+		c.mu.Unlock()
+		return
+	}
+
+	freshByID := make(map[string]Bead, len(fresh))
+	for _, b := range fresh {
+		freshByID[b.ID] = cloneBead(b)
+	}
+
+	now := time.Now()
+	c.mu.Lock()
+	c.wisps = freshByID
+	c.wispsState = cacheLive
+	c.wispsLastFreshAt = now
+	c.wispsSyncFailures = 0
+	c.updateStatsLocked()
+	c.mu.Unlock()
 }
 
 func (c *CachingStore) runReconciliation() {

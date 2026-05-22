@@ -429,6 +429,37 @@ func TestCachingStoreWispsReconciliationFailureAndRecovery(t *testing.T) {
 	assertCachedWisp(t, cache, wisp.ID, "recovered", "open")
 }
 
+func TestCachingStoreNextWispsReconcileDelay(t *testing.T) {
+	cache := NewCachingStoreForTest(NewMemStore(), nil)
+	now := time.Now()
+
+	if delay := nextWispsReconcileDelayForTest(t, cache, now); delay != 0 {
+		t.Fatalf("uninitialized delay = %s, want immediate", delay)
+	}
+
+	cache.mu.Lock()
+	setCacheField(t, cache, "wispsState", cacheLive)
+	setCacheField(t, cache, "wispsLastFreshAt", now)
+	cache.mu.Unlock()
+	if delay := nextWispsReconcileDelayForTest(t, cache, now); delay != cacheWispsReconcileInterval {
+		t.Fatalf("fresh live delay = %s, want %s", delay, cacheWispsReconcileInterval)
+	}
+	if delay := nextWispsReconcileDelayForTest(t, cache, now.Add(cacheWispsReconcileInterval)); delay != 0 {
+		t.Fatalf("due live delay = %s, want immediate", delay)
+	}
+
+	cache.mu.Lock()
+	setCacheField(t, cache, "wispsState", cacheDegraded)
+	cache.stats.WispsLastProblemAt = now
+	cache.mu.Unlock()
+	if delay := nextWispsReconcileDelayForTest(t, cache, now); delay != cacheReconcileFailureBackoff {
+		t.Fatalf("degraded backoff delay = %s, want %s", delay, cacheReconcileFailureBackoff)
+	}
+	if delay := nextWispsReconcileDelayForTest(t, cache, now.Add(cacheReconcileFailureBackoff)); delay != 0 {
+		t.Fatalf("expired degraded delay = %s, want immediate", delay)
+	}
+}
+
 func TestCachingStoreStatsExposeWispsState(t *testing.T) {
 	backing := NewMemStore()
 	if _, err := backing.Create(Bead{Title: "wisp", Ephemeral: true}); err != nil {

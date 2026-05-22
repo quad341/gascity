@@ -17,6 +17,7 @@ CITY_BEADS_DIR="$CITY_ABS/.beads"
 # Configurable thresholds.
 MAX_AGE="${GC_REAPER_MAX_AGE:-24h}"
 PURGE_AGE="${GC_REAPER_PURGE_AGE:-168h}"
+MSG_WISP_AGE="${GC_REAPER_MSG_WISP_AGE:-$PURGE_AGE}"
 STALE_ISSUE_AGE="${GC_REAPER_STALE_ISSUE_AGE:-720h}"
 SESSION_PURGE_AGE="${GC_REAPER_SESSION_PURGE_AGE:-720h}"
 ALERT_THRESHOLD="${GC_REAPER_ALERT_THRESHOLD:-500}"
@@ -31,6 +32,7 @@ duration_to_hours() {
 
 MAX_AGE_H=$(duration_to_hours "$MAX_AGE")
 PURGE_AGE_H=$(duration_to_hours "$PURGE_AGE")
+MSG_WISP_AGE_H=$(duration_to_hours "$MSG_WISP_AGE")
 STALE_AGE_H=$(duration_to_hours "$STALE_ISSUE_AGE")
 
 CITY_DB_METADATA_RESULT=""
@@ -136,6 +138,9 @@ CITY_DB_ANOMALY_RECORDED=0
 valid_database_identifier() {
     local name="$1"
 
+    # Quarantined databases must use underscores, not dots:
+    # e.g., mcdclient_broken_20260519_0837, not mcdclient.broken-20260519-0837.
+    # Databases with dots are skipped here and cannot be cleaned by automated paths.
     case "$name" in
         ''|-*|*[!A-Za-z0-9_-]*)
             return 1
@@ -352,6 +357,7 @@ while IFS= read -r DB; do
 
     CLOSE_WISP_COUNT=0
     DB_CLOSED_WISPS=0
+    DB_MSG_WISPS_CLOSED=0
     DB_PURGED=0
     while [ "$STALE_WISP_COUNT" -gt 0 ] && [ "$CLOSE_WISP_COUNT" -lt "$STALE_WISP_COUNT" ]; do
         get_sql_count "$DB" "schema-safe stale wisp" "
@@ -406,6 +412,27 @@ while IFS= read -r DB; do
             break
         fi
     done
+
+    # Step 1a: Close stale ephemeral message wisps by TTL alone. Mail-created
+    # message wisps have no parent-child edge, so Step 1 never matches them.
+    # closed_at=created_at lets Step 2 purge the existing backlog in this run.
+    if [ -z "$DRY_RUN" ]; then
+        if run_sql_change "$DB" "closing stale message wisps" "
+            UPDATE \`$DB\`.wisps
+            SET status='closed', closed_at=created_at
+            WHERE issue_type='message' AND ephemeral=1
+              AND status IN ('open', 'hooked', 'in_progress')
+              AND created_at < DATE_SUB(NOW(), INTERVAL $MSG_WISP_AGE_H HOUR)
+        "; then
+            MSG_WISP_ROWS=$SQL_CHANGE_ROWS_RESULT
+            if [ "$MSG_WISP_ROWS" -gt 0 ]; then
+                DB_MSG_WISPS_CLOSED=$((DB_MSG_WISPS_CLOSED + MSG_WISP_ROWS))
+                DB_CLOSED_WISPS=$((DB_CLOSED_WISPS + MSG_WISP_ROWS))
+                TOTAL_CLOSED_WISPS=$((TOTAL_CLOSED_WISPS + MSG_WISP_ROWS))
+                DB_MUTATIONS=$((DB_MUTATIONS + MSG_WISP_ROWS))
+            fi
+        fi
+    fi
 
     # Step 2: Purge — delete closed wisps past purge_age.
     get_sql_count "$DB" "closed wisp purge" "
@@ -488,15 +515,17 @@ while IFS= read -r DB; do
         fi
     fi
 
-    # Step 5: Anomaly check — open wisp count.
-    get_sql_count "$DB" "open wisp" "
+    # Step 5: Anomaly check — non-message open wisp count. Ephemeral message
+    # wisps have their own TTL path above; counting them here self-escalates.
+    get_sql_count "$DB" "non-message open wisp" "
         SELECT COUNT(*) FROM \`$DB\`.wisps
         WHERE status IN ('open', 'hooked', 'in_progress')
+        AND NOT (issue_type = 'message' AND ephemeral = 1)
     "
     OPEN_WISPS=$SQL_COUNT_RESULT
 
     if [ "$OPEN_WISPS" -gt "$ALERT_THRESHOLD" ]; then
-        ANOMALIES="${ANOMALIES}$DB: $OPEN_WISPS open wisps (threshold: $ALERT_THRESHOLD)\n"
+        ANOMALIES="${ANOMALIES}$DB: $OPEN_WISPS non-message open wisps (threshold: $ALERT_THRESHOLD)\n"
     fi
 
     # Commit Dolt changes. Must use CALL (not SELECT) and have an active
@@ -506,7 +535,7 @@ while IFS= read -r DB; do
     if [ -z "$DRY_RUN" ] && [ "$DB_MUTATIONS" -gt 0 ]; then
         if ! COMMIT_OUTPUT=$(dolt_sql -q "
             USE \`$DB\`;
-            CALL DOLT_COMMIT('-Am', 'reaper: stale_wisps=$STALE_WISP_COUNT closed_wisps=$DB_CLOSED_WISPS purged=$DB_PURGED stale_issues=$DB_ISSUES_CLOSED', '--author', 'reaper <reaper@gastown.local>')
+            CALL DOLT_COMMIT('-Am', 'reaper: stale_wisps=$STALE_WISP_COUNT closed_wisps=$DB_CLOSED_WISPS msg_wisps_closed=$DB_MSG_WISPS_CLOSED purged=$DB_PURGED stale_issues=$DB_ISSUES_CLOSED', '--author', 'reaper <reaper@gastown.local>')
         " 2>&1); then
             case "$COMMIT_OUTPUT" in
                 *"nothing to commit"*|*"Nothing to commit"*)

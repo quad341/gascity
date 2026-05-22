@@ -2301,6 +2301,9 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
+  *"issue_type='message'"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
   *"UPDATE "*"wisps SET status='closed'"*)
     printf 'ROW_COUNT()\n1\n'
     ;;
@@ -2371,6 +2374,9 @@ case "$*" in
     ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
+    ;;
+  *"issue_type='message'"*)
+    printf 'COUNT(*)\n0\n'
     ;;
   *"UPDATE "*"wisps SET status='closed'"*)
     printf 'ROW_COUNT()\n1\n'
@@ -2670,7 +2676,7 @@ exit 0
 	if !strings.Contains(log, "CALL DOLT_COMMIT") {
 		t.Fatalf("reaper did not commit successful close after failed purge:\n%s", log)
 	}
-	if !strings.Contains(log, "closed_wisps=1 purged=0") {
+	if !strings.Contains(log, "closed_wisps=1 msg_wisps_closed=0 purged=0") {
 		t.Fatalf("reaper commit did not report only successful purge rows:\n%s", log)
 	}
 	if strings.Contains(log, "purged=1") {
@@ -4034,6 +4040,9 @@ case "$*" in
     printf 'type,varchar,NO,,,\n'
   fi
   ;;
+*"issue_type='message'"*)
+  printf 'COUNT(*)\n0\n'
+  ;;
 *"SELECT *"*)
   printf '{"id":"ga-1","title":"sample"}\n'
   ;;
@@ -4095,6 +4104,183 @@ func mergeTestEnv(overrides map[string]string) []string {
 		env = append(env, key+"="+overrides[key])
 	}
 	return env
+}
+
+// writeMsgWispDoltStub writes a dolt stub that returns a non-zero row count for
+// Step 1a message-wisp updates and zero for unrelated COUNT queries.
+func writeMsgWispDoltStub(t *testing.T, path string) {
+	t.Helper()
+	writeExecutable(t, path, `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW COLUMNS FROM"*"dependencies"*)
+    printf 'Field,Type,Null,Key,Default,Extra\n'
+    printf 'issue_id,varchar,NO,,,\n'
+    printf 'depends_on_issue_id,varchar,YES,,,\n'
+    printf 'depends_on_wisp_id,varchar,YES,,,\n'
+    printf 'depends_on_external,varchar,YES,,,\n'
+    printf 'type,varchar,NO,,,\n'
+    ;;
+  *"UPDATE "*"issue_type='message'"*)
+    printf 'ROW_COUNT()\n5\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+  *"SELECT *"*)
+    printf '{"id":"ga-1","title":"sample"}\n'
+    ;;
+esac
+exit 0
+`)
+}
+
+func reaperBaseEnv(t *testing.T, doltLog, cityDir, stateDir, binDir string) map[string]string {
+	t.Helper()
+	return map[string]string{
+		"DOLT_ARGS_LOG":       doltLog,
+		"GC_CITY":             cityDir,
+		"GC_CITY_PATH":        cityDir,
+		"GC_PACK_STATE_DIR":   stateDir,
+		"GC_DOLT_HOST":        "127.0.0.1",
+		"GC_DOLT_PORT":        "3307",
+		"GC_DOLT_USER":        "root",
+		"GC_DOLT_PASSWORD":    "",
+		"GIT_CONFIG_GLOBAL":   filepath.Join(t.TempDir(), "gitconfig"),
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"PATH":                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+}
+
+// TestReaperStep1aClosesMessageWispsByTTLWithoutParentEdge verifies that
+// reaper.sh closes ephemeral message wisps by TTL without requiring a
+// parent-child edge.
+func TestReaperStep1aClosesMessageWispsByTTLWithoutParentEdge(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+
+	writeMsgWispDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"),
+		reaperBaseEnv(t, doltLog, cityDir, stateDir, binDir))
+
+	data, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(data)
+
+	if !strings.Contains(log, "issue_type='message'") {
+		t.Error("Step 1a missing: UPDATE must filter on issue_type='message'")
+	}
+	if !strings.Contains(log, "ephemeral=1") {
+		t.Error("Step 1a missing: UPDATE must filter on ephemeral=1")
+	}
+	if !strings.Contains(log, "closed_at=created_at") {
+		t.Error("Step 1a missing: must SET closed_at=created_at")
+	}
+}
+
+func TestReaperMsgWispAgeDefaultsToPurgeAge(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
+
+	env := reaperBaseEnv(t, doltLog, cityDir, stateDir, binDir)
+	env["GC_REAPER_PURGE_AGE"] = "48h"
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	data, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(data)
+
+	issueTypeIdx := strings.Index(log, "issue_type='message'")
+	if issueTypeIdx < 0 {
+		t.Fatalf("Step 1a query not found (no issue_type='message' in dolt log)")
+	}
+	const window = 600
+	start := issueTypeIdx - window
+	if start < 0 {
+		start = 0
+	}
+	end := issueTypeIdx + window
+	if end > len(log) {
+		end = len(log)
+	}
+	if !strings.Contains(log[start:end], "INTERVAL 48 HOUR") {
+		t.Errorf("Step 1a must use MSG_WISP_AGE defaulting to PURGE_AGE=48h (INTERVAL 48 HOUR not found near issue_type);\nlog region:\n%s", log[start:end])
+	}
+}
+
+func TestReaperStep5ExcludesEphemeralMessageWispsFromAlertCount(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"),
+		reaperBaseEnv(t, doltLog, cityDir, stateDir, binDir))
+
+	data, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(data)
+
+	hasExclusion := strings.Contains(log, "NOT (issue_type") ||
+		strings.Contains(log, "NOT(issue_type") ||
+		strings.Contains(log, "issue_type != 'message'") ||
+		strings.Contains(log, "issue_type <> 'message'")
+	if !hasExclusion {
+		t.Errorf("Step 5 COUNT does not exclude ephemeral message wisps from alert threshold;\ngot dolt log:\n%s", log)
+	}
+}
+
+func TestReaperDryRunDoesNotMutateMessageWisps(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+
+	writeMsgWispDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
+
+	env := reaperBaseEnv(t, doltLog, cityDir, stateDir, binDir)
+	env["GC_REAPER_DRY_RUN"] = "1"
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	data, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(data)
+
+	if strings.Contains(log, "UPDATE") && strings.Contains(log, "issue_type='message'") {
+		t.Errorf("dry-run mode must not execute Step 1a UPDATE for message wisps;\ngot dolt log:\n%s", log)
+	}
 }
 
 // jsonlExportEnv builds the common env map used by the spike-detection tests

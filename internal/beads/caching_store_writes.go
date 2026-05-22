@@ -21,8 +21,7 @@ func (c *CachingStore) Create(b Bead) (Bead, error) {
 
 	c.mu.Lock()
 	c.noteLocalMutationLocked(created.ID)
-	c.beads[created.ID] = cloneBead(created)
-	c.deps[created.ID] = depsFromBeadFields(created)
+	c.cacheWrittenBeadLocked(created.ID, created)
 	delete(c.dirty, created.ID)
 	delete(c.deletedSeq, created.ID)
 	c.markFreshLocked(time.Now())
@@ -61,8 +60,7 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 
 	c.mu.Lock()
 	c.noteLocalMutationLocked(id)
-	c.beads[id] = cloneBead(fresh)
-	c.deps[id] = depsFromBeadFields(fresh)
+	c.cacheWrittenBeadLocked(id, fresh)
 	delete(c.dirty, id)
 	delete(c.deletedSeq, id)
 	c.markFreshLocked(time.Now())
@@ -98,7 +96,28 @@ func (c *CachingStore) Close(id string) error {
 
 	c.mu.Lock()
 	c.noteLocalMutationLocked(id)
-	if b, ok := c.beads[id]; ok {
+	if b, ok := c.wisps[id]; ok {
+		b.Status = "closed"
+		c.wisps[id] = b
+		delete(c.beads, id)
+		delete(c.deps, id)
+		delete(c.dirty, id)
+		delete(c.deletedSeq, id)
+		closed = cloneBead(b)
+		found = true
+		c.markFreshLocked(time.Now())
+		c.updateStatsLocked()
+	} else if found && closed.Ephemeral {
+		if c.wispsState != cacheUninitialized {
+			c.wisps[id] = cloneBead(closed)
+		}
+		delete(c.beads, id)
+		delete(c.deps, id)
+		delete(c.dirty, id)
+		delete(c.deletedSeq, id)
+		c.markFreshLocked(time.Now())
+		c.updateStatsLocked()
+	} else if b, ok := c.beads[id]; ok {
 		b.Status = "closed"
 		c.beads[id] = b
 		delete(c.dirty, id)
@@ -140,7 +159,28 @@ func (c *CachingStore) Reopen(id string) error {
 
 	c.mu.Lock()
 	c.noteLocalMutationLocked(id)
-	if b, ok := c.beads[id]; ok {
+	if b, ok := c.wisps[id]; ok {
+		b.Status = "open"
+		c.wisps[id] = b
+		delete(c.beads, id)
+		delete(c.deps, id)
+		delete(c.dirty, id)
+		delete(c.deletedSeq, id)
+		reopened = cloneBead(b)
+		found = true
+		c.markFreshLocked(time.Now())
+		c.updateStatsLocked()
+	} else if found && reopened.Ephemeral {
+		if c.wispsState != cacheUninitialized {
+			c.wisps[id] = cloneBead(reopened)
+		}
+		delete(c.beads, id)
+		delete(c.deps, id)
+		delete(c.dirty, id)
+		delete(c.deletedSeq, id)
+		c.markFreshLocked(time.Now())
+		c.updateStatsLocked()
+	} else if b, ok := c.beads[id]; ok {
 		b.Status = "open"
 		c.beads[id] = b
 		delete(c.dirty, id)
@@ -199,7 +239,21 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 	}
 	for _, item := range refreshed {
 		previous, hadPrevious := c.beads[item.id]
-		c.beads[item.id] = cloneBead(item.bead)
+		if wispPrevious, ok := c.wisps[item.id]; ok {
+			previous = wispPrevious
+			hadPrevious = true
+		}
+		if c.cacheWrittenBeadLocked(item.id, item.bead) {
+			delete(c.dirty, item.id)
+			delete(c.deletedSeq, item.id)
+			if hadPrevious && previous.Status != "closed" && item.bead.Status == "closed" {
+				notifications = append(notifications, cacheNotification{
+					eventType: "bead.closed",
+					bead:      cloneBead(item.bead),
+				})
+			}
+			continue
+		}
 		delete(c.dirty, item.id)
 		delete(c.deletedSeq, item.id)
 		if item.bead.Status == "closed" {
@@ -239,7 +293,17 @@ func (c *CachingStore) SetMetadata(id, key, value string) error {
 
 	c.mu.Lock()
 	c.noteLocalMutationLocked(id)
-	if b, ok := c.beads[id]; ok {
+	if b, ok := c.wisps[id]; ok {
+		if b.Metadata == nil {
+			b.Metadata = make(map[string]string)
+		}
+		b.Metadata[key] = value
+		c.wisps[id] = b
+		delete(c.beads, id)
+		delete(c.deps, id)
+		delete(c.dirty, id)
+		delete(c.deletedSeq, id)
+	} else if b, ok := c.beads[id]; ok {
 		if b.Metadata == nil {
 			b.Metadata = make(map[string]string)
 		}
@@ -274,7 +338,19 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 
 	c.mu.Lock()
 	c.noteLocalMutationLocked(id)
-	if b, ok := c.beads[id]; ok {
+	if b, ok := c.wisps[id]; ok {
+		if b.Metadata == nil {
+			b.Metadata = make(map[string]string, len(kvs))
+		}
+		for k, v := range kvs {
+			b.Metadata[k] = v
+		}
+		c.wisps[id] = b
+		delete(c.beads, id)
+		delete(c.deps, id)
+		delete(c.dirty, id)
+		delete(c.deletedSeq, id)
+	} else if b, ok := c.beads[id]; ok {
 		if b.Metadata == nil {
 			b.Metadata = make(map[string]string, len(kvs))
 		}
@@ -399,9 +475,12 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 	for _, item := range refreshed {
 		if item.found {
 			previous, hadPrevious := c.beads[item.id]
+			if wispPrevious, ok := c.wisps[item.id]; ok {
+				previous = wispPrevious
+				hadPrevious = true
+			}
 			fresh := cloneBead(item.bead)
-			c.beads[item.id] = fresh
-			c.deps[item.id] = depsFromBeadFields(fresh)
+			c.cacheWrittenBeadLocked(item.id, fresh)
 			delete(c.dirty, item.id)
 			delete(c.deletedSeq, item.id)
 			eventType := "bead.updated"
@@ -417,7 +496,18 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 			continue
 		}
 		if item.closed {
-			if b, ok := c.beads[item.id]; ok {
+			if b, ok := c.wisps[item.id]; ok {
+				b.Status = "closed"
+				c.wisps[item.id] = b
+				delete(c.beads, item.id)
+				delete(c.deps, item.id)
+				delete(c.dirty, item.id)
+				delete(c.deletedSeq, item.id)
+				notifications = append(notifications, cacheNotification{
+					eventType: "bead.closed",
+					bead:      cloneBead(b),
+				})
+			} else if b, ok := c.beads[item.id]; ok {
 				b.Status = "closed"
 				c.beads[item.id] = b
 				delete(c.dirty, item.id)
@@ -438,6 +528,25 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 	c.mu.Unlock()
 
 	c.notifyChanges(notifications)
+}
+
+func (c *CachingStore) cacheWrittenBeadLocked(id string, bead Bead) bool {
+	if bead.Ephemeral || c.wispsContainsLocked(id) {
+		delete(c.beads, id)
+		delete(c.deps, id)
+		if c.wispsState != cacheUninitialized {
+			c.wisps[id] = cloneBead(bead)
+		}
+		return true
+	}
+	c.beads[id] = cloneBead(bead)
+	c.deps[id] = depsFromBeadFields(bead)
+	return false
+}
+
+func (c *CachingStore) wispsContainsLocked(id string) bool {
+	_, ok := c.wisps[id]
+	return ok
 }
 
 // updateMatchesCached returns true when every non-nil field in opts already
@@ -663,6 +772,7 @@ func (c *CachingStore) Delete(id string) error {
 	c.mu.Lock()
 	seq := c.noteLocalMutationLocked(id)
 	delete(c.beads, id)
+	delete(c.wisps, id)
 	delete(c.deps, id)
 	delete(c.dirty, id)
 	delete(c.beadSeq, id)

@@ -26,6 +26,10 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	if !c.ownsBeadID(patch.ID) {
 		return
 	}
+	if c.eventTargetsWisp(patch) {
+		c.applyWispsEvent(eventType, patch, fields)
+		return
+	}
 
 	now := time.Now()
 	c.mu.RLock()
@@ -181,6 +185,92 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 
 	if mutated {
 		c.markFreshLocked(time.Now())
+	}
+}
+
+func (c *CachingStore) eventTargetsWisp(patch Bead) bool {
+	if patch.Ephemeral {
+		return true
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.wispsContainsLocked(patch.ID)
+}
+
+func (c *CachingStore) applyWispsEvent(eventType string, b Bead, fields map[string]json.RawMessage) {
+	c.mu.RLock()
+	if c.wispsState == cacheUninitialized {
+		c.mu.RUnlock()
+		return
+	}
+	_, cached := c.wisps[b.ID]
+	c.mu.RUnlock()
+
+	refreshedFromBacking := false
+	if !cached && eventType == "bead.created" {
+		fresh, err := c.backing.Get(b.ID)
+		switch {
+		case err == nil:
+			b = fresh
+			refreshedFromBacking = true
+		case errors.Is(err, ErrNotFound):
+		default:
+			c.recordProblem(fmt.Sprintf("refresh wisps %s event", eventType), err)
+		}
+	}
+	if !b.Ephemeral {
+		b.Ephemeral = true
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.wispsState == cacheUninitialized {
+		return
+	}
+
+	mutated := false
+	switch eventType {
+	case "bead.created":
+		if _, exists := c.wisps[b.ID]; !exists {
+			c.wisps[b.ID] = cloneBead(b)
+			mutated = true
+		}
+	case "bead.updated":
+		if existing, ok := c.wisps[b.ID]; ok {
+			merged := mergeCacheEventPatch(existing, b, fields)
+			if !merged.Ephemeral {
+				merged.Ephemeral = true
+			}
+			if beadChanged(existing, merged, false) {
+				c.wisps[b.ID] = cloneBead(merged)
+				mutated = true
+			}
+		} else {
+			c.wisps[b.ID] = cloneBead(b)
+			mutated = true
+		}
+	case "bead.closed":
+		if existing, ok := c.wisps[b.ID]; ok {
+			if existing.Status != "closed" {
+				existing.Status = "closed"
+				c.wisps[b.ID] = existing
+				mutated = true
+			}
+		} else {
+			b.Status = "closed"
+			c.wisps[b.ID] = cloneBead(b)
+			mutated = true
+		}
+	default:
+		return
+	}
+	if refreshedFromBacking || mutated {
+		delete(c.beads, b.ID)
+		delete(c.deps, b.ID)
+		delete(c.dirty, b.ID)
+		delete(c.deletedSeq, b.ID)
+		c.markFreshLocked(time.Now())
+		c.updateStatsLocked()
 	}
 }
 

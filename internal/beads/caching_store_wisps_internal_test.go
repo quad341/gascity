@@ -301,6 +301,41 @@ func TestCachingStoreCachedListSupportsWispsAndBothTiers(t *testing.T) {
 	}
 }
 
+func TestCachingStoreRepeatedWispsReadsStayInCache(t *testing.T) {
+	backing := &wispsRecordingStore{Store: NewMemStore()}
+	issue, err := backing.Create(Bead{Title: "issue mail", Labels: []string{"mail-check"}})
+	if err != nil {
+		t.Fatalf("Create issue: %v", err)
+	}
+	wisp, err := backing.Create(Bead{Title: "wisp mail", Labels: []string{"mail-check"}, Ephemeral: true})
+	if err != nil {
+		t.Fatalf("Create wisp: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	backing.resetListCalls()
+
+	for i := 0; i < 25; i++ {
+		wisps, err := cache.List(ListQuery{Label: "mail-check", TierMode: TierWisps})
+		if err != nil {
+			t.Fatalf("List TierWisps pass %d: %v", i, err)
+		}
+		requireBeadIDs(t, wisps, wisp.ID)
+
+		both, err := cache.List(ListQuery{Label: "mail-check", TierMode: TierBoth, Sort: SortCreatedAsc})
+		if err != nil {
+			t.Fatalf("List TierBoth pass %d: %v", i, err)
+		}
+		requireBeadIDs(t, both, issue.ID, wisp.ID)
+	}
+
+	if backing.listCalls != 0 {
+		t.Fatalf("repeated cached wisps reads made %d backing List calls, want 0", backing.listCalls)
+	}
+}
+
 func TestCachingStoreEphemeralWritesUpdateWispsCache(t *testing.T) {
 	backing := NewMemStore()
 	cache := NewCachingStoreForTest(backing, nil)

@@ -59,7 +59,7 @@ func TestCachingStoreRunReconciliationSkipLabelsSuppressesLabelOnlyUpdates(t *te
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
-	if got := backing.lastListQuery(t); !got.SkipLabels {
+	if got := backing.lastIssueListQuery(t); !got.SkipLabels {
 		t.Fatalf("Prime List query SkipLabels = false, want true")
 	}
 
@@ -108,6 +108,17 @@ func (s *skipLabelsRecordingStore) lastListQuery(t *testing.T) ListQuery {
 		t.Fatal("no List query recorded")
 	}
 	return s.listQueries[len(s.listQueries)-1]
+}
+
+func (s *skipLabelsRecordingStore) lastIssueListQuery(t *testing.T) ListQuery {
+	t.Helper()
+	for i := len(s.listQueries) - 1; i >= 0; i-- {
+		if s.listQueries[i].TierMode == TierIssues {
+			return s.listQueries[i]
+		}
+	}
+	t.Fatal("no TierIssues List query recorded")
+	return ListQuery{}
 }
 
 func TestCachingStoreListInProgressUsesCacheByDefault(t *testing.T) {
@@ -1594,14 +1605,16 @@ func TestCachingStoreCachedListReturnsSnapshotWithDirtyEntries(t *testing.T) {
 	}
 }
 
-func TestCachingStoreCachedListRefusesNonIssuesTierQueries(t *testing.T) {
+func TestCachingStoreCachedListSupportsNonIssuesTierQueries(t *testing.T) {
 	t.Parallel()
 
 	backing := NewMemStore()
-	if _, err := backing.Create(Bead{Title: "plain", Labels: []string{"k"}}); err != nil {
+	plain, err := backing.Create(Bead{Title: "plain", Labels: []string{"k"}})
+	if err != nil {
 		t.Fatalf("Create plain: %v", err)
 	}
-	if _, err := backing.Create(Bead{Title: "wisp", Labels: []string{"k"}, Ephemeral: true}); err != nil {
+	wisp, err := backing.Create(Bead{Title: "wisp", Labels: []string{"k"}, Ephemeral: true})
+	if err != nil {
 		t.Fatalf("Create wisp: %v", err)
 	}
 	cache := NewCachingStoreForTest(backing, nil)
@@ -1609,10 +1622,22 @@ func TestCachingStoreCachedListRefusesNonIssuesTierQueries(t *testing.T) {
 		t.Fatalf("Prime: %v", err)
 	}
 
-	for _, tier := range []TierMode{TierWisps, TierBoth} {
-		if rows, ok := cache.CachedList(ListQuery{Label: "k", TierMode: tier}); ok {
-			t.Fatalf("CachedList tier %v ok=true rows=%#v, want ok=false", tier, rows)
-		}
+	cases := []struct {
+		name    string
+		tier    TierMode
+		wantIDs []string
+	}{
+		{name: "wisps", tier: TierWisps, wantIDs: []string{wisp.ID}},
+		{name: "both", tier: TierBoth, wantIDs: []string{plain.ID, wisp.ID}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, ok := cache.CachedList(ListQuery{Label: "k", TierMode: tc.tier})
+			if !ok {
+				t.Fatalf("CachedList tier %v ok=false, want true", tc.tier)
+			}
+			requireBeadIDs(t, rows, tc.wantIDs...)
+		})
 	}
 }
 
@@ -1652,6 +1677,9 @@ func (s *partialListErrorStore) List(query ListQuery) ([]Bead, error) {
 	items, err := s.Store.List(query)
 	if err != nil {
 		return nil, err
+	}
+	if query.TierMode == TierWisps {
+		return items, nil
 	}
 	if s.partialStatuses[query.Status] || (s.partialAllowScan && query.AllowScan) {
 		if s.partialRows != nil {

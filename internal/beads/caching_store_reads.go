@@ -15,12 +15,11 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
-	// The cache only holds the issues tier (PrimeActive/Prime call the
-	// backing store without a TierMode). Wisps and union queries must
-	// reach the backing store directly so we do not return a stale or
-	// incomplete snapshot of the wisps table.
-	if query.TierMode != TierIssues {
-		return c.backing.List(query)
+	switch query.TierMode {
+	case TierWisps:
+		return c.listFromWispsCache(query)
+	case TierBoth:
+		return c.listFromBothCaches(query)
 	}
 	if query.Live || query.ParentID != "" {
 		c.mu.RLock()
@@ -103,14 +102,86 @@ func liveListQuery(query ListQuery) ListQuery {
 	return query
 }
 
+func (c *CachingStore) listFromWispsCache(query ListQuery) ([]Bead, error) {
+	if query.Live || query.Status == "closed" || query.IncludeClosed {
+		return c.backing.List(liveListQuery(query))
+	}
+
+	c.mu.RLock()
+	if c.wispsState != cacheLive {
+		c.mu.RUnlock()
+		return c.backing.List(liveListQuery(query))
+	}
+	cached := make([]Bead, 0, len(c.wisps))
+	for _, b := range c.wisps {
+		if !query.Matches(b) {
+			continue
+		}
+		cached = append(cached, cloneBead(b))
+	}
+	c.mu.RUnlock()
+	return finishCachedList(cached, query), nil
+}
+
+func (c *CachingStore) listFromBothCaches(query ListQuery) ([]Bead, error) {
+	if query.Live {
+		return c.backing.List(liveListQuery(query))
+	}
+
+	c.mu.RLock()
+	issuesCacheable := (c.state == cacheLive || c.state == cachePartial) &&
+		len(c.dirty) == 0 &&
+		c.primePartialErr == nil
+	wispsCacheable := c.wispsState == cacheLive &&
+		query.Status != "closed" &&
+		!query.IncludeClosed
+	c.mu.RUnlock()
+
+	if !issuesCacheable && !wispsCacheable {
+		return c.backing.List(liveListQuery(query))
+	}
+
+	issuesQ := query
+	issuesQ.TierMode = TierIssues
+	var issues []Bead
+	var issuesErr error
+	if issuesCacheable {
+		issues, issuesErr = c.List(issuesQ)
+	} else {
+		issues, issuesErr = c.backing.List(liveListQuery(issuesQ))
+	}
+
+	wispsQ := query
+	wispsQ.TierMode = TierWisps
+	var wisps []Bead
+	var wispsErr error
+	if wispsCacheable {
+		wisps, wispsErr = c.listFromWispsCache(wispsQ)
+	} else {
+		wisps, wispsErr = c.backing.List(liveListQuery(wispsQ))
+	}
+
+	if issuesErr != nil && wispsErr != nil {
+		return nil, fmt.Errorf("list both tiers: issues: %w; wisps: %w", issuesErr, wispsErr)
+	}
+	merged := mergeTierResults(issues, wisps, query)
+	if issuesErr != nil {
+		return merged, issuesErr
+	}
+	return merged, wispsErr
+}
+
 // CachedList returns query results from the in-memory cache only. The boolean
 // reports whether the cache was initialized enough to answer without touching
 // the backing store. Dirty entries are returned from the last observed
 // snapshot; callers must treat this as a read model that may lag writes or
 // reconciliation by one tick.
 func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
-	if query.TierMode != TierIssues {
-		return nil, false
+	switch query.TierMode {
+	case TierWisps:
+		return c.cachedListWisps(query)
+	case TierBoth:
+		return c.cachedListBoth(query)
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -127,11 +198,93 @@ func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
 		}
 		cached = append(cached, cloneBead(b))
 	}
-	sortBeadsForQuery(cached, query.Sort)
-	if query.Limit > 0 && len(cached) > query.Limit {
-		cached = cached[:query.Limit]
+	return finishCachedList(cached, query), true
+}
+
+func (c *CachingStore) cachedListWisps(query ListQuery) ([]Bead, bool) {
+	if query.Status == "closed" || query.IncludeClosed {
+		return nil, false
 	}
-	return cached, true
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.wispsState != cacheLive {
+		return nil, false
+	}
+	cached := make([]Bead, 0, len(c.wisps))
+	for _, b := range c.wisps {
+		if !query.Matches(b) {
+			continue
+		}
+		cached = append(cached, cloneBead(b))
+	}
+	return finishCachedList(cached, query), true
+}
+
+func (c *CachingStore) cachedListBoth(query ListQuery) ([]Bead, bool) {
+	if query.Status == "closed" || query.IncludeClosed {
+		return nil, false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.state != cacheLive && c.state != cachePartial {
+		return nil, false
+	}
+	if c.wispsState != cacheLive || c.primePartialErr != nil || len(c.dirty) > 0 {
+		return nil, false
+	}
+	merged := mergeTierResultsFromMaps(c.beads, c.wisps, query)
+	return finishCachedList(merged, query), true
+}
+
+func mergeTierResults(issues, wisps []Bead, query ListQuery) []Bead {
+	seen := make(map[string]struct{}, len(issues)+len(wisps))
+	merged := make([]Bead, 0, len(issues)+len(wisps))
+	for _, b := range issues {
+		if _, ok := seen[b.ID]; ok {
+			continue
+		}
+		merged = append(merged, cloneBead(b))
+		seen[b.ID] = struct{}{}
+	}
+	for _, b := range wisps {
+		if _, ok := seen[b.ID]; ok {
+			continue
+		}
+		merged = append(merged, cloneBead(b))
+		seen[b.ID] = struct{}{}
+	}
+	return finishCachedList(merged, query)
+}
+
+func mergeTierResultsFromMaps(issues, wisps map[string]Bead, query ListQuery) []Bead {
+	seen := make(map[string]struct{}, len(issues)+len(wisps))
+	merged := make([]Bead, 0, len(issues)+len(wisps))
+	for _, b := range issues {
+		if !query.Matches(b) {
+			continue
+		}
+		merged = append(merged, cloneBead(b))
+		seen[b.ID] = struct{}{}
+	}
+	for _, b := range wisps {
+		if _, ok := seen[b.ID]; ok {
+			continue
+		}
+		if !query.Matches(b) {
+			continue
+		}
+		merged = append(merged, cloneBead(b))
+		seen[b.ID] = struct{}{}
+	}
+	return merged
+}
+
+func finishCachedList(items []Bead, query ListQuery) []Bead {
+	sortBeadsForQuery(items, query.Sort)
+	if query.Limit > 0 && len(items) > query.Limit {
+		items = items[:query.Limit]
+	}
+	return items
 }
 
 func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, items []Bead) []Bead {

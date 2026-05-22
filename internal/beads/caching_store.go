@@ -45,10 +45,16 @@ type CachingStore struct {
 	reconciling  atomic.Bool
 	syncFailures int
 	stats        CacheStats
-	onChange     func(eventType, beadID string, payload json.RawMessage)
-	cancelFn     context.CancelFunc
-	problemf     func(string)
-	problemLog   map[string]cacheProblemLogState
+	wisps        map[string]Bead
+	wispsState   cacheState
+	// wispsLastFreshAt tracks the last successful full wisps-tier load.
+	wispsLastFreshAt time.Time
+	// wispsSyncFailures counts consecutive wisps-tier synchronization failures.
+	wispsSyncFailures int
+	onChange          func(eventType, beadID string, payload json.RawMessage)
+	cancelFn          context.CancelFunc
+	problemf          func(string)
+	problemLog        map[string]cacheProblemLogState
 
 	// latencyWindow holds the most recent reconciliation bd-list
 	// durations for adaptive cadence decisions. Bounded at
@@ -111,6 +117,16 @@ type CacheStats struct {
 	// "latency" (P95 above the high-water mark), or "both" (bead count
 	// and latency both push to MEDIUM).
 	CadenceDriver string
+	// WispsBeadCount is the number of cached open ephemeral beads.
+	WispsBeadCount int
+	// WispsLastFreshAt is the last successful full wisps-tier load time.
+	WispsLastFreshAt time.Time
+	// WispsSyncFailures is the consecutive failure count for wisps sync.
+	WispsSyncFailures int
+	// WispsState reports the wisps cache state.
+	WispsState string
+	// WispsLastProblemAt is the last wisps-specific synchronization problem.
+	WispsLastProblemAt time.Time
 }
 
 const (
@@ -240,6 +256,7 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 		beadSeq:     make(map[string]uint64),
 		localBeadAt: make(map[string]time.Time),
 		deletedSeq:  make(map[string]uint64),
+		wisps:       make(map[string]Bead),
 		problemLog:  make(map[string]cacheProblemLogState),
 		onChange:    onChange,
 		problemf: func(msg string) {
@@ -364,6 +381,40 @@ func (c *CachingStore) PrimeActive() error {
 	return nil
 }
 
+// PrimeWisps loads open ephemeral beads into the wisps cache.
+// Failure is non-fatal: callers can continue to fall through to the backing
+// store until a later prime or reconcile succeeds.
+func (c *CachingStore) PrimeWisps() error {
+	all, err := c.backing.List(ListQuery{
+		TierMode:  TierWisps,
+		AllowScan: true,
+		Status:    "open",
+	})
+	if err != nil {
+		c.mu.Lock()
+		c.stats.WispsLastProblemAt = time.Now()
+		c.recordProblemLocked("prime wisps cache", err)
+		c.updateStatsLocked()
+		c.mu.Unlock()
+		return err
+	}
+
+	next := make(map[string]Bead, len(all))
+	for _, b := range all {
+		next[b.ID] = cloneBead(b)
+	}
+
+	now := time.Now()
+	c.mu.Lock()
+	c.wisps = next
+	c.wispsState = cacheLive
+	c.wispsLastFreshAt = now
+	c.wispsSyncFailures = 0
+	c.updateStatsLocked()
+	c.mu.Unlock()
+	return nil
+}
+
 // Prime loads all active beads and deps from the backing store into memory.
 // Retries up to 3 times on failure since bd list can time out under
 // concurrent dolt load.
@@ -407,7 +458,6 @@ func (c *CachingStore) Prime(_ context.Context) error {
 
 	now := time.Now()
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.mutationSeq == startSeq {
 		nextBeads := beadMap
 		nextDeps := depsFromBeads(beadMap, depMap, depsComplete && depErr == nil)
@@ -467,6 +517,8 @@ func (c *CachingStore) Prime(_ context.Context) error {
 	c.primePartialErr = partialErr
 	c.markFreshLocked(now)
 	c.updateStatsLocked()
+	c.mu.Unlock()
+	_ = c.PrimeWisps()
 	return nil
 }
 
@@ -514,6 +566,7 @@ func (c *CachingStore) Stats() CacheStats {
 	default:
 		s.State = "uninitialized"
 	}
+	s.WispsState = cacheStateName(c.wispsState)
 	return s
 }
 
@@ -584,7 +637,24 @@ func (c *CachingStore) updateStatsLocked() {
 	}
 	c.stats.TotalDeps = totalDeps
 	c.stats.SyncFailures = c.syncFailures
+	c.stats.WispsBeadCount = len(c.wisps)
+	c.stats.WispsLastFreshAt = c.wispsLastFreshAt
+	c.stats.WispsSyncFailures = c.wispsSyncFailures
+	c.stats.WispsState = cacheStateName(c.wispsState)
 	c.updateCadenceStatsLocked()
+}
+
+func cacheStateName(state cacheState) string {
+	switch state {
+	case cachePartial:
+		return "partial"
+	case cacheLive:
+		return "live"
+	case cacheDegraded:
+		return "degraded"
+	default:
+		return "uninitialized"
+	}
 }
 
 func beadIDs(beadMap map[string]Bead) []string {

@@ -8,6 +8,11 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/benchmarks/coordstore"
+	"github.com/gastownhall/gascity/internal/benchmarks/coordstore/adapters/authorcore"
+	"github.com/gastownhall/gascity/internal/benchmarks/coordstore/adapters/boltdb"
+	"github.com/gastownhall/gascity/internal/benchmarks/coordstore/adapters/couchdb"
+	"github.com/gastownhall/gascity/internal/benchmarks/coordstore/adapters/dolt"
+	"github.com/gastownhall/gascity/internal/benchmarks/coordstore/adapters/postgres"
 	"github.com/gastownhall/gascity/internal/benchmarks/coordstore/adapters/sqlite"
 )
 
@@ -18,15 +23,44 @@ type adapterFactory struct {
 }
 
 // registeredAdapters is the list of backends exercised by the suite.
-// To add a new backend: implement coordstore.StoreAdapter and append here.
-var registeredAdapters = []adapterFactory{
-	{
-		name:  "sqlite",
-		newFn: func() coordstore.StoreAdapter { return sqlite.New() },
-	},
-	// To add: HQStore (author-own), bbolt, BadgerDB — implement StoreAdapter
-	// in adapters/<name>/ and register here. The suite drives the same workload
-	// against every backend and compares scorecards side-by-side.
+// External backends are opt-in so normal CI does not require Docker or a
+// running Dolt SQL server.
+var registeredAdapters = buildRegisteredAdapters()
+
+func buildRegisteredAdapters() []adapterFactory {
+	adapters := []adapterFactory{
+		{
+			name:  "sqlite",
+			newFn: func() coordstore.StoreAdapter { return sqlite.New() },
+		},
+		{
+			name:  "bbolt",
+			newFn: func() coordstore.StoreAdapter { return boltdb.New() },
+		},
+		{
+			name:  "authorcore",
+			newFn: func() coordstore.StoreAdapter { return authorcore.New() },
+		},
+	}
+	if dsn := os.Getenv("COORDSTORE_POSTGRES_DSN"); dsn != "" {
+		adapters = append(adapters, adapterFactory{
+			name:  "postgres",
+			newFn: func() coordstore.StoreAdapter { return postgres.New(dsn) },
+		})
+	}
+	if rawURL := os.Getenv("COORDSTORE_COUCHDB_URL"); rawURL != "" {
+		adapters = append(adapters, adapterFactory{
+			name:  "couchdb",
+			newFn: func() coordstore.StoreAdapter { return couchdb.New(rawURL) },
+		})
+	}
+	if dsn := os.Getenv("COORDSTORE_DOLT_DSN"); dsn != "" {
+		adapters = append(adapters, adapterFactory{
+			name:  "dolt",
+			newFn: func() coordstore.StoreAdapter { return dolt.New(dsn) },
+		})
+	}
+	return adapters
 }
 
 // TestBenchmarkSuite is the primary end-to-end benchmark. It:

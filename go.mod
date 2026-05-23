@@ -8,6 +8,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/invopop/jsonschema v0.13.0
+	github.com/lib/pq v1.10.9
 	github.com/oapi-codegen/runtime v1.4.0
 	github.com/pb33f/libopenapi v0.36.1
 	github.com/pb33f/libopenapi-validator v0.13.4
@@ -16,6 +17,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.11.1
+	go.etcd.io/bbolt v1.4.3
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.19.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.43.0
@@ -26,10 +28,12 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.43.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.42.0
+	golang.org/x/term v0.41.0
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.35.2
 	k8s.io/apimachinery v0.35.2
 	k8s.io/client-go v0.35.2
+	modernc.org/sqlite v1.50.1
 	pgregory.net/rapid v1.2.0
 )
 
@@ -80,7 +84,6 @@ require (
 	go.yaml.in/yaml/v4 v4.0.0-rc.4 // indirect
 	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
-	golang.org/x/term v0.41.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	golang.org/x/tools v0.42.0 // indirect
@@ -96,7 +99,6 @@ require (
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.50.1 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect

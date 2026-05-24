@@ -13,15 +13,18 @@ var hqStoreTTLLogf = log.Printf
 type hqTTLSweepResult struct {
 	Expired   int
 	Retention int
-	Backstop  hqBackstopReclaim
+	Backstop  HQStoreBackstopReclaim
 }
 
-type hqBackstopReclaim struct {
+// HQStoreBackstopReclaim records how many stale closed records a backstop
+// sweep reclaimed from each HQStore tier.
+type HQStoreBackstopReclaim struct {
 	Main      int
 	Ephemeral int
 }
 
-func (r hqBackstopReclaim) total() int {
+// Total returns the aggregate reclaim count across all HQStore tiers.
+func (r HQStoreBackstopReclaim) Total() int {
 	return r.Main + r.Ephemeral
 }
 
@@ -82,11 +85,13 @@ func (s *HQStore) DrainRetentionQueue() int {
 // than the supplied tier cutoff. It scans main-tier and ephemeral records with
 // their respective cutoffs and returns the total number deleted.
 func (s *HQStore) PurgeBackstop(mainCutoff, ephemeralCutoff time.Duration) (int, error) {
-	reclaim, err := s.purgeBackstop(mainCutoff, ephemeralCutoff)
-	return reclaim.total(), err
+	reclaim, err := s.PurgeBackstopDetailed(mainCutoff, ephemeralCutoff)
+	return reclaim.Total(), err
 }
 
-func (s *HQStore) purgeBackstop(mainCutoff, ephemeralCutoff time.Duration) (hqBackstopReclaim, error) {
+// PurgeBackstopDetailed removes orphaned closed records and returns per-tier
+// reclaim counts for diagnostics and benchmark assertions.
+func (s *HQStore) PurgeBackstopDetailed(mainCutoff, ephemeralCutoff time.Duration) (HQStoreBackstopReclaim, error) {
 	now := time.Now()
 	mainBefore := now.Add(-mainCutoff)
 	ephemeralBefore := now.Add(-ephemeralCutoff)
@@ -94,7 +99,7 @@ func (s *HQStore) purgeBackstop(mainCutoff, ephemeralCutoff time.Duration) (hqBa
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureOpenLocked(); err != nil {
-		return hqBackstopReclaim{}, err
+		return HQStoreBackstopReclaim{}, err
 	}
 
 	type candidate struct {
@@ -114,7 +119,7 @@ func (s *HQStore) purgeBackstop(mainCutoff, ephemeralCutoff time.Duration) (hqBa
 		}
 	}
 
-	var reclaim hqBackstopReclaim
+	var reclaim HQStoreBackstopReclaim
 	for _, candidate := range candidates {
 		s.deleteLocked(candidate.id)
 		if candidate.ephemeral {
@@ -138,7 +143,7 @@ func (s *HQStore) runTTLSweep() hqTTLSweepResult {
 
 	result.Retention = s.DrainRetentionQueue()
 
-	backstop, err := s.purgeBackstop(s.mainTierBackstopTTL, s.ephemeralBackstopTTL)
+	backstop, err := s.PurgeBackstopDetailed(s.mainTierBackstopTTL, s.ephemeralBackstopTTL)
 	if err != nil {
 		hqStoreTTLLogf("hqstore ttl sweep: purge backstop: %v", err)
 		return result
@@ -148,8 +153,8 @@ func (s *HQStore) runTTLSweep() hqTTLSweepResult {
 	return result
 }
 
-func (s *HQStore) reportBackstopReclaim(reclaim hqBackstopReclaim) {
-	total := reclaim.total()
+func (s *HQStore) reportBackstopReclaim(reclaim HQStoreBackstopReclaim) {
+	total := reclaim.Total()
 	if total == 0 {
 		return
 	}
@@ -168,14 +173,14 @@ func (s *HQStore) reportBackstopReclaim(reclaim hqBackstopReclaim) {
 		total, reclaim.Main, reclaim.Ephemeral)
 }
 
-func (s *HQStore) emitBackstopLeakDetected(reclaim hqBackstopReclaim) {
+func (s *HQStore) emitBackstopLeakDetected(reclaim HQStoreBackstopReclaim) {
 	if s.leakRecorder == nil {
 		return
 	}
 	payload := events.StoreBackstopLeakDetectedPayload{
 		MainCount:      reclaim.Main,
 		EphemeralCount: reclaim.Ephemeral,
-		TotalCount:     reclaim.total(),
+		TotalCount:     reclaim.Total(),
 		Threshold:      s.leakThreshold,
 	}
 	raw, err := json.Marshal(payload)

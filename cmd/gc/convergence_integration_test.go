@@ -1198,3 +1198,91 @@ func TestConvergenceIndex_MaintainedOnStateTransitions(t *testing.T) {
 		t.Errorf("status = %q, want closed", closed.Status)
 	}
 }
+
+func TestConvergenceStoreAdapterCloseBeadWithRetentionUsesHQStoreRetention(t *testing.T) {
+	store, err := beads.OpenHQStore(t.TempDir(), beads.WithHQStoreSnapshotInterval(0))
+	if err != nil {
+		t.Fatalf("OpenHQStore: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Shutdown(); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+	adapter := newConvergenceStoreAdapter(store, nil)
+	adapter.activeIndex = make(map[string]string)
+
+	retained, err := store.Create(beads.Bead{
+		Title:  "retained root",
+		Type:   "convergence",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			convergence.FieldState:  convergence.StateActive,
+			convergence.FieldTarget: "agent-x",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create retained root: %v", err)
+	}
+	adapter.activeIndex[retained.ID] = "agent-x"
+
+	if err := adapter.CloseBeadWithRetention(retained.ID, convergence.CloseReasonHandlerRoot, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("CloseBeadWithRetention retained: %v", err)
+	}
+	if _, ok := adapter.activeIndex[retained.ID]; ok {
+		t.Fatal("retained root should not be in index after retained close")
+	}
+	got, err := store.Get(retained.ID)
+	if err != nil {
+		t.Fatalf("Get retained root: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("retained status = %q, want closed", got.Status)
+	}
+	if got.Metadata["close_reason"] != convergence.CloseReasonHandlerRoot {
+		t.Fatalf("retained close_reason = %q, want %q", got.Metadata["close_reason"], convergence.CloseReasonHandlerRoot)
+	}
+	if drained := store.DrainRetentionQueue(); drained != 0 {
+		t.Fatalf("DrainRetentionQueue before expiry = %d, want 0", drained)
+	}
+	assertConvergenceRootVisibleWithIncludeClosed(t, store, retained.ID)
+
+	expired, err := store.Create(beads.Bead{
+		Title:  "expired root",
+		Type:   "convergence",
+		Status: "in_progress",
+	})
+	if err != nil {
+		t.Fatalf("Create expired root: %v", err)
+	}
+	if err := adapter.CloseBeadWithRetention(expired.ID, convergence.CloseReasonHandlerRoot, time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("CloseBeadWithRetention expired: %v", err)
+	}
+	if drained := store.DrainRetentionQueue(); drained != 1 {
+		t.Fatalf("DrainRetentionQueue after expiry = %d, want 1", drained)
+	}
+	if _, err := store.Get(expired.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get expired root error = %v, want ErrNotFound", err)
+	}
+	if _, err := store.Get(retained.ID); err != nil {
+		t.Fatalf("retained root should remain after expired drain: %v", err)
+	}
+}
+
+func assertConvergenceRootVisibleWithIncludeClosed(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+
+	roots, err := store.List(beads.ListQuery{
+		Type:          "convergence",
+		IncludeClosed: true,
+	})
+	if err != nil {
+		t.Fatalf("List IncludeClosed convergence roots: %v", err)
+	}
+	for _, root := range roots {
+		if root.ID == id {
+			return
+		}
+	}
+	t.Fatalf("convergence root %q not visible with IncludeClosed; roots=%v", id, roots)
+}

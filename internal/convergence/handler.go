@@ -54,6 +54,10 @@ const (
 	CloseReasonHandlerRoot     = "convergence: workflow handler closing root after terminate"
 )
 
+// RootRetentionWindow is the post-close window where convergence roots remain
+// readable for sling attachment and progress inspection before deletion.
+const RootRetentionWindow = time.Minute
+
 // BeadInfo holds the minimal bead information needed by the handler.
 type BeadInfo struct {
 	ID             string
@@ -113,6 +117,13 @@ type Store interface {
 	CreateConvergenceBead(title string) (string, error)
 }
 
+// RetentionStore is an optional convergence store capability for closing a
+// root bead while scheduling delayed deletion. Store implementations that do
+// not support it keep using CloseBead.
+type RetentionStore interface {
+	CloseBeadWithRetention(id, reason string, deleteAfter time.Time) error
+}
+
 // HandlerAction describes the outcome of processing a wisp_closed event.
 type HandlerAction string
 
@@ -169,7 +180,7 @@ func (h *Handler) HandleWispClosed(ctx context.Context, rootBeadID, wispID strin
 	// Step 1: Guard check.
 	state := meta[FieldState]
 	if state == StateTerminated {
-		_ = h.Store.CloseBead(rootBeadID, CloseReasonHandlerCleanup) // best-effort cleanup
+		_ = h.closeRootBead(rootBeadID, CloseReasonHandlerCleanup) // best-effort cleanup
 		return HandlerResult{Action: ActionSkipped}, nil
 	}
 
@@ -620,11 +631,14 @@ func (h *Handler) terminate(
 	if err := h.Store.SetMetadata(rootBeadID, FieldState, StateTerminated); err != nil {
 		return HandlerResult{}, fmt.Errorf("setting state to terminated: %w", err)
 	}
-	if err := h.Store.CloseBead(rootBeadID, CloseReasonHandlerRoot); err != nil {
+	if err := h.closeRootBead(rootBeadID, CloseReasonHandlerRoot); err != nil {
 		return HandlerResult{}, fmt.Errorf("closing root bead: %w", err)
 	}
 	if err := h.Store.SetMetadata(rootBeadID, FieldLastProcessedWisp, wispID); err != nil {
 		return HandlerResult{}, fmt.Errorf("setting last processed wisp: %w", err)
+	}
+	if err := h.deleteBeadSubtree(wispID); err != nil {
+		return HandlerResult{}, fmt.Errorf("deleting terminal wisp: %w", err)
 	}
 
 	return HandlerResult{
@@ -824,6 +838,13 @@ func (h *Handler) clock() time.Time {
 		return h.Clock()
 	}
 	return time.Now()
+}
+
+func (h *Handler) closeRootBead(id, reason string) error {
+	if store, ok := h.Store.(RetentionStore); ok {
+		return store.CloseBeadWithRetention(id, reason, h.clock().Add(RootRetentionWindow))
+	}
+	return h.Store.CloseBead(id, reason)
 }
 
 // burnSpeculativeWisp deletes a speculatively poured wisp and clears the

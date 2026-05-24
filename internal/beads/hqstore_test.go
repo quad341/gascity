@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 func TestHQStoreConformance(t *testing.T) {
@@ -268,6 +269,139 @@ func TestHQStorePurgeExpired(t *testing.T) {
 	if _, err := store.Get(live.ID); err != nil {
 		t.Fatalf("Get live: %v", err)
 	}
+}
+
+func TestHQStoreCloseWithRetentionSetsStatusClosed(t *testing.T) {
+	store, err := beads.OpenHQStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenHQStore: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Shutdown(); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+
+	created, err := store.Create(beads.Bead{Title: "retained"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.CloseWithRetention(created.ID, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("CloseWithRetention: %v", err)
+	}
+
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get retained: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, got.Metadata["closed_at"]); err != nil {
+		t.Fatalf("closed_at metadata parse: %v", err)
+	}
+}
+
+func TestHQStoreRetentionQueueDrainsExpired(t *testing.T) {
+	store, err := beads.OpenHQStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenHQStore: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Shutdown(); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+
+	expiredA, err := store.Create(beads.Bead{Title: "expired-a"})
+	if err != nil {
+		t.Fatalf("Create expiredA: %v", err)
+	}
+	expiredB, err := store.Create(beads.Bead{Title: "expired-b"})
+	if err != nil {
+		t.Fatalf("Create expiredB: %v", err)
+	}
+	future, err := store.Create(beads.Bead{Title: "future"})
+	if err != nil {
+		t.Fatalf("Create future: %v", err)
+	}
+
+	if err := store.CloseWithRetention(expiredA.ID, time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("CloseWithRetention expiredA: %v", err)
+	}
+	if err := store.CloseWithRetention(future.ID, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("CloseWithRetention future: %v", err)
+	}
+	if err := store.CloseWithRetention(expiredB.ID, time.Now().Add(-time.Minute)); err != nil {
+		t.Fatalf("CloseWithRetention expiredB: %v", err)
+	}
+
+	drained := store.DrainRetentionQueue()
+	if drained != 2 {
+		t.Fatalf("DrainRetentionQueue drained %d, want 2", drained)
+	}
+	for _, id := range []string{expiredA.ID, expiredB.ID} {
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("Get(%q) error = %v, want ErrNotFound", id, err)
+		}
+	}
+	if _, err := store.Get(future.ID); err != nil {
+		t.Fatalf("Get future: %v", err)
+	}
+}
+
+func TestHQStorePurgeBackstopHonorsCutoffs(t *testing.T) {
+	store, err := beads.OpenHQStore(t.TempDir(),
+		beads.WithHQStoreMainTierBackstopTTL(24*time.Hour),
+		beads.WithHQStoreEphemeralBackstopTTL(10*time.Minute),
+		beads.WithHQStoreLeakDetector(5, events.Discard),
+	)
+	if err != nil {
+		t.Fatalf("OpenHQStore: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Shutdown(); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+
+	oldMain := createClosedHQBead(t, store, beads.Bead{Title: "old-main"}, time.Now().Add(-25*time.Hour))
+	recentMain := createClosedHQBead(t, store, beads.Bead{Title: "recent-main"}, time.Now().Add(-23*time.Hour))
+	oldWisp := createClosedHQBead(t, store, beads.Bead{Title: "old-wisp", Ephemeral: true}, time.Now().Add(-11*time.Minute))
+	recentWisp := createClosedHQBead(t, store, beads.Bead{Title: "recent-wisp", Ephemeral: true}, time.Now().Add(-9*time.Minute))
+
+	purged, err := store.PurgeBackstop(24*time.Hour, 10*time.Minute)
+	if err != nil {
+		t.Fatalf("PurgeBackstop: %v", err)
+	}
+	if purged != 2 {
+		t.Fatalf("PurgeBackstop purged %d, want 2", purged)
+	}
+	for _, id := range []string{oldMain.ID, oldWisp.ID} {
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("Get(%q) error = %v, want ErrNotFound", id, err)
+		}
+	}
+	for _, id := range []string{recentMain.ID, recentWisp.ID} {
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("Get(%q): %v", id, err)
+		}
+	}
+}
+
+func createClosedHQBead(t *testing.T, store *beads.HQStore, b beads.Bead, closedAt time.Time) beads.Bead {
+	t.Helper()
+	created, err := store.Create(b)
+	if err != nil {
+		t.Fatalf("Create %q: %v", b.Title, err)
+	}
+	if err := store.Close(created.ID); err != nil {
+		t.Fatalf("Close %q: %v", created.ID, err)
+	}
+	if err := store.SetMetadata(created.ID, "closed_at", closedAt.Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("SetMetadata closed_at %q: %v", created.ID, err)
+	}
+	return created
 }
 
 func TestHQStoreConcurrentCreateUpdate(t *testing.T) {

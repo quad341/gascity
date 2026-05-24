@@ -2834,6 +2834,21 @@ type StatusWorkCounts struct {
 	Ready int64 `json:"ready"`
 }
 
+// StoreBackstopLeakDetectedPayload defines model for StoreBackstopLeakDetectedPayload.
+type StoreBackstopLeakDetectedPayload struct {
+	// EphemeralCount Closed ephemeral beads reclaimed by the backstop sweep.
+	EphemeralCount int64 `json:"ephemeral_count"`
+
+	// MainCount Closed main-tier beads reclaimed by the backstop sweep.
+	MainCount int64 `json:"main_count"`
+
+	// Threshold Configured leak threshold that the total reclaim count exceeded.
+	Threshold int64 `json:"threshold"`
+
+	// TotalCount Total closed beads reclaimed by the backstop sweep.
+	TotalCount int64 `json:"total_count"`
+}
+
 // StoreMaintenanceDonePayload defines model for StoreMaintenanceDonePayload.
 type StoreMaintenanceDonePayload struct {
 	AfterBytes   int64   `json:"after_bytes"`
@@ -3214,6 +3229,18 @@ type TypedEventStreamEnvelopeExtmsgUnbound struct {
 	Ts       time.Time                `json:"ts"`
 	Type     string                   `json:"type"`
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeGcStoreBackstopLeakDetected defines model for TypedEventStreamEnvelopeGcStoreBackstopLeakDetected.
+type TypedEventStreamEnvelopeGcStoreBackstopLeakDetected struct {
+	Actor    string                           `json:"actor"`
+	Message  *string                          `json:"message,omitempty"`
+	Payload  StoreBackstopLeakDetectedPayload `json:"payload"`
+	Seq      int64                            `json:"seq"`
+	Subject  *string                          `json:"subject,omitempty"`
+	Ts       time.Time                        `json:"ts"`
+	Type     string                           `json:"type"`
+	Workflow *WorkflowEventProjection         `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeGcStoreMaintenanceDone defines model for TypedEventStreamEnvelopeGcStoreMaintenanceDone.
@@ -3911,6 +3938,19 @@ type TypedTaggedEventStreamEnvelopeExtmsgUnbound struct {
 	Ts       time.Time                `json:"ts"`
 	Type     string                   `json:"type"`
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected defines model for TypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected.
+type TypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected struct {
+	Actor    string                           `json:"actor"`
+	City     string                           `json:"city"`
+	Message  *string                          `json:"message,omitempty"`
+	Payload  StoreBackstopLeakDetectedPayload `json:"payload"`
+	Seq      int64                            `json:"seq"`
+	Subject  *string                          `json:"subject,omitempty"`
+	Ts       time.Time                        `json:"ts"`
+	Type     string                           `json:"type"`
+	Workflow *WorkflowEventProjection         `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone defines model for TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone.
@@ -6083,6 +6123,32 @@ func (t *EventPayload) MergeSessionSubmitSucceededPayload(v SessionSubmitSucceed
 	return err
 }
 
+// AsStoreBackstopLeakDetectedPayload returns the union data inside the EventPayload as a StoreBackstopLeakDetectedPayload
+func (t EventPayload) AsStoreBackstopLeakDetectedPayload() (StoreBackstopLeakDetectedPayload, error) {
+	var body StoreBackstopLeakDetectedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromStoreBackstopLeakDetectedPayload overwrites any union data inside the EventPayload as the provided StoreBackstopLeakDetectedPayload
+func (t *EventPayload) FromStoreBackstopLeakDetectedPayload(v StoreBackstopLeakDetectedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeStoreBackstopLeakDetectedPayload performs a merge with any union data inside the EventPayload, using the provided StoreBackstopLeakDetectedPayload
+func (t *EventPayload) MergeStoreBackstopLeakDetectedPayload(v StoreBackstopLeakDetectedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsStoreMaintenanceDonePayload returns the union data inside the EventPayload as a StoreMaintenanceDonePayload
 func (t EventPayload) AsStoreMaintenanceDonePayload() (StoreMaintenanceDonePayload, error) {
 	var body StoreMaintenanceDonePayload
@@ -6859,6 +6925,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExtmsgUnbound(v T
 // MergeTypedEventStreamEnvelopeExtmsgUnbound performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExtmsgUnbound
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgUnbound(v TypedEventStreamEnvelopeExtmsgUnbound) error {
 	v.Type = "extmsg.unbound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeGcStoreBackstopLeakDetected returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeGcStoreBackstopLeakDetected
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeGcStoreBackstopLeakDetected() (TypedEventStreamEnvelopeGcStoreBackstopLeakDetected, error) {
+	var body TypedEventStreamEnvelopeGcStoreBackstopLeakDetected
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeGcStoreBackstopLeakDetected overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeGcStoreBackstopLeakDetected
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeGcStoreBackstopLeakDetected(v TypedEventStreamEnvelopeGcStoreBackstopLeakDetected) error {
+	v.Type = "gc.store.backstop_leak.detected"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeGcStoreBackstopLeakDetected performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeGcStoreBackstopLeakDetected
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeGcStoreBackstopLeakDetected(v TypedEventStreamEnvelopeGcStoreBackstopLeakDetected) error {
+	v.Type = "gc.store.backstop_leak.detected"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -7959,6 +8053,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeExtmsgOutbound()
 	case "extmsg.unbound":
 		return t.AsTypedEventStreamEnvelopeExtmsgUnbound()
+	case "gc.store.backstop_leak.detected":
+		return t.AsTypedEventStreamEnvelopeGcStoreBackstopLeakDetected()
 	case "gc.store.maintenance.done":
 		return t.AsTypedEventStreamEnvelopeGcStoreMaintenanceDone()
 	case "gc.store.maintenance.failed":
@@ -8568,6 +8664,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtms
 // MergeTypedTaggedEventStreamEnvelopeExtmsgUnbound performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgUnbound
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgUnbound(v TypedTaggedEventStreamEnvelopeExtmsgUnbound) error {
 	v.Type = "extmsg.unbound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected() (TypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected, error) {
+	var body TypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected(v TypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected) error {
+	v.Type = "gc.store.backstop_leak.detected"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected(v TypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected) error {
+	v.Type = "gc.store.backstop_leak.detected"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -9668,6 +9792,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutbound()
 	case "extmsg.unbound":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgUnbound()
+	case "gc.store.backstop_leak.detected":
+		return t.AsTypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected()
 	case "gc.store.maintenance.done":
 		return t.AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone()
 	case "gc.store.maintenance.failed":

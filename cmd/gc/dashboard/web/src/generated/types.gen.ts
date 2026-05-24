@@ -754,7 +754,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | StoreBackstopLeakDetectedPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -3002,6 +3002,25 @@ export type StatusWorkCounts = {
     ready: number;
 };
 
+export type StoreBackstopLeakDetectedPayload = {
+    /**
+     * Closed ephemeral beads reclaimed by the backstop sweep.
+     */
+    ephemeral_count: number;
+    /**
+     * Closed main-tier beads reclaimed by the backstop sweep.
+     */
+    main_count: number;
+    /**
+     * Configured leak threshold that the total reclaim count exceeded.
+     */
+    threshold: number;
+    /**
+     * Total closed beads reclaimed by the backstop sweep.
+     */
+    total_count: number;
+};
+
 export type StoreMaintenanceDonePayload = {
     after_bytes: number;
     before_bytes: number;
@@ -3204,6 +3223,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeExtmsgOutbound) | ({
     type: 'extmsg.unbound';
 } & TypedEventStreamEnvelopeExtmsgUnbound) | ({
+    type: 'gc.store.backstop_leak.detected';
+} & TypedEventStreamEnvelopeGcStoreBackstopLeakDetected) | ({
     type: 'gc.store.maintenance.done';
 } & TypedEventStreamEnvelopeGcStoreMaintenanceDone) | ({
     type: 'gc.store.maintenance.failed';
@@ -3556,6 +3577,20 @@ export type TypedEventStreamEnvelopeExtmsgUnbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.unbound';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope gc.store.backstop_leak.detected
+ */
+export type TypedEventStreamEnvelopeGcStoreBackstopLeakDetected = {
+    actor: string;
+    message?: string;
+    payload: StoreBackstopLeakDetectedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.backstop_leak.detected';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4107,6 +4142,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeExtmsgOutbound) | ({
     type: 'extmsg.unbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgUnbound) | ({
+    type: 'gc.store.backstop_leak.detected';
+} & TypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected) | ({
     type: 'gc.store.maintenance.done';
 } & TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone) | ({
     type: 'gc.store.maintenance.failed';
@@ -4479,6 +4516,21 @@ export type TypedTaggedEventStreamEnvelopeExtmsgUnbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.unbound';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope gc.store.backstop_leak.detected
+ */
+export type TypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: StoreBackstopLeakDetectedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.backstop_leak.detected';
     workflow?: WorkflowEventProjection;
 };
 

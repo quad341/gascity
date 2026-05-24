@@ -5,11 +5,19 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 const (
 	hqExpiresAtMetadataKey = "expires_at"
 	hqExpiresAtMetadataAlt = "gc.expires_at"
+	hqClosedAtMetadataKey  = "closed_at"
+	hqClosedAtMetadataAlt  = "gc.closed_at"
+
+	hqDefaultMainTierBackstopTTL  = 24 * time.Hour
+	hqDefaultEphemeralBackstopTTL = 10 * time.Minute
+	hqDefaultLeakThreshold        = 5
 )
 
 // HQStore is a dormant, snapshot-backed in-process Store implementation for the
@@ -35,6 +43,12 @@ type HQStore struct {
 	mainIdx   hqTierIndex
 	wispIdx   hqTierIndex
 
+	retentionQueue       []retentionEntry
+	mainTierBackstopTTL  time.Duration
+	ephemeralBackstopTTL time.Duration
+	leakThreshold        int
+	leakRecorder         events.Recorder
+
 	ttlInterval time.Duration
 	ttlStop     chan struct{}
 	ttlDone     chan struct{}
@@ -47,10 +61,19 @@ type HQStore struct {
 	snapErr          error
 }
 
+type retentionEntry struct {
+	id          string
+	deleteAfter time.Time
+}
+
 type hqStoreOptions struct {
-	prefix           string
-	ttlInterval      time.Duration
-	snapshotInterval time.Duration
+	prefix               string
+	ttlInterval          time.Duration
+	snapshotInterval     time.Duration
+	mainTierBackstopTTL  time.Duration
+	ephemeralBackstopTTL time.Duration
+	leakThreshold        int
+	leakRecorder         events.Recorder
 }
 
 // HQStoreOption customizes OpenHQStore.
@@ -82,12 +105,46 @@ func WithHQStoreSnapshotInterval(d time.Duration) HQStoreOption {
 	}
 }
 
+// WithHQStoreMainTierBackstopTTL sets the backstop cutoff for closed main-tier
+// beads. Closed main-tier beads older than this window are eligible for
+// PurgeBackstop reclaim.
+func WithHQStoreMainTierBackstopTTL(d time.Duration) HQStoreOption {
+	return func(o *hqStoreOptions) {
+		o.mainTierBackstopTTL = d
+	}
+}
+
+// WithHQStoreEphemeralBackstopTTL sets the backstop cutoff for closed ephemeral
+// beads. Closed wisps older than this window are eligible for PurgeBackstop
+// reclaim.
+func WithHQStoreEphemeralBackstopTTL(d time.Duration) HQStoreOption {
+	return func(o *hqStoreOptions) {
+		o.ephemeralBackstopTTL = d
+	}
+}
+
+// WithHQStoreLeakDetector wires leak detection configuration for the backstop
+// sweeper. A non-positive threshold disables the detector; a nil recorder
+// suppresses event emission.
+func WithHQStoreLeakDetector(threshold int, rec events.Recorder) HQStoreOption {
+	return func(o *hqStoreOptions) {
+		if threshold < 0 {
+			threshold = 0
+		}
+		o.leakThreshold = threshold
+		o.leakRecorder = rec
+	}
+}
+
 // OpenHQStore opens or creates a dormant HQStore rooted at dir. If a snapshot
 // is present it is loaded to rebuild in-memory state and indexes.
 func OpenHQStore(dir string, opts ...HQStoreOption) (*HQStore, error) {
 	cfg := hqStoreOptions{
-		prefix:           "hq",
-		snapshotInterval: hqDefaultSnapshotInterval,
+		prefix:               "hq",
+		snapshotInterval:     hqDefaultSnapshotInterval,
+		mainTierBackstopTTL:  hqDefaultMainTierBackstopTTL,
+		ephemeralBackstopTTL: hqDefaultEphemeralBackstopTTL,
+		leakThreshold:        hqDefaultLeakThreshold,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -97,10 +154,14 @@ func OpenHQStore(dir string, opts ...HQStoreOption) (*HQStore, error) {
 	}
 
 	store := &HQStore{
-		dir:              dir,
-		prefix:           cfg.prefix,
-		ttlInterval:      cfg.ttlInterval,
-		snapshotInterval: cfg.snapshotInterval,
+		dir:                  dir,
+		prefix:               cfg.prefix,
+		ttlInterval:          cfg.ttlInterval,
+		snapshotInterval:     cfg.snapshotInterval,
+		mainTierBackstopTTL:  cfg.mainTierBackstopTTL,
+		ephemeralBackstopTTL: cfg.ephemeralBackstopTTL,
+		leakThreshold:        cfg.leakThreshold,
+		leakRecorder:         cfg.leakRecorder,
 	}
 	store.resetCoreLocked()
 

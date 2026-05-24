@@ -117,11 +117,35 @@ func (s *HQStore) Close(id string) error {
 	if !ok {
 		return fmt.Errorf("closing bead %q: %w", id, ErrNotFound)
 	}
-	if b.Status == "closed" {
+	if b.Status == "closed" && hqHasClosedAt(b) {
 		return nil
 	}
 	b.Status = "closed"
+	stampHQClosedAt(&b, time.Now().UTC())
 	s.upsertOwnedLocked(b)
+	return nil
+}
+
+// CloseWithRetention closes id and enqueues it for deletion after deleteAfter.
+func (s *HQStore) CloseWithRetention(id string, deleteAfter time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureOpenLocked(); err != nil {
+		return err
+	}
+	b, ok := s.findLocked(id)
+	if !ok {
+		return fmt.Errorf("closing bead with retention %q: %w", id, ErrNotFound)
+	}
+	if b.Status != "closed" || !hqHasClosedAt(b) {
+		b.Status = "closed"
+		stampHQClosedAt(&b, time.Now().UTC())
+		s.upsertOwnedLocked(b)
+	}
+	s.retentionQueue = append(s.retentionQueue, retentionEntry{
+		id:          id,
+		deleteAfter: deleteAfter,
+	})
 	return nil
 }
 
@@ -140,6 +164,8 @@ func (s *HQStore) Reopen(id string) error {
 		return nil
 	}
 	b.Status = "open"
+	delete(b.Metadata, hqClosedAtMetadataKey)
+	delete(b.Metadata, hqClosedAtMetadataAlt)
 	s.upsertOwnedLocked(b)
 	return nil
 }
@@ -171,6 +197,7 @@ func (s *HQStore) CloseAll(ids []string, metadata map[string]string) (int, error
 				b.Metadata[k] = v
 			}
 		}
+		stampHQClosedAt(&b, time.Now().UTC())
 		s.upsertOwnedLocked(b)
 		changed++
 	}

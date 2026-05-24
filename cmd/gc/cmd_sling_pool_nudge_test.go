@@ -13,11 +13,7 @@ import (
 // running instances, it enqueues a queued nudge so the agent wakes to the
 // pending sling when it next starts. This is parity with the fixed-agent path
 // (deliverSlingNudge always enqueues for asleep targets).
-//
-// This test FAILS on current code: the pool no-running-instance branch only
-// calls pokeController and returns without calling enqueueQueuedNudge.
 func TestDoSlingNudgePoolNoRunningInstanceEnqueuesQueuedNudge(t *testing.T) {
-	t.Skip("ga-3dxxs.1: remove Skip and implement enqueueQueuedNudge call in doSlingNudge pool no-running-instance branch")
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	// No pool instances running — poke will fail (no controller socket in test).

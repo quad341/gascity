@@ -1486,6 +1486,13 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 		} else {
 			fmt.Fprintf(stdout, "No running sessions for %q — poked controller for wake\n", a.QualifiedName()) //nolint:errcheck // best-effort
 		}
+		const msg = "Work slung. Check your hook."
+		if err := enqueueQueuedNudgeWithStore(cityPath, store, newQueuedNudge(a.QualifiedName(), msg, "sling", time.Now())); err != nil {
+			telemetry.RecordNudge(context.Background(), a.QualifiedName(), err)
+			fmt.Fprintf(stderr, "gc sling: nudge failed: %v\n", err) //nolint:errcheck // best-effort
+			return
+		}
+		fmt.Fprintf(stdout, "Queued nudge for %s\n", a.QualifiedName()) //nolint:errcheck // best-effort
 		return
 	}
 

@@ -3,6 +3,7 @@ package convergence
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,6 +40,14 @@ type fakeStore struct {
 	WriteLog []string
 
 	ActivatedWispIDs []string
+
+	RetentionCloses []retentionCloseCall
+}
+
+type retentionCloseCall struct {
+	ID          string
+	Reason      string
+	DeleteAfter time.Time
 }
 
 func newFakeStore() *fakeStore {
@@ -126,6 +135,15 @@ func (s *fakeStore) CloseBead(id, reason string) error {
 		rec.metadata["close_reason"] = reason
 	}
 	return nil
+}
+
+func (s *fakeStore) CloseBeadWithRetention(id, reason string, deleteAfter time.Time) error {
+	s.RetentionCloses = append(s.RetentionCloses, retentionCloseCall{
+		ID:          id,
+		Reason:      reason,
+		DeleteAfter: deleteAfter,
+	})
+	return s.CloseBead(id, reason)
 }
 
 func (s *fakeStore) DeleteBead(id string) error {
@@ -553,7 +571,8 @@ func TestHandleWispClosed_GatePassApproved(t *testing.T) {
 		FieldGateOutcomeWisp: "wisp-iter-1",
 		FieldGateOutcome:     GatePass,
 	})
-	_ = store
+	now := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	handler.Clock = func() time.Time { return now }
 
 	result, err := handler.HandleWispClosed(context.Background(), "root-1", "wisp-iter-1")
 	if err != nil {
@@ -579,6 +598,22 @@ func TestHandleWispClosed_GatePassApproved(t *testing.T) {
 	beadInfo, _ := store.GetBead("root-1")
 	if beadInfo.Status != "closed" {
 		t.Errorf("bead status = %q, want %q", beadInfo.Status, "closed")
+	}
+	if len(store.RetentionCloses) != 1 {
+		t.Fatalf("retention closes = %d, want 1", len(store.RetentionCloses))
+	}
+	retained := store.RetentionCloses[0]
+	if retained.ID != "root-1" {
+		t.Fatalf("retention close id = %q, want root-1", retained.ID)
+	}
+	if retained.Reason != CloseReasonHandlerRoot {
+		t.Fatalf("retention reason = %q, want %q", retained.Reason, CloseReasonHandlerRoot)
+	}
+	if want := now.Add(time.Minute); !retained.DeleteAfter.Equal(want) {
+		t.Fatalf("retention deleteAfter = %v, want %v", retained.DeleteAfter, want)
+	}
+	if _, err := store.GetBead("wisp-iter-1"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("terminal wisp GetBead error = %v, want ErrNotFound", err)
 	}
 
 	// Verify both events emitted.

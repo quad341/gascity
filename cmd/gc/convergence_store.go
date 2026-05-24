@@ -129,6 +129,29 @@ func (a *convergenceStoreAdapter) CloseBead(id, reason string) error {
 	return nil
 }
 
+func (a *convergenceStoreAdapter) CloseBeadWithRetention(id, reason string, deleteAfter time.Time) error {
+	// Stamp close_reason before CloseWithRetention so validation.on-close=error
+	// sees it on the close that follows. Best-effort: an error here is not
+	// fatal — CloseWithRetention still proceeds and any pre-existing
+	// close_reason is preserved.
+	if reason != "" {
+		_ = a.store.SetMetadata(id, "close_reason", reason)
+	}
+	if store, ok := a.store.(interface {
+		CloseWithRetention(id string, deleteAfter time.Time) error
+	}); ok {
+		if err := store.CloseWithRetention(id, deleteAfter); err != nil {
+			return err
+		}
+	} else if err := a.store.Close(id); err != nil {
+		return err
+	}
+	if a.activeIndex != nil {
+		delete(a.activeIndex, id)
+	}
+	return nil
+}
+
 func (a *convergenceStoreAdapter) DeleteBead(id string) error {
 	if err := a.store.Delete(id); err != nil {
 		return err

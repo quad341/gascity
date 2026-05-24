@@ -2076,6 +2076,9 @@
             "$ref": "#/components/schemas/SessionSubmitSucceededPayload"
           },
           {
+            "$ref": "#/components/schemas/StoreBackstopLeakDetectedPayload"
+          },
+          {
             "$ref": "#/components/schemas/StoreMaintenanceDonePayload"
           },
           {
@@ -6957,6 +6960,38 @@
         ],
         "type": "object"
       },
+      "StoreBackstopLeakDetectedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "ephemeral_count": {
+            "description": "Closed ephemeral beads reclaimed by the backstop sweep.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "main_count": {
+            "description": "Closed main-tier beads reclaimed by the backstop sweep.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "threshold": {
+            "description": "Configured leak threshold that the total reclaim count exceeded.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_count": {
+            "description": "Total closed beads reclaimed by the backstop sweep.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "main_count",
+          "ephemeral_count",
+          "total_count",
+          "threshold"
+        ],
+        "type": "object"
+      },
       "StoreMaintenanceDonePayload": {
         "additionalProperties": false,
         "properties": {
@@ -7315,6 +7350,7 @@
             "extmsg.inbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgInbound",
             "extmsg.outbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutbound",
             "extmsg.unbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound",
+            "gc.store.backstop_leak.detected": "#/components/schemas/TypedEventStreamEnvelopeGcStoreBackstopLeakDetected",
             "gc.store.maintenance.done": "#/components/schemas/TypedEventStreamEnvelopeGcStoreMaintenanceDone",
             "gc.store.maintenance.failed": "#/components/schemas/TypedEventStreamEnvelopeGcStoreMaintenanceFailed",
             "mail.archived": "#/components/schemas/TypedEventStreamEnvelopeMailArchived",
@@ -7411,6 +7447,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeGcStoreBackstopLeakDetected"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeGcStoreMaintenanceDone"
@@ -8067,7 +8106,8 @@
                 "extmsg.outbound",
                 "events.rotated",
                 "gc.store.maintenance.done",
-                "gc.store.maintenance.failed"
+                "gc.store.maintenance.failed",
+                "gc.store.backstop_leak.detected"
               ]
             },
             "type": "string"
@@ -8420,6 +8460,48 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope extmsg.unbound",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeGcStoreBackstopLeakDetected": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreBackstopLeakDetectedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "gc.store.backstop_leak.detected",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope gc.store.backstop_leak.detected",
         "type": "object"
       },
       "TypedEventStreamEnvelopeGcStoreMaintenanceDone": {
@@ -9957,6 +10039,7 @@
             "extmsg.inbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgInbound",
             "extmsg.outbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutbound",
             "extmsg.unbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound",
+            "gc.store.backstop_leak.detected": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected",
             "gc.store.maintenance.done": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone",
             "gc.store.maintenance.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed",
             "mail.archived": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailArchived",
@@ -10053,6 +10136,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone"
@@ -10756,7 +10842,8 @@
                 "extmsg.outbound",
                 "events.rotated",
                 "gc.store.maintenance.done",
-                "gc.store.maintenance.failed"
+                "gc.store.maintenance.failed",
+                "gc.store.backstop_leak.detected"
               ]
             },
             "type": "string"
@@ -11142,6 +11229,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope extmsg.unbound",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeGcStoreBackstopLeakDetected": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreBackstopLeakDetectedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "gc.store.backstop_leak.detected",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope gc.store.backstop_leak.detected",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone": {

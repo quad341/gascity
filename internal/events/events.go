@@ -112,11 +112,12 @@ const (
 	// across rotations.
 	EventsRotated = "events.rotated"
 
-	// Dolt store maintenance events. Emitted by the supervisor's
-	// StoreMaintenanceLoop (internal/supervisor/maintenance.go) after
-	// each scheduled maintenance cycle completes or fails.
+	// Store maintenance and health events.
 	StoreMaintenanceDone   = "gc.store.maintenance.done"
 	StoreMaintenanceFailed = "gc.store.maintenance.failed"
+	// StoreBackstopLeakDetected fires when the HQStore TTL sweeper's backstop
+	// reclaim exceeds the configured leak threshold.
+	StoreBackstopLeakDetected = "gc.store.backstop_leak.detected"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -147,7 +148,7 @@ var KnownEventTypes = []string{
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,
 	EventsRotated,
-	StoreMaintenanceDone, StoreMaintenanceFailed,
+	StoreMaintenanceDone, StoreMaintenanceFailed, StoreBackstopLeakDetected,
 }
 
 // Event is a single recorded occurrence in the system.

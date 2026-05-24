@@ -34,3 +34,20 @@ type StoreMaintenanceFailedPayload struct {
 
 // IsEventPayload marks StoreMaintenanceFailedPayload as an events.Payload variant.
 func (StoreMaintenanceFailedPayload) IsEventPayload() {}
+
+// StoreBackstopLeakDetectedPayload is the typed payload for
+// gc.store.backstop_leak.detected events. The HQStore TTL sweeper emits it
+// when backstop reclaim exceeds the configured leak threshold.
+type StoreBackstopLeakDetectedPayload struct {
+	MainCount      int `json:"main_count" doc:"Closed main-tier beads reclaimed by the backstop sweep."`
+	EphemeralCount int `json:"ephemeral_count" doc:"Closed ephemeral beads reclaimed by the backstop sweep."`
+	TotalCount     int `json:"total_count" doc:"Total closed beads reclaimed by the backstop sweep."`
+	Threshold      int `json:"threshold" doc:"Configured leak threshold that the total reclaim count exceeded."`
+}
+
+// IsEventPayload marks StoreBackstopLeakDetectedPayload as an events.Payload variant.
+func (StoreBackstopLeakDetectedPayload) IsEventPayload() {}
+
+func init() {
+	RegisterPayload(StoreBackstopLeakDetected, StoreBackstopLeakDetectedPayload{})
+}

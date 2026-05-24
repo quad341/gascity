@@ -162,6 +162,7 @@ func runSuite(t *testing.T, wl coordstore.WorkloadConfig, enforceTargets bool) {
 
 			// Phase 5: Print scorecard.
 			sc.PrintTable(testWriter{t})
+			checkBackstopReclaim(ctx, t, adapter, wl)
 
 			// Report target outcomes; only gate the test when enforceTargets is set.
 			for _, r := range sc.Results {
@@ -183,6 +184,28 @@ func runSuite(t *testing.T, wl coordstore.WorkloadConfig, enforceTargets bool) {
 	// Summary across all backends.
 	if len(scorecards) > 1 {
 		printComparison(t, scorecards)
+	}
+}
+
+func checkBackstopReclaim(ctx context.Context, t *testing.T, adapter coordstore.StoreAdapter, wl coordstore.WorkloadConfig) {
+	t.Helper()
+	reclaimer, ok := adapter.(coordstore.BackstopReclaimer)
+	if !ok {
+		return
+	}
+	policy := wl.BackstopPolicy()
+	if !policy.Enabled() {
+		return
+	}
+	check, err := coordstore.CheckBackstopReclaim(ctx, reclaimer, policy)
+	if err != nil {
+		t.Errorf("  FAIL backstop reclaim: %v", err)
+		return
+	}
+	t.Logf("  BackstopReclaim: total=%d threshold=%d main=%d ephemeral=%d",
+		check.Reclaim.Total(), policy.LeakThreshold, check.Reclaim.Main, check.Reclaim.Ephemeral)
+	if !check.Passed() {
+		t.Errorf("  FAIL backstop reclaim: %s", check.FailureReason())
 	}
 }
 

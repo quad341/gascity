@@ -183,6 +183,22 @@ func (a *Adapter) PurgeExpired(context.Context) (int, error) {
 	return a.store.PurgeExpired()
 }
 
+// PurgeBackstop removes stale closed records and reports per-tier reclaim
+// counts for the benchmark backstop assertion.
+func (a *Adapter) PurgeBackstop(_ context.Context, mainCutoff, ephemeralCutoff time.Duration) (coordstore.BackstopReclaim, error) {
+	if a.store == nil {
+		return coordstore.BackstopReclaim{}, fmt.Errorf("hqstore PurgeBackstop: adapter is not open")
+	}
+	reclaim, err := a.store.PurgeBackstopDetailed(mainCutoff, ephemeralCutoff)
+	if err != nil {
+		return coordstore.BackstopReclaim{}, err
+	}
+	return coordstore.BackstopReclaim{
+		Main:      reclaim.Main,
+		Ephemeral: reclaim.Ephemeral,
+	}, nil
+}
+
 // PrimeScan loads open records through the HQStore list path.
 func (a *Adapter) PrimeScan(context.Context) (int, error) {
 	items, err := a.store.List(beads.ListQuery{AllowScan: true})

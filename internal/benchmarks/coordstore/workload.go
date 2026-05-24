@@ -75,6 +75,18 @@ type WorkloadConfig struct {
 	// Live HQ: used for inbox-replay / archive; ~0.02/s.
 	RecentScanRate float64
 
+	// --- Backstop reclaim assertion ---
+
+	// BackstopLeakThreshold is the maximum acceptable reclaim count for one
+	// post-warm-up backstop sweep. Zero disables the assertion.
+	BackstopLeakThreshold int
+	// BackstopMainCutoff is the closed main-tier age eligible for backstop
+	// reclaim during the post-warm-up assertion.
+	BackstopMainCutoff time.Duration
+	// BackstopEphemeralCutoff is the closed ephemeral-tier age eligible for
+	// backstop reclaim during the post-warm-up assertion.
+	BackstopEphemeralCutoff time.Duration
+
 	// --- Run parameters ---
 
 	// Duration is how long the workload driver runs.
@@ -121,6 +133,10 @@ var RealWorldWorkload = WorkloadConfig{
 	DepOpRate:       0.1,   // dep add/remove (S4 W5 approx.)
 	RecentScanRate:  0.02,  // inbox-replay (S3 R11 proxy)
 
+	BackstopLeakThreshold:   5,
+	BackstopMainCutoff:      24 * time.Hour,
+	BackstopEphemeralCutoff: 10 * time.Minute,
+
 	Duration:    30 * time.Second,
 	Concurrency: 20,
 }
@@ -147,6 +163,10 @@ var StressWorkload = WorkloadConfig{
 	DepOpRate:       0.5,
 	RecentScanRate:  0.1,
 
+	BackstopLeakThreshold:   5,
+	BackstopMainCutoff:      24 * time.Hour,
+	BackstopEphemeralCutoff: 10 * time.Minute,
+
 	Duration:    15 * time.Second,
 	Concurrency: 50,
 }
@@ -172,6 +192,19 @@ var SmokeWorkload = WorkloadConfig{
 	DepOpRate:       0.1,
 	RecentScanRate:  0.1,
 
+	BackstopLeakThreshold:   5,
+	BackstopMainCutoff:      24 * time.Hour,
+	BackstopEphemeralCutoff: 10 * time.Minute,
+
 	Duration:    5 * time.Second,
 	Concurrency: 5,
+}
+
+// BackstopPolicy returns the post-warm-up backstop assertion policy for wl.
+func (wl WorkloadConfig) BackstopPolicy() BackstopPolicy {
+	return BackstopPolicy{
+		LeakThreshold:   wl.BackstopLeakThreshold,
+		MainCutoff:      wl.BackstopMainCutoff,
+		EphemeralCutoff: wl.BackstopEphemeralCutoff,
+	}
 }

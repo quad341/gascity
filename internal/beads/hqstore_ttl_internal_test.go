@@ -63,8 +63,8 @@ func TestHQStoreBackstopLeakDetectorEmitsTypedEventAboveThreshold(t *testing.T) 
 
 	result := store.runTTLSweep()
 
-	if result.Backstop.total() != 3 {
-		t.Fatalf("backstop total = %d, want 3", result.Backstop.total())
+	if result.Backstop.Total() != 3 {
+		t.Fatalf("backstop total = %d, want 3", result.Backstop.Total())
 	}
 	if len(rec.Events) != 1 {
 		t.Fatalf("events recorded = %d, want 1: %+v", len(rec.Events), rec.Events)
@@ -103,8 +103,8 @@ func TestHQStoreBackstopLeakDetectorSilentAtOrBelowThreshold(t *testing.T) {
 
 	result := store.runTTLSweep()
 
-	if result.Backstop.total() != 3 {
-		t.Fatalf("backstop total = %d, want 3", result.Backstop.total())
+	if result.Backstop.Total() != 3 {
+		t.Fatalf("backstop total = %d, want 3", result.Backstop.Total())
 	}
 	if len(rec.Events) != 0 {
 		t.Fatalf("events recorded = %d, want 0: %+v", len(rec.Events), rec.Events)

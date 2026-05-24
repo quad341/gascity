@@ -2,11 +2,22 @@ package convoy
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 )
+
+// ConvoyRetentionWindow is the post-close window where convoy readers can
+// still inspect a closed convoy before retained deletion.
+const ConvoyRetentionWindow = time.Minute
+
+var convoyNow = time.Now
+
+type retentionClosingStore interface {
+	CloseWithRetention(id string, deleteAfter time.Time) error
+}
 
 // ConvoyDeps bundles dependencies for convoy operations.
 type ConvoyDeps struct {
@@ -127,7 +138,7 @@ func ConvoyClose(deps ConvoyDeps, store beads.Store, id string) error {
 		return fmt.Errorf("getting convoy %s: %w", id, err)
 	}
 
-	if err := store.Close(id); err != nil {
+	if err := closeConvoyBead(store, id); err != nil {
 		return fmt.Errorf("closing convoy %s: %w", id, err)
 	}
 
@@ -139,4 +150,11 @@ func ConvoyClose(deps ConvoyDeps, store beads.Store, id string) error {
 	}
 
 	return nil
+}
+
+func closeConvoyBead(store beads.Store, id string) error {
+	if store, ok := store.(retentionClosingStore); ok {
+		return store.CloseWithRetention(id, convoyNow().Add(ConvoyRetentionWindow))
+	}
+	return store.Close(id)
 }

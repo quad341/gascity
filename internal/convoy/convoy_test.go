@@ -1,7 +1,9 @@
 package convoy
 
 import (
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -283,6 +285,99 @@ func TestConvoyCloseOps(t *testing.T) {
 	}
 }
 
+func TestConvoyCloseRetainsHQStoreConvoyForPostCloseReads(t *testing.T) {
+	store := openHQConvoyStoreForTest(t)
+	deps := testConvoyDeps(store)
+
+	convoy, err := store.Create(beads.Bead{Title: "test", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create convoy: %v", err)
+	}
+	item, err := store.Create(beads.Bead{Title: "task"})
+	if err != nil {
+		t.Fatalf("Create item: %v", err)
+	}
+	if err := TrackItem(store, convoy.ID, item.ID); err != nil {
+		t.Fatalf("TrackItem: %v", err)
+	}
+	if err := store.Close(item.ID); err != nil {
+		t.Fatalf("Close item: %v", err)
+	}
+
+	if err := ConvoyClose(deps, store, convoy.ID); err != nil {
+		t.Fatalf("ConvoyClose: %v", err)
+	}
+
+	got, err := store.Get(convoy.ID)
+	if err != nil {
+		t.Fatalf("Get retained convoy: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+	progress, err := ConvoyProgress(deps, store, convoy.ID)
+	if err != nil {
+		t.Fatalf("ConvoyProgress after close: %v", err)
+	}
+	if !progress.Complete {
+		t.Fatalf("progress.Complete = false, want true during retention window")
+	}
+	if drained := store.DrainRetentionQueue(); drained != 0 {
+		t.Fatalf("DrainRetentionQueue before expiry = %d, want 0", drained)
+	}
+	assertConvoyVisibleWithIncludeClosed(t, store, convoy.ID)
+}
+
+func TestConvoyCloseDeletesHQStoreConvoyAfterRetentionWindow(t *testing.T) {
+	store := openHQConvoyStoreForTest(t)
+	deps := testConvoyDeps(store)
+	oldNow := convoyNow
+	convoyNow = func() time.Time { return time.Now().Add(-time.Minute - time.Second) }
+	t.Cleanup(func() { convoyNow = oldNow })
+
+	convoy, err := store.Create(beads.Bead{Title: "test", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create convoy: %v", err)
+	}
+
+	if err := ConvoyClose(deps, store, convoy.ID); err != nil {
+		t.Fatalf("ConvoyClose: %v", err)
+	}
+	if _, err := store.Get(convoy.ID); err != nil {
+		t.Fatalf("Get retained convoy before drain: %v", err)
+	}
+	if drained := store.DrainRetentionQueue(); drained != 1 {
+		t.Fatalf("DrainRetentionQueue after expiry = %d, want 1", drained)
+	}
+	if _, err := store.Get(convoy.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get after retention drain error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestConvoyCloseUsesSixtySecondRetentionWindow(t *testing.T) {
+	store := &convoyRetentionRecordingStore{MemStore: beads.NewMemStore()}
+	deps := testConvoyDeps(store)
+	now := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	oldNow := convoyNow
+	convoyNow = func() time.Time { return now }
+	t.Cleanup(func() { convoyNow = oldNow })
+
+	convoy, err := store.Create(beads.Bead{Title: "test", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create convoy: %v", err)
+	}
+	if err := ConvoyClose(deps, store, convoy.ID); err != nil {
+		t.Fatalf("ConvoyClose: %v", err)
+	}
+
+	if store.closeWithRetentionCalls != 1 {
+		t.Fatalf("CloseWithRetention calls = %d, want 1", store.closeWithRetentionCalls)
+	}
+	if want := now.Add(time.Minute); !store.deleteAfter.Equal(want) {
+		t.Fatalf("deleteAfter = %v, want %v", store.deleteAfter, want)
+	}
+}
+
 func TestConvoyCloseNotFoundOps(t *testing.T) {
 	store := beads.NewMemStore()
 	deps := testConvoyDeps(store)
@@ -291,6 +386,51 @@ func TestConvoyCloseNotFoundOps(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for nonexistent convoy")
 	}
+}
+
+func openHQConvoyStoreForTest(t *testing.T) *beads.HQStore {
+	t.Helper()
+
+	store, err := beads.OpenHQStore(t.TempDir(), beads.WithHQStoreSnapshotInterval(0))
+	if err != nil {
+		t.Fatalf("OpenHQStore: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Shutdown(); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+	return store
+}
+
+type convoyRetentionRecordingStore struct {
+	*beads.MemStore
+	closeWithRetentionCalls int
+	deleteAfter             time.Time
+}
+
+func (s *convoyRetentionRecordingStore) CloseWithRetention(id string, deleteAfter time.Time) error {
+	s.closeWithRetentionCalls++
+	s.deleteAfter = deleteAfter
+	return s.Close(id)
+}
+
+func assertConvoyVisibleWithIncludeClosed(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+
+	convoys, err := store.List(beads.ListQuery{
+		Type:          "convoy",
+		IncludeClosed: true,
+	})
+	if err != nil {
+		t.Fatalf("List IncludeClosed convoys: %v", err)
+	}
+	for _, convoy := range convoys {
+		if convoy.ID == id {
+			return
+		}
+	}
+	t.Fatalf("convoy %q not visible with IncludeClosed; convoys=%v", id, convoys)
 }
 
 func requireTracksDep(t *testing.T, store beads.Store, convoyID, itemID string) {

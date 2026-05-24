@@ -32,7 +32,7 @@ const (
 	defaultQueuedNudgeTTL           = 24 * time.Hour
 	defaultQueuedNudgeClaimTTL      = 2 * time.Minute
 	defaultQueuedNudgeRetryDelay    = 15 * time.Second
-	defaultQueuedNudgeMaxAttempts   = 5
+	defaultQueuedNudgeMaxAttempts   = 50
 	defaultQueuedNudgeDeadRetention = 1 * time.Hour
 	defaultNudgePollInterval        = 2 * time.Second
 	defaultNudgePollQuiescence      = 3 * time.Second

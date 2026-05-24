@@ -1038,6 +1038,151 @@ func TestClose(t *testing.T) {
 	}
 }
 
+func TestCloseDetailedRetainsHQStoreSessionForRestartReaderWindow(t *testing.T) {
+	store, mgr := newHQSessionManagerForTest(t)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	got, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get closed session: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("Status = %q, want closed", got.Status)
+	}
+	if drained := store.DrainRetentionQueue(); drained != 0 {
+		t.Fatalf("DrainRetentionQueue drained %d, want 0 before retention window expires", drained)
+	}
+	assertSessionVisibleWithIncludeClosed(t, store, info.ID)
+}
+
+func TestCloseDetailedDeletesHQStoreSessionAfterRetentionWindow(t *testing.T) {
+	store, mgr := newHQSessionManagerForTest(t)
+	mgr.clk = &clock.Fake{Time: time.Now().Add(-5*time.Minute - time.Second)}
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := store.Get(info.ID); err != nil {
+		t.Fatalf("Get retained session before drain: %v", err)
+	}
+
+	if drained := store.DrainRetentionQueue(); drained != 1 {
+		t.Fatalf("DrainRetentionQueue drained %d, want 1 after retention window expires", drained)
+	}
+	if _, err := store.Get(info.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get after retention drain error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestCloseDetailedUsesFiveMinuteRetentionWindow(t *testing.T) {
+	store := &retentionRecordingStore{MemStore: beads.NewMemStore()}
+	mgr := NewManager(store, runtime.NewFake())
+	now := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	mgr.clk = &clock.Fake{Time: now}
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if store.closeWithRetentionCalls != 1 {
+		t.Fatalf("CloseWithRetention calls = %d, want 1", store.closeWithRetentionCalls)
+	}
+	if want := now.Add(5 * time.Minute); !store.deleteAfter.Equal(want) {
+		t.Fatalf("deleteAfter = %v, want %v", store.deleteAfter, want)
+	}
+}
+
+func TestCloseDetailedRetainsHQStoreSessionThroughCachingStore(t *testing.T) {
+	backing, err := beads.OpenHQStore(t.TempDir(), beads.WithHQStoreSnapshotInterval(0))
+	if err != nil {
+		t.Fatalf("OpenHQStore: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := backing.Shutdown(); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	mgr := NewManager(cache, runtime.NewFake())
+	mgr.clk = &clock.Fake{Time: time.Now().Add(-5*time.Minute - time.Second)}
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if drained := backing.DrainRetentionQueue(); drained != 1 {
+		t.Fatalf("DrainRetentionQueue drained %d, want 1 through caching store", drained)
+	}
+	if _, err := backing.Get(info.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get after retention drain error = %v, want ErrNotFound", err)
+	}
+}
+
+func newHQSessionManagerForTest(t *testing.T) (*beads.HQStore, *Manager) {
+	t.Helper()
+
+	store, err := beads.OpenHQStore(t.TempDir(), beads.WithHQStoreSnapshotInterval(0))
+	if err != nil {
+		t.Fatalf("OpenHQStore: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Shutdown(); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+	return store, NewManager(store, runtime.NewFake())
+}
+
+type retentionRecordingStore struct {
+	*beads.MemStore
+	closeWithRetentionCalls int
+	deleteAfter             time.Time
+}
+
+func (s *retentionRecordingStore) CloseWithRetention(id string, deleteAfter time.Time) error {
+	s.closeWithRetentionCalls++
+	s.deleteAfter = deleteAfter
+	return s.Close(id)
+}
+
+func assertSessionVisibleWithIncludeClosed(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+
+	sessions, err := store.List(beads.ListQuery{
+		Label:         LabelSession,
+		IncludeClosed: true,
+	})
+	if err != nil {
+		t.Fatalf("List IncludeClosed sessions: %v", err)
+	}
+	for _, session := range sessions {
+		if session.ID == id {
+			return
+		}
+	}
+	t.Fatalf("closed session %q not visible to IncludeClosed restart reader; sessions=%v", id, sessions)
+}
+
 func TestCloseRemovesRuntimeMCPSnapshot(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -2193,6 +2338,61 @@ func TestPruneDetailedReportsWaitNudges(t *testing.T) {
 	}
 	if len(result.WaitNudgeIDs) != 1 || result.WaitNudgeIDs[0] != "wait-1" {
 		t.Fatalf("result.WaitNudgeIDs = %#v, want [wait-1]", result.WaitNudgeIDs)
+	}
+}
+
+func TestPruneDetailedRetainsHQStoreSessionForRestartReaderWindow(t *testing.T) {
+	store, mgr := newHQSessionManagerForTest(t)
+
+	info, err := mgr.Create(context.Background(), "default", "S1", "echo s1", "/tmp", "test", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := mgr.PruneDetailed(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("PruneDetailed: %v", err)
+	}
+	if result.Count != 1 {
+		t.Fatalf("result.Count = %d, want 1", result.Count)
+	}
+	if drained := store.DrainRetentionQueue(); drained != 0 {
+		t.Fatalf("DrainRetentionQueue drained %d, want 0 before retention window expires", drained)
+	}
+	assertSessionVisibleWithIncludeClosed(t, store, info.ID)
+}
+
+func TestPruneDetailedDeletesHQStoreSessionAfterRetentionWindow(t *testing.T) {
+	store, mgr := newHQSessionManagerForTest(t)
+	mgr.clk = &clock.Fake{Time: time.Now().Add(-5*time.Minute - time.Second)}
+
+	info, err := mgr.Create(context.Background(), "default", "S1", "echo s1", "/tmp", "test", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := mgr.PruneDetailed(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("PruneDetailed: %v", err)
+	}
+	if result.Count != 1 {
+		t.Fatalf("result.Count = %d, want 1", result.Count)
+	}
+	if _, err := store.Get(info.ID); err != nil {
+		t.Fatalf("Get retained session before drain: %v", err)
+	}
+
+	if drained := store.DrainRetentionQueue(); drained != 1 {
+		t.Fatalf("DrainRetentionQueue drained %d, want 1 after retention window expires", drained)
+	}
+	if _, err := store.Get(info.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get after retention drain error = %v, want ErrNotFound", err)
 	}
 }
 

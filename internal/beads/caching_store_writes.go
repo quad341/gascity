@@ -86,6 +86,28 @@ func (c *CachingStore) Close(id string) error {
 		return err
 	}
 
+	c.cacheClosedAfterBacking(id)
+	return nil
+}
+
+// CloseWithRetention marks a bead closed and delegates retention scheduling to
+// backings that support delayed deletion.
+func (c *CachingStore) CloseWithRetention(id string, deleteAfter time.Time) error {
+	backing, ok := c.backing.(interface {
+		CloseWithRetention(id string, deleteAfter time.Time) error
+	})
+	if !ok {
+		return c.Close(id)
+	}
+	if err := backing.CloseWithRetention(id, deleteAfter); err != nil {
+		return err
+	}
+
+	c.cacheClosedAfterBacking(id)
+	return nil
+}
+
+func (c *CachingStore) cacheClosedAfterBacking(id string) {
 	var closed Bead
 	var found bool
 	if fresh, err := c.backing.Get(id); err == nil {
@@ -119,7 +141,6 @@ func (c *CachingStore) Close(id string) error {
 	if found {
 		c.notifyChange("bead.closed", closed)
 	}
-	return nil
 }
 
 // Reopen marks a bead as open in the backing store and cache.

@@ -61,6 +61,8 @@ const BeadType = "session"
 // LabelSession is the label applied to all session beads for filtering.
 const LabelSession = "gc:session"
 
+const closedSessionRetentionWindow = 5 * time.Minute
+
 // MetadataLastNudgeDeliveredAt is the session-bead metadata key that records
 // the wall-clock time of the most recent successful queued-nudge delivery.
 const MetadataLastNudgeDeliveredAt = "last_nudge_delivered_at"
@@ -162,6 +164,10 @@ type transportDetector interface {
 	DetectTransport(name string) string
 }
 
+type retentionClosingStore interface {
+	CloseWithRetention(id string, deleteAfter time.Time) error
+}
+
 type transportResolution struct {
 	transport            string
 	allowStoppedFallback bool
@@ -223,6 +229,13 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 		return
 	}
 	_ = m.store.SetMetadata(id, "transport", transport)
+}
+
+func (m *Manager) closeSessionBead(id string) error {
+	if store, ok := m.store.(retentionClosingStore); ok {
+		return store.CloseWithRetention(id, m.now().UTC().Add(closedSessionRetentionWindow))
+	}
+	return m.store.Close(id)
 }
 
 func (m *Manager) now() time.Time {
@@ -873,7 +886,7 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 			return err
 		}
 
-		if err := m.store.Close(id); err != nil {
+		if err := m.closeSessionBead(id); err != nil {
 			return err
 		}
 		_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
@@ -1304,7 +1317,7 @@ func (m *Manager) PruneDetailed(before time.Time, states ...State) (PruneResult,
 			log.Printf("session %s: pruning after capped wait nudge lookup: %v", b.ID, err)
 		}
 		result.WaitNudgeIDs = append(result.WaitNudgeIDs, nudgeIDs...)
-		if err := m.store.Close(b.ID); err != nil {
+		if err := m.closeSessionBead(b.ID); err != nil {
 			return result, fmt.Errorf("closing session %s: %w", b.ID, err)
 		}
 		result.Count++

@@ -1,11 +1,15 @@
 package beads_test
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -221,6 +225,28 @@ func TestHQStorePeriodicSnapshotFlushes(t *testing.T) {
 	}
 }
 
+func TestHQStoreShutdownStopsTTLSweeper(t *testing.T) {
+	baselineGoroutines := runtime.NumGoroutine()
+	baselineSweepers := countHQStoreTTLSweepers(t)
+
+	store, err := beads.OpenHQStore(t.TempDir(),
+		beads.WithHQStoreSnapshotInterval(0),
+		beads.WithHQStoreTTLInterval(time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("OpenHQStore: %v", err)
+	}
+
+	waitForHQStoreTTLSweepers(t, baselineSweepers+1)
+
+	if err := store.Shutdown(); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	waitForHQStoreTTLSweepers(t, baselineSweepers)
+	waitForGoroutinesAtMost(t, baselineGoroutines+1)
+}
+
 func TestHQStorePurgeExpired(t *testing.T) {
 	store, err := beads.OpenHQStore(t.TempDir())
 	if err != nil {
@@ -331,4 +357,53 @@ func TestHQStoreConcurrentCreateUpdate(t *testing.T) {
 		}
 		seen[b.ID] = true
 	}
+}
+
+func waitForHQStoreTTLSweepers(t *testing.T, want int) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := countHQStoreTTLSweepers(t); got == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("HQStore TTL sweeper goroutines = %d, want %d", countHQStoreTTLSweepers(t), want)
+}
+
+func countHQStoreTTLSweepers(t *testing.T) int {
+	t.Helper()
+
+	profile := pprof.Lookup("goroutine")
+	if profile == nil {
+		return 0
+	}
+
+	var buf bytes.Buffer
+	if err := profile.WriteTo(&buf, 2); err != nil {
+		t.Fatalf("write goroutine profile: %v", err)
+	}
+
+	count := 0
+	for _, stack := range strings.Split(buf.String(), "\n\n") {
+		if strings.Contains(stack, "github.com/gastownhall/gascity/internal/beads.(*HQStore).startTTLSweeper.func1") {
+			count++
+		}
+	}
+	return count
+}
+
+func waitForGoroutinesAtMost(t *testing.T, limit int) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		runtime.Gosched()
+		if got := runtime.NumGoroutine(); got <= limit {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("goroutines = %d, want <= %d", runtime.NumGoroutine(), limit)
 }

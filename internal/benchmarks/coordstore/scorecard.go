@@ -131,6 +131,9 @@ type Scorecard struct {
 	Backend  string
 	Workload string
 	Results  []ScorecardResult
+	// HostOverloaded reports whether host load was high enough to make p99/max
+	// latency targets informational for this run.
+	HostOverloaded bool
 	// Duration is the wall-clock time the workload ran.
 	Duration time.Duration
 	// TotalOps is the total number of operations issued.
@@ -148,7 +151,7 @@ type Scorecard struct {
 // target when memory was sampled.
 func (s *Scorecard) Passed() bool {
 	for _, r := range s.Results {
-		if r.Measured && !r.Pass {
+		if r.Measured && !s.GatePassed(r) {
 			return false
 		}
 	}
@@ -158,12 +161,26 @@ func (s *Scorecard) Passed() bool {
 	return true
 }
 
+// GatePassed returns true if r passes the scorecard's enforced gates.
+// Host-overloaded scorecards suppress failed p99/max latency gates only;
+// throughput and memory gates remain enforced.
+func (s *Scorecard) GatePassed(r ScorecardResult) bool {
+	if !r.Measured || r.Pass {
+		return true
+	}
+	return s.HostOverloaded && isLatencyGate(r.Target)
+}
+
+func isLatencyGate(t Target) bool {
+	return (t.P99 > 0 || t.Max > 0) && t.MinThroughput == 0
+}
+
 // PassCount returns the number of measured targets that passed, including the
 // memory target when memory was sampled.
 func (s *Scorecard) PassCount() int {
 	n := 0
 	for _, r := range s.Results {
-		if r.Measured && r.Pass {
+		if r.Measured && s.GatePassed(r) {
 			n++
 		}
 	}
@@ -194,16 +211,17 @@ func (s *Scorecard) TotalTargets() int {
 // mem carries the memory consumption observed during the run; pass an empty
 // (Sampled=false) MemReport to skip the memory target.
 func Score(backend, workload string, dur time.Duration, totalOps, totalErrors int,
-	results map[string]*OperationResult, throughput map[string]float64, mem MemReport,
+	results map[string]*OperationResult, throughput map[string]float64, mem MemReport, hostOverloaded bool,
 ) Scorecard {
 	sc := Scorecard{
-		Backend:  backend,
-		Workload: workload,
-		Duration: dur,
-		TotalOps: totalOps,
-		Errors:   totalErrors,
-		Mem:      mem,
-		MemPass:  !mem.Sampled || mem.HeapInusePeak <= HeapInusePeakTarget,
+		Backend:        backend,
+		Workload:       workload,
+		HostOverloaded: hostOverloaded,
+		Duration:       dur,
+		TotalOps:       totalOps,
+		Errors:         totalErrors,
+		Mem:            mem,
+		MemPass:        !mem.Sampled || mem.HeapInusePeak <= HeapInusePeakTarget,
 	}
 
 	for _, t := range DiscoveryTargets {
@@ -245,6 +263,8 @@ func (s *Scorecard) PrintTable(w io.Writer) {
 	status := "PASS"
 	if !s.Passed() {
 		status = "FAIL"
+	} else if s.HostOverloaded {
+		status = "PASS (host overloaded; latency gates suppressed)"
 	}
 	fmt.Fprintf(w, "\n=== Scorecard: %s / %s — %s ===\n", s.Backend, s.Workload, status) //nolint:errcheck
 	fmt.Fprintf(w, "  duration=%s  ops=%d  errors=%d  targets=%d/%d passed\n\n",         //nolint:errcheck
@@ -262,9 +282,12 @@ func (s *Scorecard) PrintTable(w io.Writer) {
 		tput := "-"
 
 		if r.Measured {
-			if r.Pass {
+			switch {
+			case r.Pass:
 				result = "PASS"
-			} else {
+			case s.HostOverloaded && isLatencyGate(r.Target):
+				result = "SKIP (host overloaded — informational only)"
+			default:
 				result = "FAIL  ← " + r.Reason
 			}
 			if r.Target.P99 > 0 {

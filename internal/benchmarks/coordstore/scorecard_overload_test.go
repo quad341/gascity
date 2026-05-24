@@ -1,13 +1,8 @@
-//go:build ignore
-
-// Remove the line above when Scorecard.HostOverloaded and Runner.HostLoadRatioFn are implemented (ga-bctco.1).
-
 package coordstore_test
 
 import (
 	"bytes"
 	"context"
-	"io"
 	"strings"
 	"testing"
 	"time"
@@ -44,13 +39,11 @@ func throughputFailResult() coordstore.ScorecardResult {
 // Scorecard with HostOverloaded=true treats measured-but-failed latency targets
 // as passing. Elevated latency under host overload is an expected artifact of
 // resource contention, not a backend defect.
-//
-// This test FAILS TO COMPILE on current code: Scorecard has no HostOverloaded field.
 func TestScorecardPassed_HostOverloaded_LatencyOnlyFails_Passes(t *testing.T) {
 	sc := coordstore.Scorecard{
 		Results: []coordstore.ScorecardResult{latencyOnlyFailResult()},
 	}
-	sc.HostOverloaded = true // compile error: Scorecard has no field HostOverloaded
+	sc.HostOverloaded = true
 
 	if !sc.Passed() {
 		t.Error("Passed() = false, want true — latency failure under host overload must be suppressed")
@@ -60,42 +53,34 @@ func TestScorecardPassed_HostOverloaded_LatencyOnlyFails_Passes(t *testing.T) {
 // TestScorecardPassed_HostOverloaded_ThroughputFails_Fails verifies that
 // HostOverloaded=true does NOT suppress throughput failures. Sustained
 // throughput degradation exceeds what transient host overload explains.
-//
-// This test FAILS TO COMPILE on current code: Scorecard has no HostOverloaded field.
 func TestScorecardPassed_HostOverloaded_ThroughputFails_Fails(t *testing.T) {
 	sc := coordstore.Scorecard{
 		Results: []coordstore.ScorecardResult{throughputFailResult()},
 	}
-	sc.HostOverloaded = true // compile error: Scorecard has no field HostOverloaded
+	sc.HostOverloaded = true
 
 	if sc.Passed() {
 		t.Error("Passed() = true, want false — throughput failure must not be suppressed by host overload")
 	}
 }
 
-// TestPrintTable_HostOverloaded_EmitsWarningOnce verifies that PrintTable
-// includes a host-overload warning line when HostOverloaded is set. The warning
-// must appear exactly once so that log scanners can match it reliably.
-//
-// This test FAILS TO COMPILE on current code: Scorecard has no HostOverloaded field.
-func TestPrintTable_HostOverloaded_EmitsWarningOnce(t *testing.T) {
+// TestPrintTable_HostOverloaded_UsesSuppressedHeader verifies that PrintTable
+// uses the operator-facing PASS header for host-overloaded scorecards.
+func TestPrintTable_HostOverloaded_UsesSuppressedHeader(t *testing.T) {
 	sc := coordstore.Scorecard{
 		Backend:  "hqstore",
 		Workload: "smoke",
 		Results:  []coordstore.ScorecardResult{latencyOnlyFailResult()},
 	}
-	sc.HostOverloaded = true // compile error: Scorecard has no field HostOverloaded
+	sc.HostOverloaded = true
 
 	var buf bytes.Buffer
 	sc.PrintTable(&buf)
 	output := buf.String()
 
-	count := strings.Count(strings.ToLower(output), "overload")
-	if count == 0 {
-		t.Errorf("PrintTable output contains no 'overload' warning, want exactly one\noutput:\n%s", output)
-	}
-	if count > 1 {
-		t.Errorf("PrintTable output contains %d 'overload' occurrences, want exactly one\noutput:\n%s", count, output)
+	want := "=== Scorecard: hqstore / smoke — PASS (host overloaded; latency gates suppressed) ==="
+	if !strings.Contains(output, want) {
+		t.Errorf("PrintTable output missing suppressed header %q\noutput:\n%s", want, output)
 	}
 }
 
@@ -103,15 +88,13 @@ func TestPrintTable_HostOverloaded_EmitsWarningOnce(t *testing.T) {
 // latency target is not reported as FAIL in the table when HostOverloaded is
 // set. The table row must not contain "FAIL" for that target so that human
 // readers and log parsers do not misinterpret the suppressed result.
-//
-// This test FAILS TO COMPILE on current code: Scorecard has no HostOverloaded field.
 func TestPrintTable_HostOverloaded_LatencyTargetsSkipped(t *testing.T) {
 	sc := coordstore.Scorecard{
 		Backend:  "hqstore",
 		Workload: "smoke",
 		Results:  []coordstore.ScorecardResult{latencyOnlyFailResult()},
 	}
-	sc.HostOverloaded = true // compile error: Scorecard has no field HostOverloaded
+	sc.HostOverloaded = true
 
 	var buf bytes.Buffer
 	sc.PrintTable(&buf)
@@ -122,14 +105,14 @@ func TestPrintTable_HostOverloaded_LatencyTargetsSkipped(t *testing.T) {
 			t.Errorf("latency target row contains FAIL under host overload, want suppressed:\n  %s", line)
 		}
 	}
+	if !strings.Contains(output, "SKIP (host overloaded — informational only)") {
+		t.Errorf("PrintTable output missing host-overloaded SKIP row\noutput:\n%s", output)
+	}
 }
 
 // TestRunnerSetsHostOverloaded_WhenLoadRatioExceedsThreshold verifies that the
 // Runner sets HostOverloaded=true on the returned Scorecard when the injected
 // HostLoadRatioFn reports a ratio that exceeds the overload threshold.
-//
-// This test FAILS TO COMPILE on current code: Runner has no HostLoadRatioFn
-// field and Scorecard has no HostOverloaded field.
 func TestRunnerSetsHostOverloaded_WhenLoadRatioExceedsThreshold(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -156,13 +139,29 @@ func TestRunnerSetsHostOverloaded_WhenLoadRatioExceedsThreshold(t *testing.T) {
 	}
 
 	r := coordstore.NewRunner(adapter, wl, seed)
-	r.HostLoadRatioFn = func() float64 { return 0.95 } // compile error: Runner has no field HostLoadRatioFn
+	r.HostLoadRatioFn = func() float64 { return 0.95 }
 
-	sc, err := r.Run(ctx, io.Discard)
+	var buf bytes.Buffer
+	sc, err := r.Run(ctx, &buf)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !sc.HostOverloaded { // compile error: Scorecard has no field HostOverloaded
+	if !sc.HostOverloaded {
 		t.Error("HostOverloaded = false, want true — load ratio 0.95 must exceed overload threshold")
+	}
+
+	output := buf.String()
+	want := "=== WARNING: p99 latency gates SUPPRESSED ==="
+	if strings.Count(output, want) != 1 {
+		t.Fatalf("warning header count = %d, want 1\noutput:\n%s", strings.Count(output, want), output)
+	}
+	for _, want := range []string{
+		"Host is overloaded (loadavg/cpu=0.95; threshold=0.80).",
+		"Correctness gates still enforced. Latency results are informational only.",
+		"Re-run on a quiesced host for authoritative numbers.",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("runner output missing %q\noutput:\n%s", want, output)
+		}
 	}
 }

@@ -21,6 +21,10 @@ type Runner struct {
 	seed    SeedResult
 	rng     *rand.Rand
 
+	// HostLoadRatioFn overrides host load detection for tests. Production runs
+	// leave it nil so Run reads /proc/loadavg on Linux.
+	HostLoadRatioFn func() float64
+
 	seedMu    sync.RWMutex
 	resultsMu sync.Mutex
 	results   map[string]*OperationResult // op name → result
@@ -44,6 +48,23 @@ func (r *Runner) Run(ctx context.Context, w io.Writer) (Scorecard, error) {
 	wl := r.wl
 	if len(r.seed.MainOpenIDs)+len(r.seed.WispOpenIDs) == 0 {
 		return Scorecard{}, fmt.Errorf("runner: empty seed — call Seeder.Seed first")
+	}
+
+	hostOverloaded := false
+	loadRatio, err := r.currentHostLoadRatio()
+	if err != nil {
+		fmt.Fprintf(w, "  Host load guard skipped: %v\n", err) //nolint:errcheck
+	} else if loadRatio > hostLoadOverloadedThreshold {
+		hostOverloaded = true
+		fmt.Fprintf(w, "=== WARNING: p99 latency gates SUPPRESSED ===\n") //nolint:errcheck
+		_, _ = fmt.Fprintf(
+			w,
+			"  Host is overloaded (loadavg/cpu=%.2f; threshold=%.2f).\n",
+			loadRatio,
+			hostLoadOverloadedThreshold,
+		)
+		fmt.Fprintf(w, "  Correctness gates still enforced. Latency results are informational only.\n") //nolint:errcheck
+		fmt.Fprintf(w, "  Re-run on a quiesced host for authoritative numbers.\n\n")                    //nolint:errcheck
 	}
 
 	// Build the per-second operation schedule as a weighted list.
@@ -140,13 +161,45 @@ progressLoop:
 	sc := Score(
 		"", wl.Name, dur,
 		int(totalOps.Load()), int(totalErrors.Load()),
-		r.results, throughput, memReport,
+		r.results, throughput, memReport, hostOverloaded,
 	)
 
 	fmt.Fprintf(w, "  workload %q done: %d ops in %s, %d errors\n", //nolint:errcheck
 		wl.Name, totalOps.Load(), FormatDuration(dur), totalErrors.Load())
 
 	return sc, nil
+}
+
+const hostLoadOverloadedThreshold = 0.80
+
+func (r *Runner) currentHostLoadRatio() (float64, error) {
+	if r.HostLoadRatioFn != nil {
+		return r.HostLoadRatioFn(), nil
+	}
+	return hostLoadRatio()
+}
+
+func hostLoadRatio() (float64, error) {
+	if runtime.GOOS != "linux" {
+		return 0, fmt.Errorf("loadavg/cpu guard is only available on linux, not %s", runtime.GOOS)
+	}
+	data, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return 0, fmt.Errorf("read /proc/loadavg: %w", err)
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) == 0 {
+		return 0, fmt.Errorf("parse /proc/loadavg: empty file")
+	}
+	load, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse /proc/loadavg 1-minute load %q: %w", fields[0], err)
+	}
+	cpus := runtime.NumCPU()
+	if cpus <= 0 {
+		return 0, fmt.Errorf("runtime.NumCPU returned %d", cpus)
+	}
+	return load / float64(cpus), nil
 }
 
 // opTag identifies which operation a goroutine will execute.

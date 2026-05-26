@@ -113,6 +113,54 @@ func TestProviderLifecycleProcessEnvProjectsCanonicalDoltPaths(t *testing.T) {
 	}
 }
 
+func TestProviderLifecycleProcessEnvPropagatesManagedDoltTestMode(t *testing.T) {
+	cityPath := t.TempDir()
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	env := map[string]string{}
+	for _, entry := range envEntries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+
+	if got := env[managedDoltTestModeEnv]; got != "1" {
+		t.Fatalf("providerLifecycleProcessEnv()[%s] = %q, want 1", managedDoltTestModeEnv, got)
+	}
+	if got := env[managedDoltTestParentPIDEnv]; got == "" {
+		t.Fatalf("providerLifecycleProcessEnv()[%s] missing", managedDoltTestParentPIDEnv)
+	}
+}
+
+// TestProviderLifecycleProcessEnvDoesNotPropagateStrayTestModeEnv verifies the
+// M1 hardening from the #2313 follow-up: a stray GC_MANAGED_DOLT_TEST_MODE=1
+// in the parent shell of a non-test `gc` binary must NOT cause the watchdog
+// test env to be injected into child managed-dolt processes. The seam
+// (managedDoltTestMode) controls whether we behave as a test binary; flipping
+// it false simulates a production binary even though we run inside a Go test.
+func TestProviderLifecycleProcessEnvDoesNotPropagateStrayTestModeEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	withManagedDoltTestMode(t, false)
+	t.Setenv(managedDoltTestModeEnv, "1")
+	t.Setenv(managedDoltTestParentPIDEnv, "424242")
+
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	env := map[string]string{}
+	for _, entry := range envEntries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+
+	if got, ok := env[managedDoltTestModeEnv]; ok {
+		t.Fatalf("providerLifecycleProcessEnv()[%s] = %q, want absent (non-test binary must not propagate stray test env)", managedDoltTestModeEnv, got)
+	}
+	if got, ok := env[managedDoltTestParentPIDEnv]; ok {
+		t.Fatalf("providerLifecycleProcessEnv()[%s] = %q, want absent", managedDoltTestParentPIDEnv, got)
+	}
+}
+
 func TestProviderLifecycleProcessEnvCanonicalizesSymlinkedCityPath(t *testing.T) {
 	root := t.TempDir()
 	realParent := filepath.Join(root, "real")
@@ -153,6 +201,64 @@ func TestProviderLifecycleProcessEnvCanonicalizesSymlinkedCityPath(t *testing.T)
 		if got := env[key]; got != expected {
 			t.Fatalf("providerLifecycleProcessEnv()[%s] = %q, want %q", key, got, expected)
 		}
+	}
+}
+
+func TestEnsureCanonicalScopeConfigStatePreservesExplicitOptOutJSONL(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"id":"rig-1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: rig\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, contract.ConfigState{
+		IssuePrefix:    "rig",
+		EndpointOrigin: contract.EndpointOriginExplicit,
+		EndpointStatus: contract.EndpointStatusUnverified,
+		DoltHost:       "db.example.com",
+		DoltPort:       "3306",
+	})
+	if err != nil {
+		t.Fatalf("ensureCanonicalScopeConfigState: %v", err)
+	}
+
+	if _, err := os.Stat(jsonlPath); err != nil {
+		t.Fatalf("issues.jsonl removed for explicit opt-out scope: %v", err)
+	}
+}
+
+func TestEnsureCanonicalScopeConfigStateReapsManagedJSONL(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"id":"gc-1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: gc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("ensureCanonicalScopeConfigState: %v", err)
+	}
+
+	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
+		t.Fatalf("issues.jsonl present after managed canonicalization; stat err = %v, want IsNotExist", err)
 	}
 }
 

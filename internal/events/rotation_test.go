@@ -184,6 +184,218 @@ func TestReapOrphanedRotatingFilesEmptyRotatingFile(t *testing.T) {
 	}
 }
 
+func TestNewFileRecorderMigratesLegacyArchiveOnOpen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	legacyBase := "events.jsonl.archive-20260416.gz"
+	legacyPath := filepath.Join(dir, legacyBase)
+	const body = `{"seq":10,"type":"bead.created","actor":"human","subject":"first"}
+{"seq":11,"type":"bead.updated","actor":"human","subject":"middle"}
+{"seq":12,"type":"bead.closed","actor":"human","subject":"last"}
+`
+	writeGzipFile(t, legacyPath, body)
+
+	beforeMigration := time.Now().UTC().Add(-time.Second)
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "post-migration"})
+	if err := rec.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("unexpected stderr during legacy migration: %q", stderr.String())
+	}
+	afterMigration := time.Now().UTC().Add(time.Second)
+
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Errorf("legacy archive should be renamed away: %v", err)
+	}
+	canonicalPath, info := findArchiveBySeq(t, dir, 10, 12)
+	if info.Timestamp.Before(beforeMigration) || info.Timestamp.After(afterMigration) {
+		t.Errorf("migrated archive timestamp = %s, want between %s and %s",
+			info.Timestamp, beforeMigration, afterMigration)
+	}
+	if _, err := os.Stat(canonicalPath); err != nil {
+		t.Fatalf("canonical archive missing after migration: %v", err)
+	}
+	got, err := readGzipFile(canonicalPath)
+	if err != nil {
+		t.Fatalf("read migrated archive: %v", err)
+	}
+	if got != body {
+		t.Errorf("migrated archive content mismatch:\n got=%q\nwant=%q", got, body)
+	}
+
+	all, err := ReadAll(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 4 {
+		t.Fatalf("ReadAll after legacy migration returned %d events, want 4", len(all))
+	}
+	if all[0].Seq != 10 || all[2].Seq != 12 || all[3].Seq != 13 {
+		t.Errorf("seqs after migration = [%d,%d,%d], want [10,12,13]",
+			all[0].Seq, all[2].Seq, all[3].Seq)
+	}
+
+	var secondStderr bytes.Buffer
+	rec2, err := NewFileRecorder(path, &secondStderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rec2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if secondStderr.Len() > 0 {
+		t.Errorf("legacy migration should be idempotent on second open, stderr = %q", secondStderr.String())
+	}
+}
+
+func TestNewFileRecorderMigratedLegacyArchiveSurvivesRetainAgeAfterRotation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	legacyBase := "events.jsonl.archive-20000101.gz"
+	legacyPath := filepath.Join(dir, legacyBase)
+	const body = `{"seq":10,"type":"bead.created","actor":"human","subject":"first"}
+{"seq":11,"type":"bead.updated","actor":"human","subject":"middle"}
+{"seq":12,"type":"bead.closed","actor":"human","subject":"last"}
+`
+	writeGzipFile(t, legacyPath, body)
+
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr, WithArchiveRetainAge(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "post-migration"})
+	res, err := rec.ForceRotate()
+	if err != nil {
+		t.Fatalf("ForceRotate: %v", err)
+	}
+	if res.Done != nil {
+		<-res.Done
+	}
+
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Errorf("legacy archive should be renamed away: %v", err)
+	}
+	canonicalPath, _ := findArchiveBySeq(t, dir, 10, 12)
+	if _, err := os.Stat(canonicalPath); err != nil {
+		t.Fatalf("migrated archive should survive first retain-age pruning: %v", err)
+	}
+	if _, err := os.Stat(res.ArchivePath); err != nil {
+		t.Fatalf("fresh rotation archive should remain after retention pruning: %v", err)
+	}
+}
+
+func TestMigrateLegacyArchiveCollisionLeavesSourceAndDestination(t *testing.T) {
+	dir := t.TempDir()
+	legacyBase := "events.jsonl.archive-20260416.gz"
+	legacyPath := filepath.Join(dir, legacyBase)
+	const body = `{"seq":1,"type":"bead.created","actor":"human","subject":"first"}
+{"seq":2,"type":"bead.closed","actor":"human","subject":"last"}
+`
+	writeGzipFile(t, legacyPath, body)
+
+	migrationTime := time.Date(2026, 5, 17, 16, 30, 0, 0, time.UTC)
+	canonicalPath := filepath.Join(dir, formatArchiveBasename(migrationTime, 1, 2))
+	const existing = "existing archive"
+	if err := os.WriteFile(canonicalPath, []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := migrateLegacyArchive(legacyPath, dir, legacyBase, migrationTime)
+	if err == nil {
+		t.Fatal("expected collision error, got nil")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("collision error = %v, want already exists", err)
+	}
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("legacy archive should remain after collision: %v", err)
+	}
+	got, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatalf("ReadFile canonical archive: %v", err)
+	}
+	if string(got) != existing {
+		t.Fatalf("canonical archive overwritten: got %q, want %q", string(got), existing)
+	}
+}
+
+func TestNewFileRecorderLeavesUnparseableLegacyArchive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	legacyBase := "events.jsonl.archive-20260416.gz"
+	legacyPath := filepath.Join(dir, legacyBase)
+	if err := os.WriteFile(legacyPath, []byte("not gzip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rec.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("unparseable legacy archive should be left in place: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "events.jsonl.archive-20260416T*-seq-*.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("unparseable legacy archive should not produce canonical archives, got %v", matches)
+	}
+	if !strings.Contains(stderr.String(), "legacy archive") || !strings.Contains(stderr.String(), legacyBase) {
+		t.Errorf("stderr should mention legacy archive %q, got %q", legacyBase, stderr.String())
+	}
+}
+
+func findArchiveBySeq(t *testing.T, dir string, first, last uint64) (string, archiveInfo) {
+	t.Helper()
+
+	archives, err := archiveFilesIn(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, info := range archives {
+		if info.FirstSeq == first && info.LastSeq == last {
+			return filepath.Join(dir, info.Basename), info
+		}
+	}
+	t.Fatalf("archive with seq window [%d,%d] not found in %v", first, last, archives)
+	return "", archiveInfo{}
+}
+
+func writeGzipFile(t *testing.T, path, body string) {
+	t.Helper()
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gzip.NewWriter(f)
+	if _, err := gw.Write([]byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func readGzipFile(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {

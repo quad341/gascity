@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -64,6 +68,288 @@ func setWaitTestFileBeads(t *testing.T) {
 	t.Helper()
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+}
+
+func TestWaitListJSON(t *testing.T) {
+	cityDir, store := setupWaitJSONTestCity(t)
+	wait := createTestWaitBead(t, store)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWaitList("", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWaitList(--json) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	var payload struct {
+		SchemaVersion string `json:"schema_version"`
+		CityPath      string `json:"city_path"`
+		Waits         []struct {
+			ID              string            `json:"id"`
+			SessionID       string            `json:"session_id"`
+			State           string            `json:"state"`
+			DepIDs          []string          `json:"dep_ids"`
+			RegisteredEpoch string            `json:"registered_epoch"`
+			Metadata        map[string]string `json:"metadata"`
+		} `json:"waits"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.SchemaVersion != "1" || payload.CityPath != cityDir || len(payload.Waits) != 1 {
+		t.Fatalf("payload = %+v", payload)
+	}
+	if got := payload.Waits[0]; got.ID != wait.ID || got.SessionID != "session-1" || got.State != waitStatePending || len(got.DepIDs) != 2 {
+		t.Fatalf("wait row = %+v, source=%+v", got, wait)
+	}
+	if got := payload.Waits[0].RegisteredEpoch; got != "1" {
+		t.Fatalf("registered_epoch = %q, want 1", got)
+	}
+	if payload.Waits[0].Metadata != nil {
+		t.Fatalf("metadata = %+v, want omitted", payload.Waits[0].Metadata)
+	}
+}
+
+func TestWaitInspectJSON(t *testing.T) {
+	_, store := setupWaitJSONTestCity(t)
+	wait := createTestWaitBead(t, store)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWaitInspect(wait.ID, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWaitInspect(--json) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	var payload struct {
+		SchemaVersion string `json:"schema_version"`
+		Wait          struct {
+			ID              string            `json:"id"`
+			Kind            string            `json:"kind"`
+			Note            string            `json:"note"`
+			DepMode         string            `json:"dep_mode"`
+			RegisteredEpoch string            `json:"registered_epoch"`
+			Metadata        map[string]string `json:"metadata"`
+		} `json:"wait"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.SchemaVersion != "1" || payload.Wait.ID != wait.ID || payload.Wait.Kind != "deps" || payload.Wait.Note != "wait for deps" {
+		t.Fatalf("payload = %+v", payload)
+	}
+	if payload.Wait.DepMode != "all" || payload.Wait.RegisteredEpoch != "1" {
+		t.Fatalf("wait = %+v", payload.Wait)
+	}
+	if payload.Wait.Metadata != nil {
+		t.Fatalf("metadata = %+v, want omitted", payload.Wait.Metadata)
+	}
+}
+
+func TestWaitListJSONFiltersState(t *testing.T) {
+	_, store := setupWaitJSONTestCity(t)
+	pending := createTestWaitBead(t, store)
+	ready := createTestWaitBeadForSession(t, store, "session-2", waitStateReady)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWaitList(waitStatePending, "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWaitList(--json --state pending) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	payload := decodeWaitListJSON(t, stdout.Bytes())
+	if len(payload.Waits) != 1 || payload.Waits[0].ID != pending.ID {
+		t.Fatalf("waits = %+v, want only %s; filtered ready=%s", payload.Waits, pending.ID, ready.ID)
+	}
+}
+
+func TestWaitListJSONFiltersSessionWithSessionScopedLookup(t *testing.T) {
+	_, store := setupWaitJSONTestCity(t)
+	targetWait := createTestWaitBeadForSession(t, store, "target-session", waitStatePending)
+	for i := 0; i < waitLookupLimit; i++ {
+		createTestWaitBeadForSession(t, store, "other-session", waitStatePending)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWaitList("", "target-session", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWaitList(--json --session target-session) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	payload := decodeWaitListJSON(t, stdout.Bytes())
+	if len(payload.Waits) != 1 || payload.Waits[0].ID != targetWait.ID || payload.Waits[0].SessionID != "target-session" {
+		t.Fatalf("waits = %+v, want only target %s", payload.Waits, targetWait.ID)
+	}
+}
+
+func TestWaitListJSONEmptyListUsesArray(t *testing.T) {
+	_, _ = setupWaitJSONTestCity(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWaitList("", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWaitList(--json empty) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	payload := decodeWaitListJSON(t, stdout.Bytes())
+	if payload.Waits == nil {
+		t.Fatalf("waits decoded as nil; stdout=%s", stdout.String())
+	}
+	if len(payload.Waits) != 0 {
+		t.Fatalf("waits = %+v, want empty", payload.Waits)
+	}
+}
+
+func TestWaitInspectJSONFailuresUseCommandFailureEnvelope(t *testing.T) {
+	cases := []struct {
+		name       string
+		waitID     func(t *testing.T, store beads.Store) string
+		stderrWant string
+	}{
+		{
+			name:       "missing",
+			waitID:     func(_ *testing.T, _ beads.Store) string { return "missing-wait" },
+			stderrWant: "gc wait inspect:",
+		},
+		{
+			name: "non_wait",
+			waitID: func(t *testing.T, store beads.Store) string {
+				t.Helper()
+				b, err := store.Create(beads.Bead{Title: "not a wait", Type: "task"})
+				if err != nil {
+					t.Fatalf("Create(non-wait): %v", err)
+				}
+				return b.ID
+			},
+			stderrWant: "is not a wait",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			_, store := setupWaitJSONTestCity(t)
+			waitID := tt.waitID(t, store)
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"wait", "inspect", waitID, "--json"}, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("run(wait inspect %s --json) = 0, want failure; stdout=%q stderr=%q", waitID, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tt.stderrWant) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tt.stderrWant)
+			}
+			var failure jsonSchemaErrorPayload
+			if err := json.Unmarshal(stdout.Bytes(), &failure); err != nil {
+				t.Fatalf("stdout is not JSON failure: %v\n%s", err, stdout.String())
+			}
+			if failure.OK || failure.Error.Code != "command_failed" || failure.Error.ExitCode != code {
+				t.Fatalf("failure = %+v, exit code %d", failure, code)
+			}
+		})
+	}
+}
+
+func TestWaitJSONEncoderErrorsWriteDiagnostics(t *testing.T) {
+	var stderr bytes.Buffer
+	if code := writeWaitListJSON(failingWriter{}, &stderr, "/city", nil); code != 1 {
+		t.Fatalf("writeWaitListJSON = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "gc wait list: encode JSON: write failed") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+
+	stderr.Reset()
+	if code := writeWaitInspectJSON(failingWriter{}, &stderr, "/city", beads.Bead{}); code != 1 {
+		t.Fatalf("writeWaitInspectJSON = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "gc wait inspect: encode JSON: write failed") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestWaitJSONSchemasDoNotExposeRawMetadata(t *testing.T) {
+	for _, path := range []string{
+		filepath.Join("..", "..", "schemas", "wait", "list", "result.schema.json"),
+		filepath.Join("..", "..", "schemas", "wait", "inspect", "result.schema.json"),
+	} {
+		t.Run(path, func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", path, err)
+			}
+			if bytes.Contains(data, []byte(`"metadata"`)) {
+				t.Fatalf("%s exposes raw metadata:\n%s", path, string(data))
+			}
+		})
+	}
+}
+
+type waitListJSONTestPayload struct {
+	Waits []struct {
+		ID        string `json:"id"`
+		SessionID string `json:"session_id"`
+		State     string `json:"state"`
+	} `json:"waits"`
+}
+
+func setupWaitJSONTestCity(t *testing.T) (string, beads.Store) {
+	t.Helper()
+	clearGCEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeCityToml(t, cityDir, "[workspace]\nname = \"wait-json\"\n")
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	return cityDir, store
+}
+
+func decodeWaitListJSON(t *testing.T, data []byte) waitListJSONTestPayload {
+	t.Helper()
+	var payload waitListJSONTestPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, string(data))
+	}
+	return payload
+}
+
+func createTestWaitBead(t *testing.T, store beads.Store) beads.Bead {
+	t.Helper()
+	return createTestWaitBeadForSession(t, store, "session-1", waitStatePending)
+}
+
+func createTestWaitBeadForSession(t *testing.T, store beads.Store, sessionID, state string) beads.Bead {
+	t.Helper()
+	wait, err := store.Create(beads.Bead{
+		Title:       "wait:demo",
+		Type:        waitBeadType,
+		Status:      "open",
+		Description: "wait for deps",
+		Labels:      []string{waitBeadLabel, "session:" + sessionID},
+		Metadata: map[string]string{
+			"session_id":       sessionID,
+			"session_name":     "demo",
+			"kind":             "deps",
+			"state":            state,
+			"dep_ids":          "bead-1,bead-2",
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+			"nudge_id":         "nudge-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(wait): %v", err)
+	}
+	return wait
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
 }
 
 func (s waitNudgeMetadataFailStore) SetMetadata(id, key, value string) error {
@@ -292,7 +578,7 @@ provider = "file"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdWaitList("", "target-session", &stdout, &stderr)
+	code := cmdWaitList("", "target-session", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdWaitList = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -2376,4 +2662,452 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 		t.Fatalf("publishManagedDoltRuntimeState: %v", err)
 	}
 	return cityPath, rigPath
+}
+
+// ---------------------------------------------------------------------------
+// Six-row read-path routing matrix for `gc wait list` and `gc wait inspect`
+// (ADR 0001, ga-h6w, ga-2fr). Each row exercises one branch of routeWaitList
+// / routeWaitInspect. The matrix is enforced by scripts/check-routed-test-rows.sh:
+//
+//   api-happy-path       API returns 200 with items         route=api, exit 0
+//   api-cache-not-live   API returns 503 cache_not_live     fallback, exit 0
+//   api-500-fallback     API returns generic 500            fallback (conn-refused), exit 0
+//   api-404-error        API returns 404                    no fallback, exit 1
+//   controller-down      apiClient returns nil (no env)     fallback (controller-down), exit 0
+//   escape-hatch         GC_NO_API truthy                   fallback (escape-hatch), exit 0
+//
+// Wait beads are located via the existing beads endpoint using the
+// sessionpkg.WaitBeadLabel contract — no new server surface exists for waits.
+// ---------------------------------------------------------------------------
+
+type waitMatrixHandler func(t *testing.T) http.Handler
+
+// okWaitListHandler returns a 200 with one gc:wait-labeled gate bead, mirroring
+// what the supervisor would emit for GET /v0/city/{name}/beads?label=gc:wait.
+func okWaitListHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/beads") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("X-GC-Cache-Age-S", "2")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{
+				{
+					"id":         "ga-wait-1",
+					"title":      "wait:worker",
+					"issue_type": sessionpkg.WaitBeadType,
+					"status":     "open",
+					"labels":     []string{sessionpkg.WaitBeadLabel, "session:ga-sess-1"},
+					"metadata": map[string]string{
+						"session_id": "ga-sess-1",
+						"state":      waitStatePending,
+						"kind":       "deps",
+					},
+					"description": "wait note",
+				},
+			},
+			"total": 1,
+		})
+	})
+}
+
+// okWaitInspectHandler returns a 200 for a single wait bead, mirroring GET
+// /v0/city/{name}/bead/{id}.
+func okWaitInspectHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/bead/") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("X-GC-Cache-Age-S", "3")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":         "ga-wait-1",
+			"title":      "wait:worker",
+			"issue_type": sessionpkg.WaitBeadType,
+			"status":     "open",
+			"labels":     []string{sessionpkg.WaitBeadLabel, "session:ga-sess-1"},
+			"metadata": map[string]string{
+				"session_id":       "ga-sess-1",
+				"state":            waitStatePending,
+				"kind":             "deps",
+				"dep_ids":          "gc-1",
+				"dep_mode":         "all",
+				"registered_epoch": "1",
+				"delivery_attempt": "1",
+			},
+			"description": "wait note",
+		})
+	})
+}
+
+func waitProblemHandler(status int, detail string) waitMatrixHandler {
+	return func(_ *testing.T) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": status,
+				"title":  http.StatusText(status),
+				"detail": detail,
+			})
+		})
+	}
+}
+
+// writeWaitTestCity prepares a file-provider city for fallback path tests.
+// Mirrors writeBeadsTestCity but tagged for wait tests; kept separate so either
+// file can evolve its city.toml independently.
+func writeWaitTestCity(t *testing.T) string {
+	t.Helper()
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	return cityPath
+}
+
+func TestRouteWaitList_SixRowMatrix(t *testing.T) {
+	tests := []struct {
+		name         string
+		handler      waitMatrixHandler
+		useNilClient bool
+		nilReason    string
+		wantExit     int
+		wantRoute    string
+		wantReason   string
+		wantStderr   string
+		wantStdout   string
+	}{
+		{
+			name:       "api-happy-path",
+			handler:    okWaitListHandler,
+			wantExit:   0,
+			wantRoute:  "api",
+			wantStdout: "ga-wait-1",
+		},
+		{
+			name:       "api-cache-not-live",
+			handler:    waitProblemHandler(http.StatusServiceUnavailable, "cache_not_live: supervisor cache is priming"),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "cache-not-live",
+			wantStdout: "WAIT",
+		},
+		{
+			name:       "api-500-fallback",
+			handler:    waitProblemHandler(http.StatusInternalServerError, "internal: explode"),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "conn-refused",
+			wantStdout: "WAIT",
+		},
+		{
+			name:       "api-404-error",
+			handler:    waitProblemHandler(http.StatusNotFound, "not_found: city missing"),
+			wantExit:   1,
+			wantStderr: "not_found",
+		},
+		{
+			name:         "controller-down",
+			useNilClient: true,
+			nilReason:    "controller-down",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "controller-down",
+			wantStdout:   "WAIT",
+		},
+		{
+			name:         "escape-hatch",
+			useNilClient: true,
+			nilReason:    "escape-hatch",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "escape-hatch",
+			wantStdout:   "WAIT",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_DEBUG", "1")
+			cityPath := writeWaitTestCity(t)
+
+			var c *api.Client
+			if !tc.useNilClient {
+				srv := httptest.NewServer(tc.handler(t))
+				defer srv.Close()
+				c = api.NewCityScopedClient(srv.URL, "test-city")
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := routeWaitList(cityPath, c, tc.nilReason, "", "", false, &stdout, &stderr)
+
+			if code != tc.wantExit {
+				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
+			}
+			if tc.wantRoute != "" {
+				want := "route=" + tc.wantRoute
+				if tc.wantReason != "" {
+					want += " reason=" + tc.wantReason
+				}
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+				}
+				if n := strings.Count(stderr.String(), "route="); n != 1 {
+					t.Errorf("route=... lines = %d, want 1:\n%s", n, stderr.String())
+				}
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr missing %q:\n%s", tc.wantStderr, stderr.String())
+			}
+			if tc.wantStdout != "" && !strings.Contains(stdout.String(), tc.wantStdout) {
+				t.Errorf("stdout missing %q:\n%s", tc.wantStdout, stdout.String())
+			}
+		})
+	}
+}
+
+func TestRouteWaitInspect_SixRowMatrix(t *testing.T) {
+	tests := []struct {
+		name         string
+		handler      waitMatrixHandler
+		useNilClient bool
+		nilReason    string
+		wantExit     int
+		wantRoute    string
+		wantReason   string
+		wantStderr   string
+		wantStdout   string
+	}{
+		{
+			name:       "api-happy-path",
+			handler:    okWaitInspectHandler,
+			wantExit:   0,
+			wantRoute:  "api",
+			wantStdout: "ga-wait-1",
+		},
+		{
+			name:       "api-cache-not-live",
+			handler:    waitProblemHandler(http.StatusServiceUnavailable, "cache_not_live: priming"),
+			wantExit:   1,
+			wantRoute:  "fallback",
+			wantReason: "cache-not-live",
+			wantStderr: "not found",
+		},
+		{
+			name:       "api-500-fallback",
+			handler:    waitProblemHandler(http.StatusInternalServerError, "explode"),
+			wantExit:   1,
+			wantRoute:  "fallback",
+			wantReason: "conn-refused",
+			wantStderr: "not found",
+		},
+		{
+			name:       "api-404-error",
+			handler:    waitProblemHandler(http.StatusNotFound, "not_found: bead missing"),
+			wantExit:   1,
+			wantStderr: "not_found",
+		},
+		{
+			name:         "controller-down",
+			useNilClient: true,
+			nilReason:    "controller-down",
+			wantExit:     1,
+			wantRoute:    "fallback",
+			wantReason:   "controller-down",
+			wantStderr:   "not found",
+		},
+		{
+			name:         "escape-hatch",
+			useNilClient: true,
+			nilReason:    "escape-hatch",
+			wantExit:     1,
+			wantRoute:    "fallback",
+			wantReason:   "escape-hatch",
+			wantStderr:   "not found",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_DEBUG", "1")
+			cityPath := writeWaitTestCity(t)
+
+			var c *api.Client
+			if !tc.useNilClient {
+				srv := httptest.NewServer(tc.handler(t))
+				defer srv.Close()
+				c = api.NewCityScopedClient(srv.URL, "test-city")
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := routeWaitInspect(cityPath, c, tc.nilReason, "ga-missing", false, &stdout, &stderr)
+
+			if code != tc.wantExit {
+				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
+			}
+			if tc.wantRoute != "" {
+				want := "route=" + tc.wantRoute
+				if tc.wantReason != "" {
+					want += " reason=" + tc.wantReason
+				}
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+				}
+				if n := strings.Count(stderr.String(), "route="); n != 1 {
+					t.Errorf("route=... lines = %d, want 1:\n%s", n, stderr.String())
+				}
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr missing %q:\n%s", tc.wantStderr, stderr.String())
+			}
+			if tc.wantStdout != "" && !strings.Contains(stdout.String(), tc.wantStdout) {
+				t.Errorf("stdout missing %q:\n%s", tc.wantStdout, stdout.String())
+			}
+		})
+	}
+}
+
+// TestRouteWaitList_PassesWaitBeadLabelConstant locks in the architect's §5.1
+// guardrail: the CLI must pass sessionpkg.WaitBeadLabel through to
+// ListBeadsOpts.Label. Renaming the constant or inlining "gc:wait" on either
+// side breaks the locator contract without a loud test.
+func TestRouteWaitList_PassesWaitBeadLabelConstant(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := writeWaitTestCity(t)
+
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("label")
+		w.Header().Set("X-GC-Cache-Age-S", "0")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0})
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeWaitList(cityPath, c, "", "", "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	if gotQuery != sessionpkg.WaitBeadLabel {
+		t.Errorf("API label query = %q, want %q", gotQuery, sessionpkg.WaitBeadLabel)
+	}
+}
+
+// TestRouteWaitList_StaleBannerOver30s confirms the >30 s cache-age banner
+// contract (parity with gc beads list API path).
+func TestRouteWaitList_StaleBannerOver30s(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := writeWaitTestCity(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "45")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0})
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeWaitList(cityPath, c, "", "", "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "cache age: 45s") {
+		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
+	}
+}
+
+// TestRenderWaitListFromAPI_FiltersNonWaitBeads guards the architect's §5.4
+// guardrail: a non-wait bead labeled gc:wait must not leak through to the
+// rendered output. IsWaitBead is the type guard that enforces it.
+func TestRenderWaitListFromAPI_FiltersNonWaitBeads(t *testing.T) {
+	cr := api.CachedRead[[]beads.Bead]{
+		Body: []beads.Bead{
+			{
+				ID:       "ga-wait-keep",
+				Type:     sessionpkg.WaitBeadType,
+				Status:   "open",
+				Labels:   []string{sessionpkg.WaitBeadLabel},
+				Metadata: map[string]string{"state": waitStatePending},
+			},
+			{
+				ID:       "ga-task-drop",
+				Type:     "task",
+				Status:   "open",
+				Labels:   []string{sessionpkg.WaitBeadLabel},
+				Metadata: map[string]string{},
+			},
+			{
+				ID:       "ga-closed-drop",
+				Type:     sessionpkg.WaitBeadType,
+				Status:   "closed",
+				Labels:   []string{sessionpkg.WaitBeadLabel},
+				Metadata: map[string]string{},
+			},
+			{
+				ID:       "ga-legacy-keep",
+				Type:     sessionpkg.LegacyWaitBeadType,
+				Status:   "open",
+				Labels:   []string{sessionpkg.WaitBeadLabel},
+				Metadata: map[string]string{"state": waitStatePending},
+			},
+		},
+		AgeSeconds: 1,
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := renderWaitListFromAPI("test-city-path", cr, "", "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "ga-wait-keep") {
+		t.Errorf("expected wait-typed bead to render:\n%s", out)
+	}
+	if !strings.Contains(out, "ga-legacy-keep") {
+		t.Errorf("expected legacy wait-typed bead to render:\n%s", out)
+	}
+	if strings.Contains(out, "ga-task-drop") {
+		t.Errorf("task-typed bead with gc:wait label leaked into output:\n%s", out)
+	}
+	if strings.Contains(out, "ga-closed-drop") {
+		t.Errorf("closed wait leaked into default (--all=false) output:\n%s", out)
+	}
+}
+
+// TestRenderWaitInspectFromAPI_RejectsNonWait verifies the §5.4 guardrail on
+// the inspect path: GET /bead/{id} can return any bead ID, so IsWaitBead must
+// still gate the API path.
+func TestRenderWaitInspectFromAPI_RejectsNonWait(t *testing.T) {
+	cr := api.CachedRead[beads.Bead]{
+		Body: beads.Bead{
+			ID:       "ga-task",
+			Type:     "task",
+			Status:   "open",
+			Labels:   []string{"something-else"},
+			Metadata: map[string]string{},
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := renderWaitInspectFromAPI("test-city-path", cr, "ga-task", false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "is not a wait") {
+		t.Errorf("stderr missing 'is not a wait':\n%s", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout should be empty on non-wait rejection, got:\n%s", stdout.String())
+	}
 }

@@ -33,12 +33,14 @@ const (
 	// derived from the wake budget used for starts.
 	defaultMaxParallelStopsPerWave = 3
 	defaultMaxParallelInterrupts   = 16
-
-	// staleKeyDetectDelay is how long to wait after starting a session
-	// before checking if it died immediately (stale resume key detection).
-	// Matches the same constant in internal/session/chat.go.
-	staleKeyDetectDelay = 2 * time.Second
 )
+
+// staleKeyDetectDelay is how long to wait after starting a session before
+// checking if it died immediately (stale resume key detection). Matches the
+// same value in internal/session/chat.go. Made a var so tests driving the
+// start path through a fake runtime can shorten it via
+// setStaleKeyDetectDelayForTest (defined in the test file).
+var staleKeyDetectDelay = 2 * time.Second
 
 type asyncStartLimiter struct {
 	mu       sync.Mutex
@@ -219,14 +221,18 @@ func (p startPhaseTimings) formatLog() string {
 }
 
 type startExecutionOptions struct {
-	async           bool
-	asyncFollowUp   func()
-	asyncLimiter    *asyncStartLimiter
-	asyncTracker    *asyncStartTracker
-	maxSessionAgeTr maxSessionAgeTracker
+	async            bool
+	asyncFollowUp    func()
+	asyncLimiter     *asyncStartLimiter
+	asyncTracker     *asyncStartTracker
+	asyncStopTracker *asyncStartTracker
+	maxSessionAgeTr  maxSessionAgeTracker
+	workDirResolver  taskWorkDirResolver
 }
 
 type startExecutionOption func(*startExecutionOptions)
+
+type taskWorkDirResolver func(startCandidate, *config.City) string
 
 func withAsyncStartExecution() startExecutionOption {
 	return func(opts *startExecutionOptions) {
@@ -252,6 +258,12 @@ func withAsyncStartTracker(tracker *asyncStartTracker) startExecutionOption {
 	}
 }
 
+func withAsyncDrainAckStopTracker(tracker *asyncStartTracker) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.asyncStopTracker = tracker
+	}
+}
+
 // withMaxSessionAgeTracker installs the preemptive-restart tracker for
 // this reconcile pass. Nil leaves preemptive restarts disabled.
 func withMaxSessionAgeTracker(tr maxSessionAgeTracker) startExecutionOption {
@@ -260,10 +272,17 @@ func withMaxSessionAgeTracker(tr maxSessionAgeTracker) startExecutionOption {
 	}
 }
 
+func withTaskWorkDirResolver(resolver taskWorkDirResolver) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.workDirResolver = resolver
+	}
+}
+
 type asyncStartTracker struct {
-	mu       sync.Mutex
-	wg       sync.WaitGroup
-	stopping bool
+	mu               sync.Mutex
+	wg               sync.WaitGroup
+	stopping         bool
+	drainAckStopKeys sync.Map
 }
 
 func (t *asyncStartTracker) start() (func(), bool) {
@@ -277,6 +296,28 @@ func (t *asyncStartTracker) start() (func(), bool) {
 	}
 	t.wg.Add(1)
 	return t.wg.Done, true
+}
+
+func (t *asyncStartTracker) startDrainAckStop(key string) (func(), bool) {
+	if t == nil {
+		return func() {}, true
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return t.start()
+	}
+	if _, loaded := t.drainAckStopKeys.LoadOrStore(key, struct{}{}); loaded {
+		return nil, false
+	}
+	done, ok := t.start()
+	if !ok {
+		t.drainAckStopKeys.Delete(key)
+		return nil, false
+	}
+	return func() {
+		t.drainAckStopKeys.Delete(key)
+		done()
+	}, true
 }
 
 func (t *asyncStartTracker) wait(timeout time.Duration) bool {
@@ -629,7 +670,7 @@ func prepareStartCandidate(
 	store beads.Store,
 	clk clock.Clock,
 ) (*preparedStart, error) {
-	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard)
+	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard, nil)
 }
 
 func prepareStartCandidateForCity(
@@ -641,13 +682,26 @@ func prepareStartCandidateForCity(
 	store beads.Store,
 	clk clock.Clock,
 	stderr io.Writer,
+	workDirResolver taskWorkDirResolver,
 ) (*preparedStart, error) {
 	session := candidate.session
-	if _, _, err := preWakeCommit(session, store, clk); err != nil {
+	if session != nil && strings.TrimSpace(session.ID) != "" && store != nil {
+		if err := sessionpkg.WithSessionMutationLock(session.ID, func() error {
+			current, err := store.Get(session.ID)
+			if err != nil {
+				return err
+			}
+			candidate.session = &current
+			_, _, err = preWakeCommit(candidate.session, store, clk)
+			return err
+		}); err != nil {
+			return nil, err
+		}
+	} else if _, _, err := preWakeCommit(session, store, clk); err != nil {
 		return nil, err
 	}
 	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
-	return buildPreparedStart(candidate, cfg, store)
+	return buildPreparedStartWithWorkDirResolver(candidate, cfg, store, workDirResolver)
 }
 
 func refreshConfiguredNamedStartCandidate(
@@ -689,6 +743,15 @@ func buildPreparedStart(
 	cfg *config.City,
 	store beads.Store,
 ) (*preparedStart, error) {
+	return buildPreparedStartWithWorkDirResolver(candidate, cfg, store, nil)
+}
+
+func buildPreparedStartWithWorkDirResolver(
+	candidate startCandidate,
+	cfg *config.City,
+	store beads.Store,
+	workDirResolver taskWorkDirResolver,
+) (*preparedStart, error) {
 	session := candidate.session
 	tp := candidate.tp
 	agentCfg := templateParamsToConfig(tp)
@@ -706,6 +769,7 @@ func buildPreparedStart(
 				log.Printf("session %s: invalid template_overrides JSON: %v", session.ID, err)
 			} else if len(overrides) > 0 {
 				fullOptions := make(map[string]string)
+				hasSchemaOverride := false
 				for k, v := range tp.ResolvedProvider.EffectiveDefaults {
 					fullOptions[k] = v
 				}
@@ -714,12 +778,20 @@ func buildPreparedStart(
 						continue // handled separately below, not a schema option
 					}
 					fullOptions[k] = v
+					hasSchemaOverride = true
 				}
 				args, resolveErr := config.ResolveExplicitOptions(tp.ResolvedProvider.OptionsSchema, fullOptions)
 				if resolveErr != nil {
 					log.Printf("session %s: template_overrides resolution error: %v", session.ID, resolveErr)
 				} else if len(args) > 0 {
 					agentCfg.Command = replaceSchemaFlags(agentCfg.Command, tp.ResolvedProvider.OptionsSchema, args)
+				}
+				if hasSchemaOverride {
+					if command, err := config.BuildProviderResumeCommand(tp.ResolvedProvider, overrides); err == nil && strings.TrimSpace(command) != "" {
+						resolved := *tp.ResolvedProvider
+						resolved.ResumeCommand = command
+						tp.ResolvedProvider = &resolved
+					}
 				}
 			}
 		}
@@ -728,7 +800,7 @@ func buildPreparedStart(
 	coreHash := runtime.CoreFingerprint(agentCfg)
 	coreBreakdown := runtime.CoreFingerprintBreakdown(agentCfg)
 	liveHash := runtime.LiveFingerprint(agentCfg)
-	if wd := resolveTaskWorkDir(store, session.ID, candidate.name(), strings.TrimSpace(session.Metadata["alias"]), candidate.logicalTemplate(cfg)); wd != "" {
+	if wd := resolvePreparedTaskWorkDir(candidate, cfg, store, workDirResolver); wd != "" {
 		agentCfg.WorkDir = wd
 	} else if wd := session.Metadata["work_dir"]; wd != "" {
 		agentCfg.WorkDir = wd
@@ -759,9 +831,15 @@ func buildPreparedStart(
 	if !firstStart && !forceFresh && hasResumeKey {
 		agentCfg.PromptSuffix = ""
 		agentCfg.PromptFlag = ""
-		agentCfg.Nudge = tp.Hints.Nudge
+		agentCfg.Nudge = restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
 		if agentCfg.Env != nil {
 			delete(agentCfg.Env, startupPromptDeliveredEnv)
+		}
+		if strings.TrimSpace(tp.Prompt) != "" {
+			if agentCfg.Env == nil {
+				agentCfg.Env = map[string]string{}
+			}
+			agentCfg.Env[startupPromptDeliveredEnv] = "1"
 		}
 	}
 	// Initial message: append to prompt on first start only.
@@ -832,6 +910,33 @@ func buildPreparedStart(
 		coreBreakdown: coreBreakdown,
 		liveHash:      liveHash,
 	}, nil
+}
+
+func resolvePreparedTaskWorkDir(
+	candidate startCandidate,
+	cfg *config.City,
+	store beads.Store,
+	workDirResolver taskWorkDirResolver,
+) string {
+	if workDirResolver != nil {
+		if workDir := workDirResolver(candidate, cfg); workDir != "" {
+			return workDir
+		}
+	}
+	return resolveTaskWorkDir(store, taskWorkDirAssignees(candidate, cfg)...)
+}
+
+func taskWorkDirAssignees(candidate startCandidate, cfg *config.City) []string {
+	if candidate.session == nil {
+		return nil
+	}
+	session := candidate.session
+	return []string{
+		session.ID,
+		candidate.name(),
+		strings.TrimSpace(session.Metadata["alias"]),
+		candidate.logicalTemplate(cfg),
+	}
 }
 
 func executePreparedStartWave(
@@ -1025,6 +1130,13 @@ func appendInitialMessageToStartupNudge(nudge, msg string) string {
 		return nudge + startupPromptNudgeSeparator + userMessage
 	}
 	return userMessage
+}
+
+func restartPromptNudge(prompt, nudge string) string {
+	if strings.TrimSpace(prompt) == "" {
+		return nudge
+	}
+	return prependStartupPromptToNudge(prompt, nudge)
 }
 
 func startupRateLimitScreenDetected(
@@ -1383,18 +1495,8 @@ func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNam
 	if sp == nil || strings.TrimSpace(name) == "" {
 		return false, false
 	}
-	return runtimeProviderLivenessFromRunning(sp, name, processNames, sp.IsRunning(name))
-}
-
-func runtimeProviderLivenessFromRunning(sp runtime.Provider, name string, processNames []string, running bool) (bool, bool) {
-	if len(processNames) == 0 {
-		return running, running
-	}
-	alive := sp.ProcessAlive(name, processNames)
-	if alive && !running {
-		running = true
-	}
-	return running, alive
+	obs := runtime.ObserveLiveness(sp, name, processNames)
+	return obs.Running, obs.Alive
 }
 
 func commitStartResult(
@@ -1410,14 +1512,14 @@ func commitStartResult(
 
 // confirmPendingStart reports whether a session in the given metadata
 // state should be transitioned to "active" after a successful runtime
-// spawn. Empty, "creating", "asleep", and "drained" all indicate the
+// spawn. Empty, "start-pending", "creating", "asleep", and "drained" all indicate the
 // session was pending a spawn; "awake" is treated by the reconciler as
 // equivalent to "active" and is intentionally NOT restamped (a no-op
 // metadata write on every spawn). Any other state ("draining",
 // "archived", "quarantined", ...) is left alone.
 func confirmPendingStart(currentState string) bool {
 	switch sessionpkg.State(strings.TrimSpace(currentState)) {
-	case "", sessionpkg.StateCreating, sessionpkg.StateAsleep, sessionpkg.State("drained"):
+	case "", sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateAsleep, sessionpkg.State("drained"):
 		return true
 	}
 	return false
@@ -1915,7 +2017,7 @@ func executePlannedStartsTraced(
 						}
 					}
 				}
-				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
+				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
 				if err != nil {
 					clearPendingStartInFlightLease(candidate.session, store, stderr)
 					if release != nil {

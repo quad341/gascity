@@ -170,9 +170,33 @@ var noStrictMode bool
 // dryRunMode previews what agents would start without actually starting them.
 var dryRunMode bool
 
+// noAutoRestartMode opts out of `gc start`'s supervisor auto-restart on
+// drift. When set, drift is detected and reported but the operator must
+// restart the supervisor manually. Honors the design's exit-1 contract
+// so CI scripts can pin "supervisor is on the build I just produced."
+var noAutoRestartMode bool
+
+// startVerboseMode disables gc start warning deduplication.
+var startVerboseMode bool
+
 // buildIdleTracker creates an idleTracker from the config, populating
 // timeouts for agents that have idle_timeout set. Returns nil if no
 // agents use idle timeout (disabled).
+//
+// Two registration paths, complementary rather than exclusive:
+//   - Per-session-name registration via discoverPoolInstances covers stable
+//     identities known at startup: configured named sessions, canonical
+//     singleton pool members, namepool members ("furiosa"), and any
+//     currently-running stale "{name}-N" suffixes a previous pool layout
+//     left behind. Tests assert these exact keys, and the reconciler still
+//     hits them via the per-name lookup.
+//   - Per-template registration covers ephemeral pool agents whose runtime
+//     session names are minted from bead IDs at sling time
+//     (e.g. "local-core__builder-fm-abc123") and never match anything a
+//     static enumeration could produce. checkIdle falls back to the
+//     template lookup when the per-name lookup misses, so canonical and
+//     namepool members keep their per-name hit while bead-derived names
+//     pick up the template's timeout.
 func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider) idleTracker {
 	var hasAny bool
 	st := cfg.Workspace.SessionTemplate
@@ -193,24 +217,48 @@ func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider)
 			continue
 		}
 		named := config.FindNamedSession(cfg, a.QualifiedName())
+		namedAlways := named != nil && named.ModeOrDefault() == "always"
 		if named != nil {
 			// Configured named sessions own the canonical runtime session for
 			// direct configured identities. mode="always" must never be subject
 			// to idle timeout.
-			if named.ModeOrDefault() != "always" {
-				it.setTimeout(config.NamedSessionRuntimeName(cityName, cfg.Workspace, a.QualifiedName()), timeout)
+			namedSessionName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, named.QualifiedName())
+			if !namedAlways {
+				it.setTimeout(namedSessionName, timeout)
 				registeredAny = true
+			} else {
+				it.exemptTemplateFallbackForSession(namedSessionName)
 			}
 			if !a.SupportsInstanceExpansion() {
 				continue
 			}
+			// Hybrid named-and-pool: fall through to the pool registrations
+			// below so any non-named members of the pool still pick up a
+			// timeout. The named identity's registration above takes
+			// precedence in checkIdle's per-name lookup.
 		}
-		sp0 := scaleParamsFor(&a)
 		if a.SupportsInstanceExpansion() {
-			// Register each pool instance (worker-1, worker-2, ...).
+			// Per-name registration for stable instance identities.
+			// discoverPoolInstances returns canonical / namepool / live-stale
+			// names. For bounded non-namepool pools it also returns static
+			// "{name}-N" slot names — those won't match runtime bead-derived
+			// names, but registering them is harmless and keeps the existing
+			// canonical-singleton and namepool tests asserting the right keys.
+			sp0 := scaleParamsFor(&a)
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 				sn := startupSessionName(cityName, qualifiedInstance, st)
 				it.setTimeout(sn, timeout)
+				registeredAny = true
+			}
+			// Per-template fallback so bead-derived runtime names for pool
+			// agents still pick up this timeout via checkIdle's template
+			// lookup. Always-mode named sessions sharing this template are
+			// exempted per runtime name below; they must not suppress idle
+			// timeout for unnamed pool siblings.
+			if a.SupportsGenericEphemeralSessions() {
+				template := lifecycleTemplateFallbackKey(a)
+				it.setTimeoutForTemplate(template, timeout)
+				exemptAlwaysNamedTemplateFallbacks(cfg, cityName, template, it.exemptTemplateFallbackForSession)
 				registeredAny = true
 			}
 			continue
@@ -251,20 +299,30 @@ func buildMaxSessionAgeTracker(cfg *config.City, cityName string, sp runtime.Pro
 		}
 		jitter := a.MaxSessionAgeJitterDuration()
 		named := config.FindNamedSession(cfg, a.QualifiedName())
+		namedAlways := named != nil && named.ModeOrDefault() == "always"
 		if named != nil {
-			if named.ModeOrDefault() != "always" {
-				tr.setConfig(config.NamedSessionRuntimeName(cityName, cfg.Workspace, a.QualifiedName()), maxAge, jitter)
+			namedSessionName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, named.QualifiedName())
+			if !namedAlways {
+				tr.setConfig(namedSessionName, maxAge, jitter)
 				registeredAny = true
+			} else {
+				tr.exemptTemplateFallbackForSession(namedSessionName)
 			}
 			if !a.SupportsInstanceExpansion() {
 				continue
 			}
 		}
-		sp0 := scaleParamsFor(&a)
 		if a.SupportsInstanceExpansion() {
+			sp0 := scaleParamsFor(&a)
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 				sn := startupSessionName(cityName, qualifiedInstance, st)
 				tr.setConfig(sn, maxAge, jitter)
+				registeredAny = true
+			}
+			if a.SupportsGenericEphemeralSessions() {
+				template := lifecycleTemplateFallbackKey(a)
+				tr.setConfigForTemplate(template, maxAge, jitter)
+				exemptAlwaysNamedTemplateFallbacks(cfg, cityName, template, tr.exemptTemplateFallbackForSession)
 				registeredAny = true
 			}
 			continue
@@ -279,8 +337,26 @@ func buildMaxSessionAgeTracker(cfg *config.City, cityName string, sp runtime.Pro
 	return tr
 }
 
+func lifecycleTemplateFallbackKey(a config.Agent) string {
+	return a.QualifiedName()
+}
+
+func exemptAlwaysNamedTemplateFallbacks(cfg *config.City, cityName, template string, exempt func(string)) {
+	if cfg == nil || template == "" || exempt == nil {
+		return
+	}
+	for i := range cfg.NamedSessions {
+		named := &cfg.NamedSessions[i]
+		if named.ModeOrDefault() != "always" || named.TemplateQualifiedName() != template {
+			continue
+		}
+		exempt(config.NamedSessionRuntimeName(cityName, cfg.Workspace, named.QualifiedName()))
+	}
+}
+
 func newStartCmd(stdout, stderr io.Writer) *cobra.Command {
 	var foregroundMode bool
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "start [path]",
 		Short: "Start the city under the machine-wide supervisor",
@@ -296,7 +372,11 @@ Use "gc supervisor run" for foreground operation.`,
   gc supervisor run`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if doStart(args, foregroundMode, stdout, stderr) != 0 {
+			if jsonOut && (foregroundMode || dryRunMode) {
+				fmt.Fprintln(stderr, "gc start: --json is only supported for supervisor-managed start") //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			if doStartJSON(args, foregroundMode, jsonOut, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -316,20 +396,75 @@ Use "gc supervisor run" for foreground operation.`,
 	cmd.Flags().MarkHidden("no-strict") //nolint:errcheck // flag always exists
 	cmd.Flags().BoolVarP(&dryRunMode, "dry-run", "n", false,
 		"preview what agents would start without starting them")
+	cmd.Flags().BoolVar(&noAutoRestartMode, "no-auto-restart", false,
+		"detect supervisor binary drift but do not auto-restart; exits non-zero on drift")
+	cmd.Flags().BoolVar(&startVerboseMode, "verbose", false,
+		"disable warning deduplication and print every supervisor warning")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	return cmd
 }
 
 func doStart(args []string, controllerMode bool, stdout, stderr io.Writer) int {
-	return doStartWithNameOverride(args, controllerMode, stdout, stderr, "")
+	return doStartWithNameOverrideAndSummary(args, controllerMode, stdout, stderr, "")
+}
+
+func doStartJSON(args []string, controllerMode bool, jsonOut bool, stdout, stderr io.Writer) int {
+	if !jsonOut {
+		return doStart(args, controllerMode, stdout, stderr)
+	}
+	return doStartWithNameOverrideJSON(args, controllerMode, stdout, stderr, "", true)
 }
 
 func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string) int {
-	if controllerMode || dryRunMode {
-		return doStartStandalone(args, controllerMode, stdout, stderr)
+	return doStartWithNameOverrideRaw(args, controllerMode, stdout, stderr, nameOverride)
+}
+
+func doStartWithNameOverrideAndSummary(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string) int {
+	if controllerMode {
+		code := doStartWithNameOverrideRaw(args, controllerMode, stdout, stderr, nameOverride)
+		writeStartSummary(stderr, startSummary{
+			PID:      currentSupervisorPID(),
+			Binary:   startSummaryBinaryPath(),
+			Build:    shortBuildHash(),
+			Drift:    "unknown",
+			Warnings: 0,
+			Fatal:    "",
+		})
+		return code
 	}
-	if len(extraConfigFiles) > 0 || noStrictMode {
-		fmt.Fprintln(stderr, "gc start: --file and --no-strict only apply to the legacy standalone controller; use --foreground or remove those flags") //nolint:errcheck // best-effort stderr
-		return 1
+	proxy := newStartOutputProxy(stderr, startOutputProxyOptions{
+		Verbose: startVerboseMode,
+		TTY:     startOutputIsTerminal(stderr),
+	})
+	code := doStartWithNameOverrideRaw(args, controllerMode, stdout, proxy, nameOverride)
+	fatal := ""
+	if code != 0 {
+		fatal = proxy.deriveFatalFromRecords()
+		proxy.SetFatal(fatal)
+	}
+	if err := proxy.Flush(); err != nil && stderr != nil {
+		fmt.Fprintf(stderr, "gc start: flushing output: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+	writeStartSummary(stderr, startSummary{
+		PID:      currentSupervisorPID(),
+		Binary:   startSummaryBinaryPath(),
+		Build:    shortBuildHash(),
+		Drift:    "unknown",
+		Warnings: proxy.WarningCount(),
+		Fatal:    fatalSummaryCause(fatal),
+	})
+	return code
+}
+
+func doStartWithNameOverrideRaw(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string) int {
+	return doStartWithNameOverrideJSON(args, controllerMode, stdout, stderr, nameOverride, false)
+}
+
+func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string, jsonOut bool) int {
+	// --foreground / --controller bypass the supervisor entirely (legacy
+	// standalone reconciler). No drift to check.
+	if controllerMode {
+		return doStartStandalone(args, controllerMode, stdout, stderr)
 	}
 
 	dir, err := resolveStartDir(args)
@@ -343,6 +478,33 @@ func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr 
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
+	// Flag validation runs before any drift side effects so a malformed
+	// invocation (e.g. `gc start --file=foo`) fails fast without
+	// triggering a supervisor restart.
+	if len(extraConfigFiles) > 0 || noStrictMode {
+		fmt.Fprintln(stderr, "gc start: --file and --no-strict only apply to the legacy standalone controller; use --foreground or remove those flags") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// Drift detection runs against any already-running supervisor before
+	// we hand work to it. When no supervisor is running the check is a
+	// no-op (registration spawns a fresh one).
+	driftStdout := stdout
+	if jsonOut {
+		driftStdout = stderr
+	}
+	if exitCode, cont := runStartDriftCheck(cityPath, driftStdout, stderr); !cont {
+		return exitCode
+	}
+
+	// --dry-run routes to the standalone preview path *after* the drift
+	// check, so operators get a Supervisor: identity line and any drift
+	// report even in preview mode.
+	if dryRunMode {
+		return doStartStandalone(args, controllerMode, stdout, stderr)
+	}
+
 	if err := ensureCityScaffold(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: runtime scaffold: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -364,8 +526,29 @@ func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr 
 		printDoltAuthorIdentityBlock(stderr, "gc start", status)
 		return 1
 	}
-	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, stdout, stderr, "gc start", true); code != 0 {
+	startStdout := stdout
+	if jsonOut {
+		startStdout = io.Discard
+	}
+	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, startStdout, stderr, "gc start", true); code != 0 {
 		return code
+	}
+	if jsonOut {
+		cityName := nameOverride
+		if entry, registered, err := registeredCityEntry(cityPath); err == nil && registered {
+			cityName = entry.EffectiveName()
+		}
+		if err := writeLifecycleActionJSON(stdout, lifecycleActionJSON{
+			Command:  "start",
+			Action:   "start",
+			Message:  "City started under supervisor.",
+			CityName: cityName,
+			CityPath: cityPath,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc start: writing JSON result: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
 	}
 	fmt.Fprintln(stdout, "City started under supervisor.") //nolint:errcheck // best-effort stdout
 	return 0
@@ -509,6 +692,14 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: beads health check: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal warning — server may recover by the time agents need it.
 	}
+
+	// Warm-up doctor scan. Fail-open: startup continues regardless of check,
+	// mail, or runner failures.
+	warmupOpts := WarmupOpts{
+		Mailer: defaultMailProvider(cityPath),
+		Stderr: stderr,
+	}
+	_, _ = RunWarmupChecks(context.Background(), cityPath, cfg, warmupOpts)
 
 	// Materialize formula symlinks before agent startup.
 	// System formulas/orders now arrive via the core bootstrap pack.

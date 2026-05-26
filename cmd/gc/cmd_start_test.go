@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -242,6 +244,337 @@ func TestBuildLifecycleTrackers_CanonicalSingletonNamedSessionOverlayOneKey(t *t
 	}
 }
 
+func TestBuildIdleTracker_PoolAgentTemplateFallbackMatchesReconcilerTemplate(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{
+			{
+				Name:              "builder",
+				Dir:               "local-core",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+				IdleTimeout:       "1h",
+			},
+		},
+	}
+	template := cfg.Agents[0].QualifiedName()
+	sessionName := sessionNameFromBeadID("fm-r56l0x")
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	sp := runtime.NewFake()
+	startFakeSession(t, sp, sessionName)
+	sp.SetActivity(sessionName, now.Add(-90*time.Minute))
+
+	idle, ok := buildIdleTracker(cfg, "city", "", sp).(*memoryIdleTracker)
+	if !ok {
+		t.Fatalf("buildIdleTracker returned %T, want *memoryIdleTracker", idle)
+	}
+	if _, ok := idle.templateTimeouts[template]; !ok {
+		t.Fatalf("idle tracker missing template %q in %v", template, idle.templateTimeouts)
+	}
+	if !idle.checkIdle(sessionName, template, sp, now) {
+		t.Fatalf("pool session %q did not idle out via template %q", sessionName, template)
+	}
+}
+
+func TestBuildIdleTracker_NamedOnDemandPoolRegistersNameAndTemplate(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{
+			{
+				Name:              "builder",
+				Dir:               "local-core",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+				IdleTimeout:       "1h",
+			},
+		},
+		NamedSessions: []config.NamedSession{{
+			Template: "builder",
+			Dir:      "local-core",
+		}},
+	}
+	template := cfg.Agents[0].QualifiedName()
+	namedSession := config.NamedSessionRuntimeName("city", cfg.Workspace, template)
+	poolSession := sessionNameFromBeadID("fm-r56l0x")
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	sp := runtime.NewFake()
+	startFakeSession(t, sp, namedSession)
+	startFakeSession(t, sp, poolSession)
+	sp.SetActivity(namedSession, now.Add(-90*time.Minute))
+	sp.SetActivity(poolSession, now.Add(-90*time.Minute))
+
+	idle, ok := buildIdleTracker(cfg, "city", "", sp).(*memoryIdleTracker)
+	if !ok {
+		t.Fatalf("buildIdleTracker returned %T, want *memoryIdleTracker", idle)
+	}
+	if _, ok := idle.timeouts[namedSession]; !ok {
+		t.Fatalf("idle tracker missing named session %q in %v", namedSession, idle.timeouts)
+	}
+	if _, ok := idle.templateTimeouts[template]; !ok {
+		t.Fatalf("idle tracker missing named pool template %q in %v", template, idle.templateTimeouts)
+	}
+	if !idle.checkIdle(namedSession, template, sp, now) {
+		t.Fatalf("named session %q did not idle out via per-name timeout", namedSession)
+	}
+	if !idle.checkIdle(poolSession, template, sp, now) {
+		t.Fatalf("pool session %q did not inherit template idle timeout", poolSession)
+	}
+}
+
+func TestBuildIdleTracker_NamedAlwaysPoolExemptsNamedOnly(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{
+			{
+				Name:              "builder",
+				Dir:               "local-core",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+				IdleTimeout:       "1h",
+			},
+		},
+		NamedSessions: []config.NamedSession{{
+			Template: "builder",
+			Dir:      "local-core",
+			Mode:     "always",
+		}},
+	}
+	template := cfg.Agents[0].QualifiedName()
+	namedSession := config.NamedSessionRuntimeName("city", cfg.Workspace, template)
+	poolSession := sessionNameFromBeadID("fm-r56l0x")
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	sp := runtime.NewFake()
+	startFakeSession(t, sp, namedSession)
+	startFakeSession(t, sp, poolSession)
+	sp.SetActivity(namedSession, now.Add(-90*time.Minute))
+	sp.SetActivity(poolSession, now.Add(-90*time.Minute))
+
+	idle, ok := buildIdleTracker(cfg, "city", "", sp).(*memoryIdleTracker)
+	if !ok {
+		t.Fatalf("buildIdleTracker returned %T, want *memoryIdleTracker", idle)
+	}
+	if _, ok := idle.templateTimeouts[template]; !ok {
+		t.Fatalf("idle tracker missing named pool template %q in %v", template, idle.templateTimeouts)
+	}
+	if idle.checkIdle(namedSession, template, sp, now) {
+		t.Fatalf("always named session %q must not inherit template idle timeout", namedSession)
+	}
+	if !idle.checkIdle(poolSession, template, sp, now) {
+		t.Fatalf("pool session %q did not inherit template idle timeout", poolSession)
+	}
+}
+
+func TestBuildIdleTracker_AliasAlwaysNamedPoolExemptsAliasOnly(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{
+			{
+				Name:              "builder",
+				Dir:               "local-core",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+				IdleTimeout:       "1h",
+			},
+		},
+		NamedSessions: []config.NamedSession{{
+			Name:     "primary",
+			Template: "builder",
+			Dir:      "local-core",
+			Mode:     "always",
+		}},
+	}
+	template := cfg.Agents[0].QualifiedName()
+	namedSession := config.NamedSessionRuntimeName("city", cfg.Workspace, cfg.NamedSessions[0].QualifiedName())
+	poolSession := sessionNameFromBeadID("fm-r56l0x")
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	sp := runtime.NewFake()
+	startFakeSession(t, sp, namedSession)
+	startFakeSession(t, sp, poolSession)
+	sp.SetActivity(namedSession, now.Add(-90*time.Minute))
+	sp.SetActivity(poolSession, now.Add(-90*time.Minute))
+
+	idle, ok := buildIdleTracker(cfg, "city", "", sp).(*memoryIdleTracker)
+	if !ok {
+		t.Fatalf("buildIdleTracker returned %T, want *memoryIdleTracker", idle)
+	}
+	if idle.checkIdle(namedSession, template, sp, now) {
+		t.Fatalf("alias always-named session %q must not inherit template idle timeout", namedSession)
+	}
+	if !idle.checkIdle(poolSession, template, sp, now) {
+		t.Fatalf("pool session %q did not inherit template idle timeout", poolSession)
+	}
+}
+
+func TestBuildIdleTracker_NamedAlwaysNoExplicitPoolRegistersTemplateFallback(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{
+			{
+				Name:        "builder",
+				Dir:         "local-core",
+				IdleTimeout: "1h",
+			},
+		},
+		NamedSessions: []config.NamedSession{{
+			Template: "builder",
+			Dir:      "local-core",
+			Mode:     "always",
+		}},
+	}
+	template := cfg.Agents[0].QualifiedName()
+	namedSession := config.NamedSessionRuntimeName("city", cfg.Workspace, template)
+	poolSession := sessionNameFromBeadID("fm-r56l0x")
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	sp := runtime.NewFake()
+	startFakeSession(t, sp, namedSession)
+	startFakeSession(t, sp, poolSession)
+	sp.SetActivity(namedSession, now.Add(-90*time.Minute))
+	sp.SetActivity(poolSession, now.Add(-90*time.Minute))
+
+	idle, ok := buildIdleTracker(cfg, "city", "", sp).(*memoryIdleTracker)
+	if !ok {
+		t.Fatalf("buildIdleTracker returned %T, want *memoryIdleTracker", idle)
+	}
+	if _, ok := idle.templateTimeouts[template]; !ok {
+		t.Fatalf("idle tracker missing template %q in %v", template, idle.templateTimeouts)
+	}
+	if idle.checkIdle(namedSession, template, sp, now) {
+		t.Fatalf("always named session %q must not inherit template idle timeout", namedSession)
+	}
+	if !idle.checkIdle(poolSession, template, sp, now) {
+		t.Fatalf("pool session %q did not inherit template idle timeout", poolSession)
+	}
+}
+
+func TestBuildMaxSessionAgeTracker_PoolAgentTemplateFallback(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{
+			{
+				Name:              "builder",
+				Dir:               "local-core",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+				MaxSessionAge:     "1h",
+			},
+		},
+	}
+	template := cfg.Agents[0].QualifiedName()
+	sessionName := sessionNameFromBeadID("fm-r56l0x")
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+
+	maxAge, ok := buildMaxSessionAgeTracker(cfg, "city", runtime.NewFake()).(*memoryMaxSessionAgeTracker)
+	if !ok {
+		t.Fatalf("buildMaxSessionAgeTracker returned %T, want *memoryMaxSessionAgeTracker", maxAge)
+	}
+	if _, ok := maxAge.templateConfigs[template]; !ok {
+		t.Fatalf("max-age tracker missing template %q in %v", template, maxAge.templateConfigs)
+	}
+	if !maxAge.shouldRestart(sessionName, template, now.Add(-2*time.Hour), now) {
+		t.Fatalf("pool session %q did not max-age restart via template %q", sessionName, template)
+	}
+}
+
+func TestBuildMaxSessionAgeTracker_NamedAlwaysNoExplicitPoolRegistersTemplateFallback(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{
+			{
+				Name:          "builder",
+				Dir:           "local-core",
+				MaxSessionAge: "1h",
+			},
+		},
+		NamedSessions: []config.NamedSession{{
+			Template: "builder",
+			Dir:      "local-core",
+			Mode:     "always",
+		}},
+	}
+	template := cfg.Agents[0].QualifiedName()
+	namedSession := config.NamedSessionRuntimeName("city", cfg.Workspace, template)
+	poolSession := sessionNameFromBeadID("fm-r56l0x")
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+
+	maxAge, ok := buildMaxSessionAgeTracker(cfg, "city", runtime.NewFake()).(*memoryMaxSessionAgeTracker)
+	if !ok {
+		t.Fatalf("buildMaxSessionAgeTracker returned %T, want *memoryMaxSessionAgeTracker", maxAge)
+	}
+	if _, ok := maxAge.templateConfigs[template]; !ok {
+		t.Fatalf("max-age tracker missing template %q in %v", template, maxAge.templateConfigs)
+	}
+	if maxAge.shouldRestart(namedSession, template, now.Add(-2*time.Hour), now) {
+		t.Fatalf("always named session %q must not inherit template max age", namedSession)
+	}
+	if !maxAge.shouldRestart(poolSession, template, now.Add(-2*time.Hour), now) {
+		t.Fatalf("pool session %q did not max-age restart via template %q", poolSession, template)
+	}
+}
+
+func TestLifecycleTemplateFallbackKeyMatchesTemplateParamsTemplateName(t *testing.T) {
+	agent := config.Agent{
+		Name:              "builder",
+		Dir:               "local-core",
+		MaxActiveSessions: intPtr(5),
+	}
+	template := lifecycleTemplateFallbackKey(agent)
+	if want := agent.QualifiedName(); template != want {
+		t.Fatalf("lifecycleTemplateFallbackKey = %q, want %q", template, want)
+	}
+
+	poolAgent, qualifiedInstance, _ := poolDesiredRequestIdentity(&agent, 1)
+	if got := templateNameFor(poolAgent, qualifiedInstance); got != template {
+		t.Fatalf("pool TemplateName = %q, want lifecycle fallback key %q", got, template)
+	}
+	namedIdentity := "local-core/primary"
+	if got := templateNameFor(&agent, namedIdentity); got != template {
+		t.Fatalf("named TemplateName = %q, want lifecycle fallback key %q", got, template)
+	}
+	if got := templateNameFor(&agent, agent.QualifiedName()); got != template {
+		t.Fatalf("base TemplateName = %q, want lifecycle fallback key %q", got, template)
+	}
+}
+
+func TestExemptAlwaysNamedTemplateFallbacksUsesBindingQualifiedRuntimeName(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		NamedSessions: []config.NamedSession{
+			{
+				Name:     "primary",
+				Template: "builder",
+				Dir:      "local-core",
+				Mode:     "always",
+			},
+			{
+				Name:     "secondary",
+				Template: "builder",
+				Dir:      "local-core",
+				Mode:     "on_demand",
+			},
+			{
+				Name:     "other",
+				Template: "reviewer",
+				Dir:      "local-core",
+				Mode:     "always",
+			},
+		},
+	}
+	template := "local-core/builder"
+	want := config.NamedSessionRuntimeName("city", cfg.Workspace, "local-core/primary")
+	var got []string
+
+	exemptAlwaysNamedTemplateFallbacks(cfg, "city", template, func(sessionName string) {
+		got = append(got, sessionName)
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("exempt callback called %d times, want 1: %v", len(got), got)
+	}
+	if got[0] != want {
+		t.Fatalf("exempted session = %q, want %q", got[0], want)
+	}
+}
+
 func TestStandaloneBuildAgentsFnWithSessionBeads_UsesRigStoresForAssignedWork(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
@@ -456,6 +789,10 @@ func TestPassthroughEnvIncludesProviderCredentialEnv(t *testing.T) {
 	t.Setenv("GOOGLE_API_KEY", "google-123")
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/google-credentials.json")
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "gc-project")
+	t.Setenv("DEEPSEEK_API_KEY", "ds-123")
+	t.Setenv("OLLAMA_HOST", "http://localhost:11434")
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIA123")
+	t.Setenv("AWS_PAGER", "less")
 
 	got := passthroughEnv()
 
@@ -467,10 +804,16 @@ func TestPassthroughEnvIncludesProviderCredentialEnv(t *testing.T) {
 		"GOOGLE_API_KEY":                 "google-123",
 		"GOOGLE_APPLICATION_CREDENTIALS": "/tmp/google-credentials.json",
 		"GOOGLE_CLOUD_PROJECT":           "gc-project",
+		"DEEPSEEK_API_KEY":               "ds-123",
+		"OLLAMA_HOST":                    "http://localhost:11434",
+		"AWS_ACCESS_KEY_ID":              "AKIA123",
 	} {
 		if got[key] != want {
 			t.Errorf("passthroughEnv()[%s] = %q, want %q", key, got[key], want)
 		}
+	}
+	if _, ok := got["AWS_PAGER"]; ok {
+		t.Errorf("passthroughEnv() should not include broad AWS runtime state")
 	}
 }
 
@@ -1355,5 +1698,62 @@ func TestResolveTemplateFPExtra_NotEmptyForPoolAgent(t *testing.T) {
 				t.Errorf("tp.FPExtra missing pool.min for pool agent (FPExtra=%v)", tp.FPExtra)
 			}
 		})
+	}
+}
+
+// TestDoStart_FlagValidationRunsBeforeDriftCheck pins the ordering:
+// the --file / --no-strict legacy-flag rejection must run before any
+// supervisor drift side effects. Otherwise a malformed invocation
+// (e.g. `gc start --file=foo <city>`) triggers a real supervisor
+// restart and then fails with the flag error, an avoidable footgun.
+func TestDoStart_FlagValidationRunsBeforeDriftCheck(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_DOLT", "skip")
+
+	// Bootstrap a minimal city directory so requireBootstrappedCity
+	// returns successfully and execution reaches the flag check.
+	cityDir := filepath.Join(t.TempDir(), "test-city")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("mkdir city .gc: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	// Set extraConfigFiles to a non-empty value so the legacy-flag
+	// rejection arm is selected.
+	oldExtra := extraConfigFiles
+	extraConfigFiles = []string{"some-extra.toml"}
+	t.Cleanup(func() { extraConfigFiles = oldExtra })
+
+	// Stub supervisorAliveHook to a non-zero PID so that, if drift
+	// detection runs, it would take the drift-check path. We track
+	// call count to confirm drift detection was NOT invoked.
+	oldAlive := supervisorAliveHook
+	aliveCalls := 0
+	supervisorAliveHook = func() int {
+		aliveCalls++
+		return 4242
+	}
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	var stdout, stderr bytes.Buffer
+	code := doStartWithNameOverride([]string{cityDir}, false, &stdout, &stderr, "")
+
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "--file and --no-strict only apply") {
+		t.Errorf("stderr missing flag-rejection message:\n%s", stderr.String())
+	}
+	if aliveCalls != 0 {
+		t.Errorf("supervisorAliveHook called %d times; drift check ran before flag validation", aliveCalls)
+	}
+	if strings.Contains(stdout.String(), "Drift detected:") || strings.Contains(stderr.String(), "Drift detected:") {
+		t.Errorf("drift report printed despite flag rejection.\nstdout:\n%s\nstderr:\n%s",
+			stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Restarting supervisor") {
+		t.Errorf("supervisor restart attempted despite flag rejection:\n%s", stdout.String())
 	}
 }

@@ -286,6 +286,11 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 	return s.storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor)
 }
 
+// Tx executes fn sequentially against the native Dolt store.
+func (s *NativeDoltStore) Tx(_ string, fn func(Tx) error) error {
+	return runSequentialTx(s, fn)
+}
+
 // Delete permanently removes a bead from the upstream beads storage layer.
 func (s *NativeDoltStore) Delete(id string) error {
 	ctx := context.Background()

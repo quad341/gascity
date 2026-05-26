@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -49,6 +52,44 @@ type closeAllFailMemStore struct {
 	failSetMetadataID   string
 	failSetMetadataKey  string
 	failSetMetadataCall int
+}
+
+type staleSourceWorkflowListStore struct {
+	beads.Store
+	sourceID string
+	// These tests drive the wrapper from one goroutine; plain counters keep
+	// the fixtures easy to read.
+	hiddenReads   int
+	hideReadLimit int
+	hiddenGets    int
+	hideGetLimit  int
+}
+
+func (s *staleSourceWorkflowListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	items, err := s.Store.List(query)
+	if err != nil {
+		return nil, err
+	}
+	if query.Metadata["gc.source_bead_id"] == s.sourceID && len(items) > 0 && s.hiddenReads < s.hideReadLimit {
+		s.hiddenReads++
+		return nil, nil
+	}
+	return items, nil
+}
+
+func (s *staleSourceWorkflowListStore) Get(id string) (beads.Bead, error) {
+	item, err := s.Store.Get(id)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	if sourceworkflow.IsWorkflowRoot(item) &&
+		sourceworkflow.WorkflowMatchesSource(item, s.sourceID, "", "") &&
+		s.hiddenReads > 0 &&
+		s.hiddenGets < s.hideGetLimit {
+		s.hiddenGets++
+		return beads.Bead{}, fmt.Errorf("getting bead %q: %w", id, beads.ErrNotFound)
+	}
+	return item, nil
 }
 
 func (s *closeAllFailMemStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
@@ -123,6 +164,37 @@ type testNotifier struct{}
 func (testNotifier) PokeController(_ string)      {}
 func (testNotifier) PokeControlDispatch(_ string) {}
 
+type closeLaunchedWorkflowNotifier struct {
+	store        beads.Store
+	sourceID     string
+	storeRef     string
+	once         sync.Once
+	closed       int
+	closedRootID string
+	err          error
+}
+
+func (n *closeLaunchedWorkflowNotifier) PokeController(_ string) {
+	n.once.Do(func() {
+		roots, err := sourceworkflow.ListLiveRoots(n.store, n.sourceID, n.storeRef, n.storeRef)
+		if err != nil {
+			n.err = err
+			return
+		}
+		closedStatus := "closed"
+		for _, root := range roots {
+			if err := n.store.Update(root.ID, beads.UpdateOpts{Status: &closedStatus}); err != nil {
+				n.err = err
+				return
+			}
+			n.closedRootID = root.ID
+			n.closed++
+		}
+	})
+}
+
+func (*closeLaunchedWorkflowNotifier) PokeControlDispatch(_ string) {}
+
 func testDeps(cfg *config.City, sp runtime.Provider, runner SlingRunner) SlingDeps {
 	if cfg != nil && len(cfg.FormulaLayers.City) == 0 {
 		cfg.FormulaLayers.City = []string{sharedTestFormulaDir}
@@ -149,8 +221,17 @@ var (
 	sharedTestCityDir    string
 )
 
+const (
+	slingTestFormulaDirPrefix = "gc-sling-test-formulas-pid"
+	slingTestCityDirPrefix    = "gc-sling-test-city-pid"
+)
+
 func init() {
-	dir, err := os.MkdirTemp("", "gc-sling-test-formulas-*")
+	tmpRoot := os.TempDir()
+	sweepOrphanSlingPIDPrefixedDirs(tmpRoot, slingTestFormulaDirPrefix)
+	sweepOrphanSlingPIDPrefixedDirs(tmpRoot, slingTestCityDirPrefix)
+
+	dir, err := os.MkdirTemp("", slingPIDPrefixedTempPattern(slingTestFormulaDirPrefix))
 	if err != nil {
 		panic(err)
 	}
@@ -162,15 +243,69 @@ func init() {
 		"my-formula", "convoy-formula",
 	} {
 		content := fmt.Sprintf("formula = %q\nversion = 1\n\n[[steps]]\nid = \"work\"\ntitle = \"Work\"\n", name)
-		_ = os.WriteFile(filepath.Join(dir, name+".formula.toml"), []byte(content), 0o644)
+		_ = os.WriteFile(filepath.Join(dir, name+".toml"), []byte(content), 0o644)
 	}
 	sharedTestFormulaDir = dir
 
-	cityDir, err := os.MkdirTemp("", "gc-sling-test-city-*")
+	cityDir, err := os.MkdirTemp("", slingPIDPrefixedTempPattern(slingTestCityDirPrefix))
 	if err != nil {
 		panic(err)
 	}
 	sharedTestCityDir = cityDir
+}
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	_ = os.RemoveAll(sharedTestFormulaDir)
+	_ = os.RemoveAll(sharedTestCityDir)
+	os.Exit(code)
+}
+
+func slingPIDPrefixedTempPattern(prefix string) string {
+	return prefix + strconv.Itoa(os.Getpid()) + "-*"
+}
+
+func slingPIDFromPrefixedDirName(name, prefix string) (int, bool) {
+	if !strings.HasPrefix(name, prefix) {
+		return 0, false
+	}
+	suffix := strings.TrimPrefix(name, prefix)
+	end := 0
+	for end < len(suffix) && suffix[end] >= '0' && suffix[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, false
+	}
+	if end < len(suffix) && suffix[end] != '-' {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(suffix[:end])
+	if err != nil {
+		return 0, false
+	}
+	return pid, true
+}
+
+func sweepOrphanSlingPIDPrefixedDirs(root, prefix string) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	self := os.Getpid()
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pid, ok := slingPIDFromPrefixedDirName(e.Name(), prefix)
+		if !ok || pid <= 0 || pid == self {
+			continue
+		}
+		if pidutil.Alive(pid) {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(root, e.Name()))
+	}
 }
 
 // --- Pure helper tests ---
@@ -262,10 +397,15 @@ func TestCheckBeadStateCustomBDQueryNoIdempotency(t *testing.T) {
 
 func TestCheckBeadStatePinnedDefaultBDQueryRemainsIdempotent(t *testing.T) {
 	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
 	bead, err := store.Create(beads.Bead{
 		Title:    "route me",
 		Type:     "task",
 		Status:   "open",
+		ParentID: convoy.ID,
 		Metadata: map[string]string{"gc.routed_to": "mayor"},
 	})
 	if err != nil {
@@ -282,6 +422,222 @@ func TestCheckBeadStatePinnedDefaultBDQueryRemainsIdempotent(t *testing.T) {
 	}
 	if len(result.Warnings) != 0 {
 		t.Fatalf("expected no warnings for pinned default sling_query, got %v", result.Warnings)
+	}
+}
+
+// TestCheckBeadStateRoutedWithoutConvoyIsNotIdempotent guards the recovery
+// path: a bead with gc.routed_to set (e.g. declared via bd create --metadata
+// rather than routed through gc sling) but no convoy parent must not be
+// treated as idempotent — otherwise the caller skips finalize() and the work
+// sits orphaned.
+func TestCheckBeadStateRoutedWithoutConvoyIsNotIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false when routed bead has no convoy parent, got %+v", result)
+	}
+}
+
+func TestCheckBeadStateRoutedWithLiveTrackingConvoyIsIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "auto convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, bead.ID, "tracks"); err != nil {
+		t.Fatalf("store.DepAdd(tracks): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true when routed bead has live tracking convoy, got %+v", result)
+	}
+}
+
+func TestCheckBeadStateRoutedWithClosedTrackingConvoyIsNotIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "old convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, bead.ID, "tracks"); err != nil {
+		t.Fatalf("store.DepAdd(tracks): %v", err)
+	}
+	if err := store.Close(convoy.ID); err != nil {
+		t.Fatalf("store.Close(convoy): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false when routed bead has only closed tracking convoy, got %+v", result)
+	}
+}
+
+// TestCheckBeadStateRoutedWithClosedConvoyIsNotIdempotent ensures a prior
+// convoy whose run has finished does not count as a live attachment — the
+// next sling should still create a fresh convoy and poke the controller.
+func TestCheckBeadStateRoutedWithClosedConvoyIsNotIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "old convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		ParentID: convoy.ID,
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	if err := store.Close(convoy.ID); err != nil {
+		t.Fatalf("store.Close(convoy): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false when convoy parent is closed, got %+v", result)
+	}
+}
+
+func TestCheckBeadStateRoutedWithWorkflowParentIsIdempotent(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]string
+	}{
+		{
+			name: "workflow kind",
+			metadata: map[string]string{
+				"gc.kind": "workflow",
+			},
+		},
+		{
+			name: "graph v2 contract",
+			metadata: map[string]string{
+				"gc.formula_contract": "graph.v2",
+			},
+		},
+		{
+			name: "workflow kind and graph v2 contract",
+			metadata: map[string]string{
+				"gc.kind":             "workflow",
+				"gc.formula_contract": "graph.v2",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			parent, err := store.Create(beads.Bead{
+				Title:    "workflow",
+				Type:     "workflow",
+				Status:   "in_progress",
+				Metadata: tt.metadata,
+			})
+			if err != nil {
+				t.Fatalf("store.Create(parent): %v", err)
+			}
+			bead, err := store.Create(beads.Bead{
+				Title:    "workflow step",
+				Type:     "task",
+				Status:   "open",
+				ParentID: parent.ID,
+				Metadata: map[string]string{"gc.routed_to": "mayor"},
+			})
+			if err != nil {
+				t.Fatalf("store.Create(bead): %v", err)
+			}
+
+			result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+			if !result.Idempotent {
+				t.Fatalf("expected Idempotent=true for routed bead under workflow parent, got %+v", result)
+			}
+		})
+	}
+}
+
+func TestCheckBeadStateRoutedWithNormalParentWithoutTrackingConvoyRecovers(t *testing.T) {
+	store := beads.NewMemStore()
+	parent, err := store.Create(beads.Bead{Title: "epic", Type: "epic", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(parent): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "epic child",
+		Type:     "task",
+		Status:   "open",
+		ParentID: parent.ID,
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false for routed bead under normal parent with no tracking convoy, got %+v", result)
+	}
+}
+
+func TestCheckBeadStatePoolLabelWithoutConvoyIsNotIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "pool work",
+		Type:   "task",
+		Status: "open",
+		Labels: []string{"pool:hw/polecat"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	a := config.Agent{
+		Name:              "polecat",
+		Dir:               "hw",
+		MinActiveSessions: intPtr(1),
+		MaxActiveSessions: intPtr(3),
+	}
+
+	result := CheckBeadState(store, bead.ID, a, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false for pool label without convoy parent, got %+v", result)
 	}
 }
 
@@ -789,8 +1145,10 @@ func TestDoSlingIdempotent(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	store := beads.NewMemStore()
+	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy", Status: "open"})
 	b, _ := store.Create(beads.Bead{
 		Title:    "test",
+		ParentID: convoy.ID,
 		Metadata: map[string]string{"gc.routed_to": "mayor"},
 	})
 
@@ -1189,6 +1547,39 @@ func TestDoSlingBatchUsesCallerQuerierChildrenWhenContainerExistsThere(t *testin
 	}
 }
 
+func TestDoSlingBatchExpandsTracksConvoy(t *testing.T) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	store := deps.Store
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	epic, err := store.Create(beads.Bead{Title: "epic", Type: "epic"})
+	if err != nil {
+		t.Fatalf("create epic: %v", err)
+	}
+	child, err := store.Create(beads.Bead{Title: "child", Type: "task", Status: "open", ParentID: epic.ID})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, child.ID, "tracks"); err != nil {
+		t.Fatalf("track child: %v", err)
+	}
+
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: convoy.ID}, deps, store)
+	if err != nil {
+		t.Fatalf("DoSlingBatch: %v", err)
+	}
+	if result.Routed != 1 {
+		t.Fatalf("Routed = %d, want 1", result.Routed)
+	}
+	if len(result.Children) != 1 || result.Children[0].BeadID != child.ID {
+		t.Fatalf("children = %#v, want tracked child %s", result.Children, child.ID)
+	}
+}
+
 func TestDoSlingBatchRoutesNonContainerFoundInQuerierStore(t *testing.T) {
 	runner := newFakeRunner()
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
@@ -1562,7 +1953,7 @@ func TestSlingAttachFormulaForceStillRejectsMissingBead(t *testing.T) {
 
 func TestSlingAttachGraphFormulaRejectsExistingLiveRoot(t *testing.T) {
 	formulaDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
 formula = "graph-work"
 version = 2
 contract = "graph.v2"
@@ -1618,9 +2009,376 @@ title = "Do work"
 	}
 }
 
-func TestSlingAttachGraphFormulaRejectsExistingLiveRootAcrossStores(t *testing.T) {
+func TestSlingAttachGraphFormulaRetriesLaunchVisibilityWhenListAndGetAreStale(t *testing.T) {
 	formulaDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{formulaDir},
+		},
+	}
+	formulatest.EnableV2ForTest(t)
+	config.InjectImplicitAgents(cfg)
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleStore := &staleSourceWorkflowListStore{
+		Store:         deps.Store,
+		sourceID:      source.ID,
+		hideReadLimit: 2,
+		hideGetLimit:  2,
+	}
+	deps.Store = staleStore
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+	if staleStore.hiddenReads == 0 || staleStore.hiddenReads > sourceWorkflowLaunchVisibilityAttempts {
+		t.Fatalf("hiddenReads = %d, want retry path exercised within %d attempts", staleStore.hiddenReads, sourceWorkflowLaunchVisibilityAttempts)
+	}
+	if staleStore.hiddenGets == 0 || staleStore.hiddenGets > sourceWorkflowLaunchVisibilityAttempts {
+		t.Fatalf("hiddenGets = %d, want direct-get retry path exercised within %d attempts", staleStore.hiddenGets, sourceWorkflowLaunchVisibilityAttempts)
+	}
+	roots, err := sourceworkflow.ListLiveRoots(deps.Store, source.ID, deps.StoreRef, deps.StoreRef)
+	if err != nil {
+		t.Fatalf("ListLiveRoots: %v", err)
+	}
+	if len(roots) != 1 || roots[0].ID != result.WorkflowID {
+		t.Fatalf("live roots = %#v, want [%s]", roots, result.WorkflowID)
+	}
+	updatedSource, err := deps.Store.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updatedSource.Metadata["workflow_id"]; got != result.WorkflowID {
+		t.Fatalf("source workflow_id = %q, want %q", got, result.WorkflowID)
+	}
+}
+
+func TestSlingAttachGraphFormulaRollsBackWhenLaunchVisibilityNeverConverges(t *testing.T) {
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{formulaDir},
+		},
+	}
+	formulatest.EnableV2ForTest(t)
+	config.InjectImplicitAgents(cfg)
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleStore := &staleSourceWorkflowListStore{
+		Store:         deps.Store,
+		sourceID:      source.ID,
+		hideReadLimit: sourceWorkflowLaunchVisibilityAttempts,
+		hideGetLimit:  sourceWorkflowLaunchVisibilityAttempts,
+	}
+	deps.Store = staleStore
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{})
+	if err == nil {
+		t.Fatal("AttachFormula error = nil, want launch visibility invariant error")
+	}
+	if !strings.Contains(err.Error(), "not visible for source bead") {
+		t.Fatalf("AttachFormula error = %v, want launch visibility invariant error", err)
+	}
+	if result.WorkflowID != "" {
+		t.Fatalf("WorkflowID = %q, want empty result on launch visibility error", result.WorkflowID)
+	}
+	if staleStore.hiddenReads != sourceWorkflowLaunchVisibilityAttempts {
+		t.Fatalf("hiddenReads = %d, want %d", staleStore.hiddenReads, sourceWorkflowLaunchVisibilityAttempts)
+	}
+	if staleStore.hiddenGets != sourceWorkflowLaunchVisibilityAttempts {
+		t.Fatalf("hiddenGets = %d, want %d", staleStore.hiddenGets, sourceWorkflowLaunchVisibilityAttempts)
+	}
+	closedRoots, err := staleStore.Store.List(beads.ListQuery{
+		IncludeClosed: true,
+		Metadata: map[string]string{
+			"gc.source_bead_id": source.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("List(closed roots): %v", err)
+	}
+	closedRoots = slices.DeleteFunc(closedRoots, func(root beads.Bead) bool {
+		return !sourceworkflow.IsWorkflowRoot(root)
+	})
+	if len(closedRoots) != 1 {
+		t.Fatalf("closed roots = %#v, want one rolled-back workflow root", closedRoots)
+	}
+	root := closedRoots[0]
+	if root.Status != "closed" {
+		t.Fatalf("root status = %q, want closed after rollback", root.Status)
+	}
+	roots, err := sourceworkflow.ListLiveRoots(deps.Store, source.ID, deps.StoreRef, deps.StoreRef)
+	if err != nil {
+		t.Fatalf("ListLiveRoots: %v", err)
+	}
+	if len(roots) != 0 {
+		t.Fatalf("live roots = %#v, want none after rollback", roots)
+	}
+	updatedSource, err := deps.Store.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updatedSource.Metadata["workflow_id"]; got != "" {
+		t.Fatalf("source workflow_id = %q, want restored empty workflow_id", got)
+	}
+}
+
+func TestSlingAttachGraphFormulaAcceptsDirectRootWhenLaunchListStaysStale(t *testing.T) {
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{formulaDir},
+		},
+	}
+	formulatest.EnableV2ForTest(t)
+	config.InjectImplicitAgents(cfg)
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleStore := &staleSourceWorkflowListStore{
+		Store:         deps.Store,
+		sourceID:      source.ID,
+		hideReadLimit: 99,
+	}
+	deps.Store = staleStore
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+	if staleStore.hiddenReads == 0 {
+		t.Fatal("hiddenReads = 0, want stale list path exercised")
+	}
+	root, err := deps.Store.Get(result.WorkflowID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if !sourceworkflow.WorkflowMatchesSource(root, source.ID, deps.StoreRef, deps.StoreRef) {
+		t.Fatalf("root metadata = %#v, want workflow to match source %s", root.Metadata, source.ID)
+	}
+	updatedSource, err := deps.Store.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updatedSource.Metadata["workflow_id"]; got != result.WorkflowID {
+		t.Fatalf("source workflow_id = %q, want %q", got, result.WorkflowID)
+	}
+}
+
+func TestSlingAttachGraphFormulaForceReplacesSequentialLaunchWhenLaunchListStaysStale(t *testing.T) {
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{formulaDir},
+		},
+	}
+	formulatest.EnableV2ForTest(t)
+	config.InjectImplicitAgents(cfg)
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleStore := &staleSourceWorkflowListStore{
+		Store:         deps.Store,
+		sourceID:      source.ID,
+		hideReadLimit: 99,
+	}
+	deps.Store = staleStore
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula(first): %v", err)
+	}
+
+	second, err := s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{Force: true})
+	if err != nil {
+		t.Fatalf("AttachFormula(second force): %v", err)
+	}
+	if second.WorkflowID == "" || second.WorkflowID == first.WorkflowID {
+		t.Fatalf("second WorkflowID = %q, want new workflow distinct from %q", second.WorkflowID, first.WorkflowID)
+	}
+	firstRoot, err := staleStore.Store.Get(first.WorkflowID)
+	if err != nil {
+		t.Fatalf("Get(first root): %v", err)
+	}
+	if firstRoot.Status != "closed" {
+		t.Fatalf("first root status = %q, want closed after force replacement", firstRoot.Status)
+	}
+	roots, err := sourceworkflow.ListLiveRoots(staleStore.Store, source.ID, deps.StoreRef, deps.StoreRef)
+	if err != nil {
+		t.Fatalf("ListLiveRoots(underlying): %v", err)
+	}
+	if len(roots) != 1 || roots[0].ID != second.WorkflowID {
+		t.Fatalf("underlying live roots = %#v, want [%s]", roots, second.WorkflowID)
+	}
+}
+
+func TestSlingAttachGraphFormulaRejectsRootClosedBeforeVisibilityCheck(t *testing.T) {
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{formulaDir},
+		},
+	}
+	formulatest.EnableV2ForTest(t)
+	config.InjectImplicitAgents(cfg)
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	notifier := &closeLaunchedWorkflowNotifier{
+		store:    deps.Store,
+		sourceID: source.ID,
+		storeRef: deps.StoreRef,
+	}
+	deps.Notify = notifier
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{})
+	if err == nil {
+		t.Fatal("AttachFormula error = nil, want launch visibility invariant error")
+	}
+	if !strings.Contains(err.Error(), "not visible for source bead") {
+		t.Fatalf("AttachFormula error = %v, want launch visibility invariant error", err)
+	}
+	if notifier.err != nil {
+		t.Fatalf("notifier close: %v", notifier.err)
+	}
+	if notifier.closed != 1 {
+		t.Fatalf("notifier closed = %d, want 1", notifier.closed)
+	}
+	if result.WorkflowID != "" {
+		t.Fatalf("WorkflowID = %q, want empty result on launch visibility error", result.WorkflowID)
+	}
+	root, err := deps.Store.Get(notifier.closedRootID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if root.Status != "closed" {
+		t.Fatalf("root status = %q, want closed", root.Status)
+	}
+	if !sourceworkflow.WorkflowMatchesSource(root, source.ID, deps.StoreRef, deps.StoreRef) {
+		t.Fatalf("root metadata = %#v, want workflow to match source %s", root.Metadata, source.ID)
+	}
+	liveRoots, err := sourceworkflow.ListLiveRoots(deps.Store, source.ID, deps.StoreRef, deps.StoreRef)
+	if err != nil {
+		t.Fatalf("ListLiveRoots: %v", err)
+	}
+	if len(liveRoots) != 0 {
+		t.Fatalf("live roots = %#v, want none after notifier closes root", liveRoots)
+	}
+	updatedSource, err := deps.Store.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updatedSource.Metadata["workflow_id"]; got != "" {
+		t.Fatalf("source workflow_id = %q, want restored empty workflow_id", got)
+	}
+}
+
+func TestSlingAttachGraphFormulaRejectsExistingLiveRootAcrossStores(t *testing.T) {
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
 formula = "graph-work"
 version = 2
 contract = "graph.v2"
@@ -1689,9 +2447,92 @@ title = "Do work"
 	}
 }
 
-func TestSlingAttachGraphFormulaForceReplacesExistingLiveRootAcrossStores(t *testing.T) {
+func TestSlingAttachGraphFormulaRejectsPreviousWorkflowAcrossStoresWhenListStale(t *testing.T) {
 	formulaDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{formulaDir},
+		},
+	}
+	formulatest.EnableV2ForTest(t)
+	config.InjectImplicitAgents(cfg)
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherBase := beads.NewMemStoreFrom(100, nil, nil)
+	root, err := otherBase.Create(beads.Bead{
+		ID:     "wf-other",
+		Title:  "cross-store workflow",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			"gc.kind":                                "workflow",
+			"gc.formula_contract":                    "graph.v2",
+			"gc.source_bead_id":                      source.ID,
+			sourceworkflow.SourceStoreRefMetadataKey: deps.StoreRef,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.Store.SetMetadata(source.ID, "workflow_id", root.ID); err != nil {
+		t.Fatalf("SetMetadata(workflow_id): %v", err)
+	}
+	staleOtherStore := &staleSourceWorkflowListStore{
+		Store:         otherBase,
+		sourceID:      source.ID,
+		hideReadLimit: 99,
+	}
+	deps.SourceWorkflowStores = func() ([]SourceWorkflowStore, error) {
+		return []SourceWorkflowStore{
+			{Store: deps.Store, StoreRef: deps.StoreRef},
+			{Store: staleOtherStore, StoreRef: "rig:alpha"},
+		}, nil
+	}
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{})
+	if err == nil {
+		t.Fatal("AttachFormula error = nil, want conflict")
+	}
+	var conflictErr *sourceworkflow.ConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("AttachFormula error = %v, want ConflictError", err)
+	}
+	if len(conflictErr.WorkflowIDs) != 1 || conflictErr.WorkflowIDs[0] != root.ID {
+		t.Fatalf("WorkflowIDs = %#v, want [%s]", conflictErr.WorkflowIDs, root.ID)
+	}
+	cityRoots, err := sourceworkflow.ListLiveRoots(deps.Store, source.ID, deps.StoreRef, deps.StoreRef)
+	if err != nil {
+		t.Fatalf("ListLiveRoots(city): %v", err)
+	}
+	if len(cityRoots) != 0 {
+		t.Fatalf("city live roots = %#v, want no duplicate launch", cityRoots)
+	}
+}
+
+func TestSlingAttachGraphFormulaForceReplacesExistingLiveRootAcrossStores(t *testing.T) {
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
 formula = "graph-work"
 version = 2
 contract = "graph.v2"
@@ -1780,9 +2621,106 @@ title = "Do work"
 	}
 }
 
-func TestSlingAttachGraphFormulaForceRestoresCrossStoreRootWhenFinalizeFails(t *testing.T) {
+func TestSlingAttachGraphFormulaForceReplacesPreviousWorkflowAcrossStoresWhenListStale(t *testing.T) {
 	formulaDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{formulaDir},
+		},
+	}
+	formulatest.EnableV2ForTest(t)
+	config.InjectImplicitAgents(cfg)
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherBase := beads.NewMemStoreFrom(100, nil, nil)
+	root, err := otherBase.Create(beads.Bead{
+		ID:     "wf-other",
+		Title:  "cross-store workflow",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			"gc.kind":                                "workflow",
+			"gc.formula_contract":                    "graph.v2",
+			"gc.source_bead_id":                      source.ID,
+			sourceworkflow.SourceStoreRefMetadataKey: deps.StoreRef,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.Store.SetMetadata(source.ID, "workflow_id", root.ID); err != nil {
+		t.Fatalf("SetMetadata(workflow_id): %v", err)
+	}
+	staleOtherStore := &staleSourceWorkflowListStore{
+		Store:         otherBase,
+		sourceID:      source.ID,
+		hideReadLimit: 99,
+	}
+	deps.SourceWorkflowStores = func() ([]SourceWorkflowStore, error) {
+		return []SourceWorkflowStore{
+			{Store: deps.Store, StoreRef: deps.StoreRef},
+			{Store: staleOtherStore, StoreRef: "rig:alpha"},
+		}, nil
+	}
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{Force: true})
+	if err != nil {
+		t.Fatalf("AttachFormula force: %v", err)
+	}
+	if result.WorkflowID == "" || result.WorkflowID == root.ID {
+		t.Fatalf("WorkflowID = %q, want new workflow root distinct from %q", result.WorkflowID, root.ID)
+	}
+	if staleOtherStore.hiddenReads == 0 {
+		t.Fatal("hiddenReads = 0, want stale cross-store list path exercised")
+	}
+
+	updatedOtherRoot, err := otherBase.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(other root): %v", err)
+	}
+	if updatedOtherRoot.Status != "closed" {
+		t.Fatalf("other root status = %q, want closed after force replacement", updatedOtherRoot.Status)
+	}
+	roots, err := sourceworkflow.ListLiveRoots(deps.Store, source.ID, deps.StoreRef, deps.StoreRef)
+	if err != nil {
+		t.Fatalf("ListLiveRoots(city): %v", err)
+	}
+	if len(roots) != 1 || roots[0].ID != result.WorkflowID {
+		t.Fatalf("city live roots = %#v, want [%s]", roots, result.WorkflowID)
+	}
+	updatedSource, err := deps.Store.Get(source.ID)
+	if err != nil {
+		t.Fatalf("Get(source): %v", err)
+	}
+	if got := updatedSource.Metadata["workflow_id"]; got != result.WorkflowID {
+		t.Fatalf("source workflow_id = %q, want %q", got, result.WorkflowID)
+	}
+}
+
+func TestSlingAttachGraphFormulaForceRestoresCrossStoreRootWhenFinalizeFails(t *testing.T) {
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
 formula = "graph-work"
 version = 2
 contract = "graph.v2"
@@ -1876,7 +2814,7 @@ title = "Do work"
 
 func TestSlingAttachGraphFormulaForceAllowsExistingLiveRoot(t *testing.T) {
 	formulaDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
 formula = "graph-work"
 version = 2
 contract = "graph.v2"
@@ -1958,7 +2896,7 @@ title = "Do work"
 
 func TestSlingAttachGraphFormulaForceRollsBackNewRootWhenSupersededCloseFails(t *testing.T) {
 	formulaDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
 formula = "graph-work"
 version = 2
 contract = "graph.v2"
@@ -2058,7 +2996,7 @@ title = "Do work"
 
 func TestSlingAttachGraphFormulaForceRestoresSupersededRootWhenFinalizeFails(t *testing.T) {
 	formulaDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
 formula = "graph-work"
 version = 2
 contract = "graph.v2"
@@ -2152,7 +3090,7 @@ title = "Do work"
 
 func TestSlingAttachGraphFormulaConcurrentLaunchCreatesSingleRoot(t *testing.T) {
 	formulaDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
 formula = "graph-work"
 version = 2
 contract = "graph.v2"
@@ -2232,7 +3170,7 @@ title = "Do work"
 
 func TestDoSlingBatchGraphFormulaForceAllowsAttachedWorkflow(t *testing.T) {
 	formulaDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
 formula = "graph-work"
 version = 2
 contract = "graph.v2"
@@ -2327,7 +3265,7 @@ func TestDoSlingBatchPropagatesConflictErrorToCaller(t *testing.T) {
 	// instead of exit 3 and never saw the "gc workflow delete-source"
 	// cleanup hint — the whole user-facing point of the fix.
 	formulaDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
 formula = "graph-work"
 version = 2
 contract = "graph.v2"
@@ -2417,7 +3355,7 @@ func TestDoSlingBatchPreflightEmitsConflictErrorForWorkflowAttachment(t *testing
 	// pre-check now emits a typed ConflictError alongside the legacy
 	// summary so errors.As succeeds at the CLI boundary.
 	formulaDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
 formula = "graph-work"
 version = 2
 contract = "graph.v2"
@@ -2504,7 +3442,7 @@ func TestDoSlingBatchPreflightEmitsPerChildConflictErrors(t *testing.T) {
 	// conflicted child via errors.Join so each child's blocking IDs
 	// stay correctly attributed.
 	formulaDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
 formula = "graph-work"
 version = 2
 contract = "graph.v2"
@@ -2770,6 +3708,132 @@ func TestFinalizeAutoConvoy(t *testing.T) {
 	// Verify convoy bead exists in store.
 	if _, err := deps.Store.Get(result.ConvoyID); err != nil {
 		t.Errorf("convoy %s not found in store: %v", result.ConvoyID, err)
+	}
+}
+
+// TestFinalizeAutoConvoyPreservesEpicParent is a regression test for the
+// bug where `gc sling` re-parented a bead to its auto-convoy via
+// `bd update --parent`, silently evicting the bead's existing
+// parent-child edge to its epic. After this fix, the auto-convoy links
+// to the bead via a "tracks" dep instead, leaving the epic parent
+// intact.
+func TestFinalizeAutoConvoyPreservesEpicParent(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+
+	epic, err := deps.Store.Create(beads.Bead{Title: "epic", Type: "epic"})
+	if err != nil {
+		t.Fatalf("create epic: %v", err)
+	}
+	child, err := deps.Store.Create(beads.Bead{Title: "work", Type: "task", ParentID: epic.ID})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+
+	result, err := DoSling(SlingOpts{Target: a, BeadOrFormula: child.ID}, deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if result.ConvoyID == "" {
+		t.Fatal("expected auto-convoy creation")
+	}
+
+	got, err := deps.Store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("get child: %v", err)
+	}
+	if got.ParentID != epic.ID {
+		t.Errorf("child parent = %q, want %q (epic parent evicted by sling)", got.ParentID, epic.ID)
+	}
+
+	epicChildren, err := deps.Store.Children(epic.ID)
+	if err != nil {
+		t.Fatalf("epic children: %v", err)
+	}
+	var found bool
+	for _, c := range epicChildren {
+		if c.ID == child.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("epic %s children missing %s; got %d children", epic.ID, child.ID, len(epicChildren))
+	}
+
+	convoyOut, err := deps.Store.DepList(result.ConvoyID, "down")
+	if err != nil {
+		t.Fatalf("DepList convoy: %v", err)
+	}
+	var tracks bool
+	for _, d := range convoyOut {
+		if d.DependsOnID == child.ID && d.Type == "tracks" {
+			tracks = true
+			break
+		}
+	}
+	if !tracks {
+		t.Errorf("convoy %s has no tracks dep to %s; got deps=%v", result.ConvoyID, child.ID, convoyOut)
+	}
+}
+
+// failingDepAddStore wraps a beads.Store and returns an error when
+// DepAdd is called with a specific dep type. Used to exercise error
+// branches in code that links beads via DepAdd.
+type failingDepAddStore struct {
+	beads.Store
+	failType string
+	err      error
+}
+
+func (f *failingDepAddStore) DepAdd(issueID, dependsOnID, depType string) error {
+	if depType == f.failType {
+		return f.err
+	}
+	return f.Store.DepAdd(issueID, dependsOnID, depType)
+}
+
+// TestFinalizeAutoConvoyTracksDepAddError covers the error branch of
+// the auto-convoy linking step: if DepAdd("tracks") fails, the failure
+// is recorded in result.MetadataErrors rather than bubbled up.
+func TestFinalizeAutoConvoyTracksDepAddError(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = &failingDepAddStore{
+		Store:    deps.Store,
+		failType: "tracks",
+		err:      errors.New("injected DepAdd failure"),
+	}
+
+	b, err := deps.Store.Create(beads.Bead{Title: "work", Type: "task"})
+	if err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+
+	result, err := DoSling(SlingOpts{Target: a, BeadOrFormula: b.ID}, deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	// When DepAdd fails, result.ConvoyID is intentionally left unset and
+	// the error is appended to MetadataErrors (soft failure — sling
+	// itself still succeeds).
+	if result.ConvoyID != "" {
+		t.Errorf("result.ConvoyID = %q, want empty (DepAdd failed)", result.ConvoyID)
+	}
+
+	var found bool
+	for _, e := range result.MetadataErrors {
+		if strings.Contains(e, "linking bead to convoy") && strings.Contains(e, "injected DepAdd failure") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected MetadataErrors to include tracks DepAdd failure; got %v", result.MetadataErrors)
 	}
 }
 

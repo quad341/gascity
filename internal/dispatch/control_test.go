@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -690,10 +691,21 @@ func TestProcessRetryControlControllerError(t *testing.T) {
 			"gc.root_bead_id":     root.ID,
 			"gc.step_ref":         "mol-test.review",
 			"gc.step_id":          "review",
+			"gc.scope_ref":        "review-scope",
+			"gc.scope_role":       "member",
 			"gc.max_attempts":     "3",
 			"gc.on_exhausted":     "hard_fail",
 			"gc.source_step_spec": `{not valid json`,
 			"gc.control_epoch":    "1",
+		},
+	})
+	body := mustCreate(t, store, beads.Bead{
+		Title: "review scope",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.scope_ref":    "review-scope",
+			"gc.scope_role":   "body",
 		},
 	})
 	attempt1 := mustCreate(t, store, beads.Bead{
@@ -710,7 +722,14 @@ func TestProcessRetryControlControllerError(t *testing.T) {
 	mustClose(t, store, attempt1.ID)
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	sawTrace := false
+	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{
+		Tracef: func(format string, args ...any) {
+			if strings.Contains(fmt.Sprintf(format, args...), "resolve-body") {
+				sawTrace = true
+			}
+		},
+	})
 	if err == nil {
 		t.Fatal("expected error from bad source_step_spec")
 	}
@@ -731,6 +750,13 @@ func TestProcessRetryControlControllerError(t *testing.T) {
 	}
 	if after.Metadata["gc.controller_retryable"] == "true" {
 		t.Fatalf("gc.controller_retryable = %q, want not retryable", after.Metadata["gc.controller_retryable"])
+	}
+	bodyAfter := mustGet(t, store, body.ID)
+	if bodyAfter.Status != "closed" || bodyAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("scope body = status %q outcome %q, want closed/fail", bodyAfter.Status, bodyAfter.Metadata["gc.outcome"])
+	}
+	if !sawTrace {
+		t.Fatal("expected hard controller-error reconciliation to use ProcessOptions trace")
 	}
 }
 
@@ -1253,8 +1279,8 @@ func TestIsTransientControllerError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isTransientControllerError(tt.err); got != tt.want {
-				t.Fatalf("isTransientControllerError(%v) = %v, want %v", tt.err, got, tt.want)
+			if got := IsTransientControllerError(tt.err); got != tt.want {
+				t.Fatalf("IsTransientControllerError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}
@@ -1347,6 +1373,49 @@ func TestFindLatestAttemptMultipleAttempts(t *testing.T) {
 	}
 	if found.ID != attempt2.ID {
 		t.Fatalf("findLatestAttempt returned %q, want %q (latest attempt)", found.ID, attempt2.ID)
+	}
+}
+
+func TestFindLatestAttemptFallsBackToDependenciesWhenRootScanFails(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+
+	control := mustCreate(t, base, beads.Bead{
+		Title: "rebase retry",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-feature.rebase-check",
+			"gc.step_id":      "rebase-check",
+		},
+	})
+
+	attempt := mustCreate(t, base, beads.Bead{
+		Title: "rebase attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-feature.rebase-check.attempt.1",
+			"gc.attempt":      "1",
+		},
+	})
+	mustClose(t, base, attempt.ID)
+	mustDep(t, base, control.ID, attempt.ID, "blocks")
+
+	store := &listFailStore{
+		Store: base,
+		err:   errors.New("search wisps: context canceled"),
+	}
+	found, err := findLatestAttempt(store, mustGet(t, store, control.ID))
+	if err != nil {
+		t.Fatalf("findLatestAttempt: %v", err)
+	}
+	if found.ID != attempt.ID {
+		t.Fatalf("findLatestAttempt returned %q, want dependency attempt %q", found.ID, attempt.ID)
 	}
 }
 
@@ -2096,6 +2165,15 @@ func mustDep(t *testing.T, store beads.Store, from, to, depType string) { //noli
 	}
 }
 
+type listFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s *listFailStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, s.err
+}
+
 type controlCloseTrackingStore struct {
 	beads.Store
 	targetID              string
@@ -2476,6 +2554,92 @@ func TestBuildAttemptRecipeComposeExpandFanout(t *testing.T) {
 	}
 	if !foundSpecBead {
 		t.Error("review-claude missing spec bead for frozen step spec")
+	}
+}
+
+func TestBuildAttemptRecipeRalphChildOnCompleteCreatesScopedFanout(t *testing.T) {
+	t.Parallel()
+
+	step := &formula.Step{
+		ID:    "review-loop",
+		Title: "Review loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{MaxAttempts: 3},
+		Children: []*formula.Step{
+			{
+				ID:    "dc-members",
+				Title: "List design council members",
+				Type:  "task",
+				OnComplete: &formula.OnCompleteSpec{
+					ForEach:    "output.members",
+					Bond:       "review-member",
+					Sequential: true,
+					Vars: map[string]string{
+						"member": "{item.name}",
+					},
+				},
+			},
+		},
+	}
+	control := beads.Bead{
+		ID: "ctrl-fanout",
+		Metadata: map[string]string{
+			"gc.step_id":  "review-loop",
+			"gc.step_ref": "mol-review.review-loop",
+		},
+	}
+
+	recipe := buildAttemptRecipe(step, control, 2)
+	sourceID := "mol-review.review-loop.iteration.2.dc-members"
+	source := recipe.StepByID(sourceID)
+	if source == nil {
+		t.Fatal("missing dc-members source step")
+	}
+	if got := source.Metadata["gc.output_json_required"]; got != "true" {
+		t.Fatalf("source gc.output_json_required = %q, want true", got)
+	}
+
+	fanout := recipe.StepByID(sourceID + "-fanout")
+	if fanout == nil {
+		t.Fatal("missing dc-members fanout control")
+	}
+	if got := fanout.Metadata["gc.kind"]; got != "fanout" {
+		t.Fatalf("fanout gc.kind = %q, want fanout", got)
+	}
+	if got := fanout.Metadata["gc.control_for"]; got != sourceID {
+		t.Fatalf("fanout gc.control_for = %q, want %s", got, sourceID)
+	}
+	if got := fanout.Metadata["gc.scope_ref"]; got != "mol-review.review-loop.iteration.2" {
+		t.Fatalf("fanout gc.scope_ref = %q, want mol-review.review-loop.iteration.2", got)
+	}
+	if got := fanout.Metadata["gc.scope_role"]; got != "member" {
+		t.Fatalf("fanout gc.scope_role = %q, want member", got)
+	}
+	if got := fanout.Metadata["gc.attempt"]; got != "2" {
+		t.Fatalf("fanout gc.attempt = %q, want 2", got)
+	}
+	if got := fanout.Metadata["gc.for_each"]; got != "output.members" {
+		t.Fatalf("fanout gc.for_each = %q, want output.members", got)
+	}
+	if got := fanout.Metadata["gc.bond"]; got != "review-member" {
+		t.Fatalf("fanout gc.bond = %q, want review-member", got)
+	}
+	if got := fanout.Metadata["gc.fanout_mode"]; got != "sequential" {
+		t.Fatalf("fanout gc.fanout_mode = %q, want sequential", got)
+	}
+	if got := fanout.Metadata["gc.bond_vars"]; got != `{"member":"{item.name}"}` {
+		t.Fatalf("fanout gc.bond_vars = %q, want member binding", got)
+	}
+
+	foundFanoutDep := false
+	for _, dep := range recipe.Deps {
+		if dep.StepID == sourceID+"-fanout" && dep.DependsOnID == sourceID && dep.Type == "blocks" {
+			foundFanoutDep = true
+			break
+		}
+	}
+	if !foundFanoutDep {
+		t.Fatalf("missing fanout blocks dependency on source; deps = %+v", recipe.Deps)
 	}
 }
 

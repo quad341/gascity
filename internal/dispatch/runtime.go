@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -31,6 +32,8 @@ type SourceWorkflowStore struct {
 
 // ProcessOptions provides control-dispatcher execution context.
 type ProcessOptions struct {
+	// Context optionally cancels bounded retry waits inside ProcessControl.
+	Context            context.Context
 	CityPath           string
 	StorePath          string
 	FormulaSearchPaths []string
@@ -63,6 +66,12 @@ var (
 const (
 	maxSourceChainHops               = 32
 	maxWorkflowFinalizeErrorMetadata = 512
+	// Keep this retry window short and bounded while covering common
+	// sub-second Dolt read-after-write visibility lag for newly created scope
+	// bodies. When ProcessOptions.Context is set, retry waits exit promptly
+	// on cancellation.
+	scopeBodyResolveAttempts   = 5
+	scopeBodyResolveRetryDelay = 100 * time.Millisecond
 )
 
 const workflowFinalizeErrorMetadataKey = "gc.last_finalize_error"
@@ -99,6 +108,9 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 			bead.ID, bead.Metadata["gc.kind"], bead.Status)
 		return ControlResult{}, nil
 	}
+	if result, handled, err := closeOrphanedControl(store, bead, opts); handled || err != nil {
+		return result, err
+	}
 
 	switch bead.Metadata["gc.kind"] {
 	case "retry":
@@ -118,6 +130,37 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 	default:
 		return ControlResult{}, fmt.Errorf("%s: unsupported control bead kind %q", bead.ID, bead.Metadata["gc.kind"])
 	}
+}
+
+func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, bool, error) {
+	if bead.Metadata["gc.kind"] == "workflow-finalize" {
+		return ControlResult{}, false, nil
+	}
+	rootID := strings.TrimSpace(bead.Metadata["gc.root_bead_id"])
+	rootStoreRef := strings.TrimSpace(bead.Metadata["gc.root_store_ref"])
+	if rootID == "" || rootStoreRef == "" || rootID == bead.ID {
+		return ControlResult{}, false, nil
+	}
+	if _, err := store.Get(rootID); err == nil {
+		return ControlResult{}, false, nil
+	} else if !errors.Is(err, beads.ErrNotFound) {
+		return ControlResult{}, false, fmt.Errorf("%s: loading workflow root %s: %w", bead.ID, rootID, err)
+	}
+
+	opts.tracef("process-control bead=%s kind=%s close reason=missing_workflow_root root=%s store_ref=%s",
+		bead.ID, bead.Metadata["gc.kind"], rootID, rootStoreRef)
+	closeMetadata := map[string]string{
+		"gc.outcome":              "fail",
+		"gc.failure_class":        "hard",
+		"gc.failure_reason":       "missing_workflow_root",
+		"gc.final_disposition":    "orphaned_workflow",
+		"gc.missing_root_bead_id": rootID,
+	}
+	clearControllerSpawnErrorMetadata(closeMetadata)
+	if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
+		return ControlResult{}, true, fmt.Errorf("%s: closing orphaned control: %w", bead.ID, err)
+	}
+	return ControlResult{Processed: true, Action: "orphaned-workflow"}, true, nil
 }
 
 func (opts ProcessOptions) tracef(format string, args ...any) {
@@ -171,7 +214,7 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		return ControlResult{}, fmt.Errorf("%s: missing gc.scope_ref", bead.ID)
 	}
 	body, err := tracePhase(opts, bead.ID, "resolve-body", func() (beads.Bead, error) {
-		return resolveScopeBody(store, rootID, scopeRef)
+		return resolveScopeBody(store, rootID, scopeRef, bead.ID, opts)
 	})
 	if err != nil {
 		if errors.Is(err, errScopeBodyMissing) {
@@ -336,9 +379,6 @@ func loadScopeSnapshotForControl(store beads.Store, rootID, scopeRef string, bod
 		return loadScopeSnapshotWithBody(store, rootID, scopeRef, body)
 	})
 	if err != nil {
-		if errors.Is(err, errScopeBodyMissing) {
-			return scopeSnapshot{}, fmt.Errorf("%w: %w", ErrControlGraphMalformed, err)
-		}
 		return scopeSnapshot{}, fmt.Errorf("%s: loading scope snapshot for %s: %w", controlID, scopeRef, err)
 	}
 	opts.tracef("scope-check bead=%s snapshot root=%s scope=%s all=%d members=%d body=%s subject=%s outcome=%s",
@@ -982,6 +1022,10 @@ func truncateWorkflowFinalizeErrorMetadata(reason string) string {
 }
 
 func reconcileTerminalScopedMember(store beads.Store, bead beads.Bead) (ControlResult, error) {
+	return reconcileTerminalScopedMemberWithOptions(store, bead, ProcessOptions{})
+}
+
+func reconcileTerminalScopedMemberWithOptions(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
 	scopeRef := bead.Metadata["gc.scope_ref"]
 	if scopeRef == "" {
 		return ControlResult{}, nil
@@ -990,7 +1034,7 @@ func reconcileTerminalScopedMember(store beads.Store, bead beads.Bead) (ControlR
 	if rootID == "" {
 		return ControlResult{}, fmt.Errorf("%s: missing gc.root_bead_id", bead.ID)
 	}
-	body, err := resolveScopeBody(store, rootID, scopeRef)
+	body, err := resolveScopeBody(store, rootID, scopeRef, bead.ID, opts)
 	if err != nil {
 		if errors.Is(err, errScopeBodyMissing) {
 			return ControlResult{}, fmt.Errorf("%w: %w", ErrControlGraphMalformed, err)
@@ -1070,7 +1114,44 @@ func resolveBlockingSubjectID(store beads.Store, beadID string) (string, error) 
 	return "", fmt.Errorf("no blocking dependency")
 }
 
-func resolveScopeBody(store beads.Store, rootID, scopeRef string) (beads.Bead, error) {
+func resolveScopeBody(store beads.Store, rootID, scopeRef, traceID string, opts ProcessOptions) (beads.Bead, error) {
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var lastErr error
+	for attempt := 1; attempt <= scopeBodyResolveAttempts; attempt++ {
+		bead, err := resolveScopeBodyOnce(store, rootID, scopeRef)
+		if err == nil {
+			opts.tracef("scope-check bead=%s resolve-body attempt=%d root=%s scope=%s result=ok body=%s", traceID, attempt, rootID, scopeRef, bead.ID)
+			return bead, nil
+		}
+		if !errors.Is(err, errScopeBodyMissing) {
+			opts.tracef("scope-check bead=%s resolve-body attempt=%d root=%s scope=%s result=error err=%v", traceID, attempt, rootID, scopeRef, err)
+			return bead, err
+		}
+		opts.tracef("scope-check bead=%s resolve-body attempt=%d root=%s scope=%s result=retry reason=missing_body err=%v", traceID, attempt, rootID, scopeRef, err)
+		lastErr = err
+		if attempt < scopeBodyResolveAttempts {
+			timer := time.NewTimer(scopeBodyResolveRetryDelay)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return beads.Bead{}, ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	opts.tracef("scope-check bead=%s resolve-body attempts=%d root=%s scope=%s result=exhausted err=%v", traceID, scopeBodyResolveAttempts, rootID, scopeRef, lastErr)
+	return beads.Bead{}, lastErr
+}
+
+func resolveScopeBodyOnce(store beads.Store, rootID, scopeRef string) (beads.Bead, error) {
 	if bead, ok, err := resolveScopeBodyByRole(store, rootID, scopeRef, false); err != nil {
 		return beads.Bead{}, err
 	} else if ok {
@@ -1228,6 +1309,10 @@ func setOutcomeAndClose(store beads.Store, beadID, outcome string) error {
 // consistent (true for MemStore today). If a future store becomes eventually
 // consistent, pass the in-memory closed bead directly instead of re-reading.
 func reconcileClosedScopeMember(store beads.Store, beadID string) (ControlResult, error) {
+	return reconcileClosedScopeMemberWithOptions(store, beadID, ProcessOptions{})
+}
+
+func reconcileClosedScopeMemberWithOptions(store beads.Store, beadID string, opts ProcessOptions) (ControlResult, error) {
 	closedBead, err := store.Get(beadID)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: reloading closed scoped member: %w", beadID, err)
@@ -1235,7 +1320,7 @@ func reconcileClosedScopeMember(store beads.Store, beadID string) (ControlResult
 	if closedBead.Status != "closed" {
 		return ControlResult{}, nil
 	}
-	return reconcileTerminalScopedMember(store, closedBead)
+	return reconcileTerminalScopedMemberWithOptions(store, closedBead, opts)
 }
 
 func matchesScopeRef(bead beads.Bead, scopeRef string) bool {

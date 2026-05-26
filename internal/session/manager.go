@@ -9,6 +9,7 @@ package session
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -29,7 +31,10 @@ const (
 	StateAsleep State = "asleep"
 	// StateSuspended means the conversation is paused with no runtime resources.
 	StateSuspended State = "suspended"
-	// StateCreating means the session bead has been written but the runtime
+	// StateStartPending means the controller has reserved a session identity
+	// and should start it, but no provider Start call is currently in flight.
+	StateStartPending State = "start-pending"
+	// StateCreating means the provider Start call is in flight and the runtime
 	// process has not yet been confirmed alive. Counts against pool occupancy.
 	StateCreating State = "creating"
 	// StateFailedCreate means create rollback wrote terminal metadata but the
@@ -135,6 +140,7 @@ type Manager struct {
 	sp                runtime.Provider
 	cityPath          string
 	transportResolver func(template, provider string) transportResolution
+	clk               clock.Clock
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
@@ -220,6 +226,13 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 		return
 	}
 	_ = m.store.SetMetadata(id, "transport", transport)
+}
+
+func (m *Manager) now() time.Time {
+	if m != nil && m.clk != nil {
+		return m.clk.Now()
+	}
+	return time.Now()
 }
 
 func (m *Manager) routeACPIfNeeded(provider, transport, sessName string) func() {
@@ -584,8 +597,9 @@ func runtimeSessionMatchesBead(sp runtime.Provider, sessionName, beadID, instanc
 }
 
 // CreateBeadOnly creates a session bead without starting the runtime process.
-// The bead is created with state "creating" — the controller's reconciler
-// will detect it in buildDesiredState and start the process on its next tick.
+// The bead is created with state "start-pending" — the controller's
+// reconciler will detect it in buildDesiredState and start the process on its
+// next tick.
 //
 // This is the Phase 2 path: CLI creates intent (bead), reconciler executes.
 func (m *Manager) CreateBeadOnly(template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume) (Info, error) {
@@ -641,7 +655,7 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 
 		meta := map[string]string{
 			"template":           template,
-			"state":              "creating",
+			"state":              string(StateStartPending),
 			"provider":           provider,
 			"work_dir":           workDir,
 			"command":            command,
@@ -751,6 +765,33 @@ func (m *Manager) Suspend(id string) error {
 		current := State(b.Metadata["state"])
 		if current == StateSuspended {
 			return nil // idempotent: already suspended
+		}
+		// failed-create is a create-rollback terminal state: the create never
+		// reached creation_complete, so there is no live turn to suspend — only
+		// a possibly-leaked runtime process to tear down. `gc stop` issues
+		// suspend on every session bead (no state pre-filter), and under a
+		// backing-store outage the reconciler cannot reap failed-create beads
+		// (its close path requires a reachable store), so suspend is the only
+		// thing that can clear the leaked process. Tear the runtime down
+		// best-effort and report success rather than rejecting with an
+		// illegal-transition error that blocks `gc stop` city-wide (#2597). The
+		// bead is left in failed-create for the reconciler to reap once the
+		// store is reachable again.
+		//
+		// Limitation: explicit-named beads whose rollback already cleared
+		// session_name (rollbackPendingCreate in
+		// cmd/gc/session_lifecycle_parallel.go) fall back to the synthetic
+		// sessionNameFor(id) here, so this Stop targets the synthetic name
+		// rather than the original explicit name and the leak under the
+		// original name persists. That is a strict improvement over the pre-fix
+		// state (suspend rejected outright, runtime leaked, `gc stop` blocked
+		// city-wide); preserving the original name across rollback for cleanup
+		// is tracked as follow-up.
+		if current == StateFailedCreate {
+			if strings.TrimSpace(sessName) != "" {
+				_ = m.sp.Stop(sessName) // best-effort: tear down any leaked runtime
+			}
+			return nil
 		}
 		// Legacy bead normalization: pre-metadata cities may have empty
 		// state fields. Treat empty as StateActive so the state-machine
@@ -914,7 +955,7 @@ func (m *Manager) Kill(id string) error {
 	// state can lag behind reality, so also check provider liveness.
 	state := State(b.Metadata["state"])
 	switch state {
-	case StateActive, StateCreating, StateDraining, StateAwake:
+	case StateActive, StateStartPending, StateCreating, StateDraining, StateAwake:
 		// Known live states — proceed.
 	default:
 		if !m.sp.IsRunning(sessName) {
@@ -1115,6 +1156,131 @@ func (m *Manager) UpdatePresentation(id string, title *string, alias *string) er
 	})
 }
 
+// UpdateTemplateOverrides merges option overrides into the session metadata.
+func (m *Manager) UpdateTemplateOverrides(id string, updates map[string]string) (map[string]string, error) {
+	var merged map[string]string
+	err := withSessionMutationLock(id, func() error {
+		b, sessName, err := m.loadSessionBead(id, true)
+		if err != nil {
+			return err
+		}
+		state := State(b.Metadata["state"])
+		if IsTemplateOverrideRuntimeActive(state) || templateOverrideWakeInFlight(b.Metadata, state, m.now()) || (strings.TrimSpace(sessName) != "" && m.sp != nil && m.sp.IsRunning(sessName)) {
+			return fmt.Errorf("%w: template overrides apply only before the next launch", ErrSessionActive)
+		}
+		overrides, err := ParseTemplateOverrides(b.Metadata)
+		if err != nil {
+			log.Printf("session %s: repairing malformed template_overrides: %v", id, err)
+			overrides = nil
+		}
+		if overrides == nil {
+			overrides = make(map[string]string, len(updates))
+		}
+		for key, value := range updates {
+			overrides[key] = value
+		}
+		raw, err := json.Marshal(overrides)
+		if err != nil {
+			return fmt.Errorf("marshal template_overrides: %w", err)
+		}
+		metadata := map[string]string{"template_overrides": string(raw)}
+		for key, value := range updates {
+			if key == "initial_message" {
+				continue
+			}
+			metadata["opt_"+key] = value
+		}
+		if err := m.store.SetMetadataBatch(id, metadata); err != nil {
+			return err
+		}
+		merged = make(map[string]string, len(overrides))
+		for key, value := range overrides {
+			merged[key] = value
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return merged, nil
+}
+
+// IsTemplateOverrideRuntimeActive reports whether a session state is too live
+// for template override changes that only apply on the next launch.
+func IsTemplateOverrideRuntimeActive(state State) bool {
+	switch state {
+	case StateActive, StateAwake, StateStartPending, StateCreating, StateDraining, StateQuarantined:
+		return true
+	default:
+		return false
+	}
+}
+
+func templateOverrideWakeInFlightGrace() time.Duration {
+	return time.Minute + staleKeyDetectDelay + 5*time.Second
+}
+
+func templateOverrideWakeInFlight(metadata map[string]string, state State, now time.Time) bool {
+	if metadata == nil {
+		return false
+	}
+	switch state {
+	case StateFailedCreate, StateDrained, StateArchived:
+		return false
+	}
+	if strings.TrimSpace(metadata["pending_create_claim"]) == "true" {
+		return true
+	}
+	lastWoke := strings.TrimSpace(metadata["last_woke_at"])
+	if lastWoke == "" {
+		return false
+	}
+	started, err := time.Parse(time.RFC3339, lastWoke)
+	if err != nil {
+		return false
+	}
+	// PreWakePatch records last_woke_at before the reconciler can observe
+	// runtime liveness; keep overrides locked out through that startup window.
+	return now.UTC().Before(started.UTC().Add(templateOverrideWakeInFlightGrace()))
+}
+
+// pruneStateTimestamp returns the timestamp that PruneDetailed compares
+// against its cutoff for a session in the given state. Suspended sessions keep
+// the historical CreatedAt fallback for legacy beads; other dormant states must
+// carry their explicit transition timestamp to be pruned.
+func pruneStateTimestamp(b beads.Bead, state State) (time.Time, bool) {
+	switch state {
+	case StateSuspended:
+		if raw := b.Metadata["suspended_at"]; raw != "" {
+			if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+				return parsed, true
+			}
+		}
+		return b.CreatedAt, true
+	case StateAsleep:
+		return parsePruneMetadataTimestamp(b.Metadata, "slept_at")
+	case StateDrained:
+		return parsePruneMetadataTimestamp(b.Metadata, "drain_at")
+	default:
+		return time.Time{}, false
+	}
+}
+
+func parsePruneMetadataTimestamp(metadata map[string]string, key string) (time.Time, bool) {
+	if metadata == nil {
+		return time.Time{}, false
+	}
+	raw := metadata[key]
+	if raw == "" {
+		return time.Time{}, false
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return parsed, true
+}
+
 // Prune closes suspended sessions whose suspension time is before the given
 // cutoff. Active and already-closed sessions are never pruned.
 // Returns the number of sessions pruned.
@@ -1123,9 +1289,19 @@ func (m *Manager) Prune(before time.Time) (int, error) {
 	return result.Count, err
 }
 
-// PruneDetailed closes suspended sessions whose suspension time is before the
-// given cutoff and reports the affected session IDs and queued wait nudges.
-func (m *Manager) PruneDetailed(before time.Time) (PruneResult, error) {
+// PruneDetailed closes terminal-state sessions whose state timestamp is before
+// the given cutoff and reports the affected session IDs and queued wait nudges.
+// When no states are supplied it defaults to [StateSuspended] for backward
+// compatibility. Callers may opt in to asleep or drained cleanup by passing
+// StateAsleep or StateDrained.
+func (m *Manager) PruneDetailed(before time.Time, states ...State) (PruneResult, error) {
+	if len(states) == 0 {
+		states = []State{StateSuspended}
+	}
+	allowed := make(map[State]struct{}, len(states))
+	for _, s := range states {
+		allowed[s] = struct{}{}
+	}
 	all, err := m.store.List(beads.ListQuery{
 		Label: LabelSession,
 	})
@@ -1141,16 +1317,12 @@ func (m *Manager) PruneDetailed(before time.Time) (PruneResult, error) {
 			continue // already closed
 		}
 		state := State(b.Metadata["state"])
-		if state != StateSuspended {
-			continue // only prune suspended sessions
+		if _, ok := allowed[state]; !ok {
+			continue
 		}
-		// Use suspended_at timestamp if available, fall back to CreatedAt
-		// for beads created before suspended_at was introduced.
-		ts := b.CreatedAt
-		if raw := b.Metadata["suspended_at"]; raw != "" {
-			if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
-				ts = parsed
-			}
+		ts, ok := pruneStateTimestamp(b, state)
+		if !ok {
+			continue
 		}
 		if !ts.Before(before) {
 			continue
@@ -1203,15 +1375,9 @@ func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) Runtim
 	if strings.TrimSpace(info.SessionName) == "" || m.sp == nil {
 		return obs
 	}
-	obs.Running = m.sp.IsRunning(info.SessionName)
-	if len(processNames) > 0 {
-		obs.Alive = m.sp.ProcessAlive(info.SessionName, processNames)
-		if obs.Alive && !obs.Running {
-			obs.Running = true
-		}
-	} else {
-		obs.Alive = obs.Running
-	}
+	liveness := runtime.ObserveLiveness(m.sp, info.SessionName, processNames)
+	obs.Running = liveness.Running
+	obs.Alive = liveness.Alive
 	if obs.Running {
 		obs.Attached = m.sp.IsAttached(info.SessionName)
 		if lastActive, err := m.sp.GetLastActivity(info.SessionName); err == nil {

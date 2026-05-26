@@ -12,7 +12,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
@@ -50,7 +52,9 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	if err != nil {
 		return ControlResult{}, err
 	}
-	opts.tracef("ralph check-result bead=%s logical=%s attempt=%d outcome=%s exit=%v", bead.ID, logicalID, attempt, result.Outcome, result.ExitCode)
+	opts.tracef("ralph check-result bead=%s logical=%s attempt=%d outcome=%s exit=%s dur=%s truncated=%v stderr=%q stdout=%q",
+		bead.ID, logicalID, attempt, result.Outcome, formatGateExitCode(result.ExitCode), result.Duration, result.Truncated,
+		traceClipString(result.Stderr, traceCheckOutputCap), traceClipString(result.Stdout, traceCheckOutputCap))
 	if err := persistCheckResult(store, bead.ID, result); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: persisting check result: %w", bead.ID, err)
 	}
@@ -94,7 +98,7 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 			"gc.retry_state":  "spawning",
 			"gc.next_attempt": strconv.Itoa(nextAttempt),
 		}); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err) {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 				return ControlResult{}, ErrControlPending
 			}
 			return ControlResult{}, fmt.Errorf("%s: recording retry spawn start: %w", bead.ID, err)
@@ -109,7 +113,7 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	if bead.Metadata["gc.retry_state"] != "spawned" {
 		opts.tracef("ralph retry-append-start bead=%s next=%d", bead.ID, nextAttempt)
 		if _, err := appendRalphRetry(store, logicalID, subject, bead, nextAttempt, opts); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err) {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 				return ControlResult{}, ErrControlPending
 			}
 			return ControlResult{}, fmt.Errorf("%s: appending retry: %w", bead.ID, err)
@@ -121,7 +125,7 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		}
 		clearControllerSpawnErrorMetadata(spawnedMetadata)
 		if err := store.SetMetadataBatch(bead.ID, spawnedMetadata); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err) {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 				return ControlResult{}, ErrControlPending
 			}
 			return ControlResult{}, fmt.Errorf("%s: recording retry spawn complete: %w", bead.ID, err)
@@ -150,6 +154,15 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	if checkPath == "" {
 		return convergence.GateResult{}, fmt.Errorf("%s: missing gc.check_path", bead.ID)
 	}
+	// gc.check_path comes from formula metadata after variable substitution
+	// (internal/formula/expand.go), and sling API `vars` can flow into that
+	// substitution. Enforce the relative-path contract at this boundary so
+	// an absolute string synthesized via vars cannot bypass containment in
+	// convergence.ResolveConditionPath (which intentionally trusts callers
+	// to vouch for absolute inputs).
+	if filepath.IsAbs(checkPath) {
+		return convergence.GateResult{}, fmt.Errorf("%s: gc.check_path must be relative, got absolute %q", bead.ID, checkPath)
+	}
 	cityPath := opts.CityPath
 	if cityPath == "" {
 		cityPath = resolveInheritedMetadata(store, bead, "gc.city_path")
@@ -166,16 +179,33 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	resolvedWorkDir := ""
 	if workDir != "" {
 		if filepath.IsAbs(workDir) {
-			resolvedWorkDir = workDir
+			resolvedWorkDir = filepath.Clean(workDir)
 		} else {
-			resolvedWorkDir = filepath.Join(storePath, workDir)
+			resolvedWorkDir = filepath.Clean(filepath.Join(storePath, workDir))
+		}
+		// work_dir flows from bead metadata, which can be populated via
+		// sling API vars (internal/api/handler_sling.go →
+		// internal/sling/sling.go → internal/molecule/molecule.go → bead
+		// metadata). cityPath and storePath are operator-controlled by the
+		// dispatcher; work_dir is the only path input on this hot path that
+		// originates outside that surface. Require it to stay inside the
+		// city OR store roots so the OR-containment relaxation in
+		// convergence.ResolveConditionPath (gastownhall/gascity#2354) cannot
+		// be weaponised by a caller-supplied work_dir that escapes both
+		// operator-controlled trees.
+		if !pathutil.PathWithin(cityPath, resolvedWorkDir) && !pathutil.PathWithin(storePath, resolvedWorkDir) {
+			return convergence.GateResult{}, fmt.Errorf("%s: work_dir %q escapes both city and store roots", bead.ID, workDir)
 		}
 	}
 	scriptBase := storePath
 	if resolvedWorkDir != "" {
 		scriptBase = resolvedWorkDir
 	}
-	scriptPath, err := convergence.ResolveConditionPath(scriptBase, checkPath)
+	// Pass cityPath and scriptBase as distinct envelope/base roles: in
+	// gastownhall/gascity#2320 storePath (a rig subtree) was passed as both,
+	// causing relative gc.check_path values to be looked up under the rig
+	// tree even when the script lives in the city tree.
+	scriptPath, err := convergence.ResolveConditionPath(cityPath, scriptBase, checkPath)
 	if err != nil {
 		return convergence.GateResult{}, fmt.Errorf("%s: resolving check path: %w", bead.ID, err)
 	}
@@ -200,17 +230,67 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	}
 
 	conditionBeadID := subject.ID
+	pathBead := subject
 	if conditionBeadID == "" {
 		conditionBeadID = bead.ID
+		pathBead = bead
 	}
+	// gastownhall/gascity#2522: ralph.check scripts read $GC_MOLECULE_DIR and
+	// $GC_ARTIFACT_DIR to access the molecule-scoped working storage where
+	// the per-attempt agent wrote its verdict. Resolve both from the same
+	// bead we expose as GC_BEAD_ID (the subject/attempt, falling back to the
+	// control bead) so the per-step artifact dir matches where that agent
+	// wrote — using the bead's gc.root_bead_id metadata that
+	// molecule.Instantiate stamps onto every member. Best-effort: when the
+	// bead is not a molecule member (no root stamped) both stay empty and
+	// the env vars are omitted, matching the sling-time GC_ARTIFACT_DIR
+	// contract that pack scripts already handle.
+	moleculeDir, artifactDir := resolveRalphCheckMoleculePaths(pathBead, cityPath)
 	result := convergence.RunCondition(context.Background(), scriptPath, convergence.ConditionEnv{
-		BeadID:    conditionBeadID,
-		Iteration: attempt,
-		CityPath:  cityPath,
-		StorePath: storePath,
-		WorkDir:   resolvedWorkDir,
+		BeadID:      conditionBeadID,
+		Iteration:   attempt,
+		CityPath:    cityPath,
+		StorePath:   storePath,
+		WorkDir:     resolvedWorkDir,
+		MoleculeDir: moleculeDir,
+		ArtifactDir: artifactDir,
 	}, timeout, 0)
 	return result, nil
+}
+
+// resolveRalphCheckMoleculePaths derives the molecule root directory and the
+// per-step artifact directory for a ralph bead. Both paths are derived from
+// the bead's gc.root_bead_id metadata (stamped by molecule.Instantiate on
+// every formula-scaffolded member). Returns empty strings when the bead is
+// not a molecule member, when gc.root_bead_id is path-unsafe, or when the
+// artifact dir cannot be created; the caller treats empty as "omit the env
+// var", which matches the sling-time GC_ARTIFACT_DIR contract.
+func resolveRalphCheckMoleculePaths(bead beads.Bead, cityPath string) (string, string) {
+	if strings.TrimSpace(cityPath) == "" {
+		return "", ""
+	}
+	rootID := strings.TrimSpace(bead.Metadata["gc.root_bead_id"])
+	if rootID == "" {
+		return "", ""
+	}
+	// Reject a path-traversing/unsafe gc.root_bead_id before joining it so
+	// an unsafe root cannot surface a path-escaping GC_MOLECULE_DIR. This
+	// mirrors the rejection molecule.EnsureArtifactDir applies to rootID and
+	// keeps the omit-on-unsafe contract used by the sling env path.
+	if molecule.ValidateMemberID(rootID) != nil {
+		return "", ""
+	}
+	moleculeDir := molecule.Dir(cityPath, rootID)
+	artifactDir, err := molecule.EnsureArtifactDir(fsys.OSFS{}, cityPath, rootID, bead.ID)
+	if err != nil {
+		// rootID is already validated, so EnsureArtifactDir failed either
+		// on the per-step bead ID or on mkdir (e.g. permissions). Surface
+		// the (safe) molecule root so check scripts that only need
+		// GC_MOLECULE_DIR still work; the artifact-dir omission mirrors the
+		// sling-time best-effort contract.
+		return moleculeDir, ""
+	}
+	return moleculeDir, artifactDir
 }
 
 func parsePositiveRalphTimeout(beadID, key, raw string) (time.Duration, error) {
@@ -1170,6 +1250,9 @@ func rewriteRalphAttemptRef(ref string, oldAttempt, nextAttempt int) string {
 	if rewritten, ok := rewriteAttemptSegment(ref, "check", oldAttempt, nextAttempt); ok {
 		return rewritten
 	}
+	if rewritten, ok := rewriteAttemptSegment(ref, "iteration", oldAttempt, nextAttempt); ok {
+		return rewritten
+	}
 	return ref
 }
 
@@ -1185,4 +1268,30 @@ func rewriteAttemptSegment(ref, kind string, oldAttempt, nextAttempt int) (strin
 	}
 	replacement := "." + kind + "." + strconv.Itoa(nextAttempt)
 	return ref[:index] + replacement + ref[end:], true
+}
+
+// traceCheckOutputCap bounds stderr/stdout in the ralph check-result trace
+// line so a noisy script does not produce an unreadable log entry.
+// GateResult already truncates each stream to convergence.MaxOutputBytes
+// (4 KiB); this further clips for tracing.
+const traceCheckOutputCap = 512
+
+// traceClipString returns s truncated to at most limit bytes, appending an
+// ellipsis marker when truncation occurred. Used to keep ralph check-result
+// trace lines bounded.
+func traceClipString(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	return s[:limit] + "...[clipped]"
+}
+
+// formatGateExitCode renders a GateResult.ExitCode pointer for tracing.
+// Avoids leaking the *int address (the prior trace line emitted %v against
+// the pointer, producing `exit=0x...` instead of the numeric exit code).
+func formatGateExitCode(code *int) string {
+	if code == nil {
+		return "<nil>"
+	}
+	return strconv.Itoa(*code)
 }

@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -140,7 +141,7 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 			"gc.retry_state":  "spawning",
 			"gc.next_attempt": strconv.Itoa(nextAttempt),
 		}); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err) {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 				return ControlResult{}, ErrControlPending
 			}
 			return ControlResult{}, fmt.Errorf("%s: recording retry spawn start: %w", bead.ID, err)
@@ -172,7 +173,7 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 
 	if bead.Metadata["gc.retry_state"] != "spawned" {
 		if err := appendRetryAttempt(store, logicalID, subject, bead, nextAttempt, opts.CityPath); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err) {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 				return ControlResult{}, ErrControlPending
 			}
 			return ControlResult{}, fmt.Errorf("%s: appending retry attempt: %w", bead.ID, err)
@@ -183,7 +184,7 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 		}
 		clearControllerSpawnErrorMetadata(spawnedMetadata)
 		if err := store.SetMetadataBatch(bead.ID, spawnedMetadata); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err) {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 				return ControlResult{}, ErrControlPending
 			}
 			return ControlResult{}, fmt.Errorf("%s: recording retry spawn complete: %w", bead.ID, err)
@@ -243,8 +244,14 @@ func classifyRetryAttempt(subject beads.Bead) retryEvalResult {
 		if strings.TrimSpace(subject.Metadata["gc.failure_class"]) != "" || strings.TrimSpace(subject.Metadata["gc.failure_reason"]) != "" {
 			return retryEvalResult{Outcome: "transient", Reason: "pass_with_failure_metadata"}
 		}
-		if strings.TrimSpace(subject.Metadata["gc.output_json_required"]) == "true" && strings.TrimSpace(subject.Metadata["gc.output_json"]) == "" {
-			return retryEvalResult{Outcome: "transient", Reason: "missing_required_output_json"}
+		if strings.TrimSpace(subject.Metadata["gc.output_json_required"]) == "true" {
+			rawOutput := strings.TrimSpace(subject.Metadata["gc.output_json"])
+			if rawOutput == "" {
+				return retryEvalResult{Outcome: "transient", Reason: "missing_required_output_json"}
+			}
+			if !json.Valid([]byte(rawOutput)) {
+				return retryEvalResult{Outcome: "transient", Reason: "invalid_required_output_json"}
+			}
 		}
 		return retryEvalResult{Outcome: "pass"}
 	case "fail":

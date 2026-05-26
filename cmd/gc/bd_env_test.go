@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
@@ -2414,6 +2415,73 @@ func TestCityForStoreDirHonoursGCCity(t *testing.T) {
 	}
 }
 
+func TestCityForStoreDirHonoursGCCityOverDiscoveredCity(t *testing.T) {
+	// Ambient store resolution honors an explicit city env before
+	// filesystem discovery. Callers that have already resolved --city must
+	// pass that city through directly instead of using this helper.
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+	envCity := filepath.Join(homeDir, "envcity")
+	if err := os.MkdirAll(filepath.Join(envCity, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(envCity, "city.toml"), []byte("[workspace]\nname = \"env\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", envCity)
+
+	dirCity := filepath.Join(homeDir, "dircity")
+	if err := os.MkdirAll(filepath.Join(dirCity, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirCity, "city.toml"), []byte("[workspace]\nname = \"dir\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := cityForStoreDir(dirCity)
+	if canonicalTestPath(got) != canonicalTestPath(envCity) {
+		t.Errorf("cityForStoreDir(%q) = %q, want %q (GC_CITY should win over discovered city %q)", dirCity, got, envCity, dirCity)
+	}
+}
+
+func TestOpenCityStoreAtUsesExplicitCityOverGCCity(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("GC_BEADS", "bd")
+
+	envCity := filepath.Join(homeDir, "envcity")
+	if err := os.MkdirAll(filepath.Join(envCity, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(envCity, "city.toml"), []byte("[workspace]\nname = \"env\"\nprefix = \"env\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", envCity)
+
+	explicitCity := filepath.Join(homeDir, "explicit")
+	if err := os.MkdirAll(filepath.Join(explicitCity, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(explicitCity, "city.toml"), []byte("[workspace]\nname = \"explicit\"\nprefix = \"ex\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openCityStoreAt(explicitCity)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", explicitCity, err)
+	}
+	bdStore, ok := store.(*beads.BdStore)
+	if !ok {
+		t.Fatalf("openCityStoreAt(%q) returned %T, want *beads.BdStore", explicitCity, store)
+	}
+	if got := bdStore.IDPrefix(); got != "ex" {
+		t.Fatalf("IDPrefix() = %q, want explicit city prefix %q", got, "ex")
+	}
+}
+
 func TestCityForStoreDirFallsBackToFindCity(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -3454,6 +3522,7 @@ func clearAmbientPostgresEnv(t *testing.T) {
 
 func TestApplyResolvedScopePostgresEnv_HappyPath(t *testing.T) {
 	clearAmbientPostgresEnv(t)
+	cityPath := t.TempDir()
 	scopeRoot := t.TempDir()
 	writePGScopeFixture(t, scopeRoot, "devpw")
 
@@ -3465,7 +3534,7 @@ func TestApplyResolvedScopePostgresEnv_HappyPath(t *testing.T) {
 		PostgresUser:     "bd",
 		PostgresDatabase: "beads",
 	}
-	if err := applyResolvedScopePostgresEnv(env, scopeRoot, meta); err != nil {
+	if err := applyResolvedScopePostgresEnv(env, cityPath, scopeRoot, meta); err != nil {
 		t.Fatalf("applyResolvedScopePostgresEnv: %v", err)
 	}
 	want := map[string]string{
@@ -3480,6 +3549,49 @@ func TestApplyResolvedScopePostgresEnv_HappyPath(t *testing.T) {
 		if got := env[key]; got != value {
 			t.Errorf("env[%q] = %q, want %q", key, got, value)
 		}
+	}
+}
+
+func TestEmitPostgresCredentialResolved_DedupsWithinProcess(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	scopeA := t.TempDir()
+	writePGScopeFixture(t, scopeA, "devpw")
+	scopeB := t.TempDir()
+	writePGScopeFixture(t, scopeB, "devpw")
+
+	meta := contract.MetadataState{
+		Backend:          "postgres",
+		PostgresHost:     "db.example.test",
+		PostgresPort:     "5432",
+		PostgresUser:     "bd",
+		PostgresDatabase: "beads",
+	}
+	for i := 0; i < 10; i++ {
+		if err := applyResolvedScopePostgresEnv(map[string]string{}, cityPath, scopeA, meta); err != nil {
+			t.Fatalf("scopeA call %d: %v", i, err)
+		}
+	}
+	for i := 0; i < 10; i++ {
+		if err := applyResolvedScopePostgresEnv(map[string]string{}, cityPath, scopeB, meta); err != nil {
+			t.Fatalf("scopeB call %d: %v", i, err)
+		}
+	}
+
+	got, err := events.ReadFiltered(
+		filepath.Join(cityPath, ".gc", "events.jsonl"),
+		events.Filter{Type: events.PostgresCredentialResolved},
+	)
+	if err != nil {
+		t.Fatalf("ReadFiltered pg.credential_resolved: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("pg.credential_resolved count = %d, want 2 (one per distinct scope)", len(got))
 	}
 }
 
@@ -3960,6 +4072,7 @@ func TestMergeRuntimeEnvScrubsPostgresKeys(t *testing.T) {
 
 func TestApplyResolvedScopePostgresEnv_NoPasswordResolvable(t *testing.T) {
 	clearAmbientPostgresEnv(t)
+	cityPath := t.TempDir()
 	scopeRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
@@ -3973,7 +4086,7 @@ func TestApplyResolvedScopePostgresEnv_NoPasswordResolvable(t *testing.T) {
 		PostgresUser:     "bd",
 		PostgresDatabase: "beads",
 	}
-	err := applyResolvedScopePostgresEnv(env, scopeRoot, meta)
+	err := applyResolvedScopePostgresEnv(env, cityPath, scopeRoot, meta)
 	if err == nil {
 		t.Fatal("applyResolvedScopePostgresEnv = nil error, want resolver exhaustion")
 	}
@@ -4463,5 +4576,232 @@ dolt.auto-start: false
 	var parseErr *contract.MetadataParseError
 	if !errors.As(err, &parseErr) {
 		t.Errorf("errors.As(*MetadataParseError) = false, want true; err=%v", err)
+	}
+}
+
+// TestBdRuntimeEnvDisablesAutoExport pins the env-var defense against
+// bd's auto-export-on-write trap (sa-41j3kp): every gc-initiated bd call
+// must set BD_EXPORT_AUTO=false so that even if .beads/config.yaml has not
+// yet been canonicalized with export.auto:false (older cities pre-PR-1965,
+// fresh inits, rigs that have not reached normalization), bd's auto-export
+// of issues.jsonl on every write is suppressed. Without this, the next bd
+// write re-creates the 15MB JSONL, and the bd write after that stalls for
+// the full 2m subprocess timeout while bd re-imports the file.
+func TestBdRuntimeEnvDisablesAutoExport(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityPath := t.TempDir()
+	env, err := bdRuntimeEnvWithError(cityPath)
+	if err != nil {
+		t.Fatalf("bdRuntimeEnvWithError: %v", err)
+	}
+
+	if got := env["BD_EXPORT_AUTO"]; got != "false" {
+		t.Fatalf("BD_EXPORT_AUTO = %q, want false (auto-export-on-write suppression for sa-41j3kp)", got)
+	}
+}
+
+// TestScopeIsGCManagedRecognizesExplicitAutoOff verifies that a config with
+// export.auto:false is recognized as gc-managed even when gc.endpoint_origin
+// is absent. This is the steady-state signal post-PR-1965.
+func TestScopeIsGCManagedRecognizesExplicitAutoOff(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\nexport.auto: false\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if !scopeIsGCManaged(scope) {
+		t.Fatalf("scopeIsGCManaged = false, want true for explicit export.auto:false")
+	}
+}
+
+// TestScopeIsGCManagedRecognizesManagedOrigin verifies that a long-lived
+// city whose config still pre-dates PR 1965 (export.auto absent) is still
+// recognized as gc-managed because gc.endpoint_origin proves it. This is
+// the transitional signal — without it the jsonl reaper would refuse to
+// clean up samtown-style cities until they hit a canonicalization event.
+func TestScopeIsGCManagedRecognizesManagedOrigin(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if !scopeIsGCManaged(scope) {
+		t.Fatalf("scopeIsGCManaged = false, want true for gc.endpoint_origin: managed_city")
+	}
+}
+
+// TestScopeIsGCManagedDoesNotClaimExplicitOptOut verifies the carve-out
+// for rigs that deliberately keep JSONL-based sharing. Per PR 1965 docs,
+// gc.endpoint_origin: explicit is the supported opt-out path; issues.jsonl
+// there is load-bearing, not stale, so scopeIsGCManaged must return false.
+func TestScopeIsGCManagedDoesNotClaimExplicitOptOut(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\ngc.endpoint_origin: explicit\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if scopeIsGCManaged(scope) {
+		t.Fatalf("scopeIsGCManaged = true, want false for explicit opt-out")
+	}
+}
+
+// TestScopeIsGCManagedExplicitOptOutBeatsExportAutoFalse verifies the
+// precedence contract: when a scope has gc.endpoint_origin: explicit
+// (deliberate opt-out, JSONL is load-bearing) AND also has export.auto:
+// false (left over from a prior canonicalization, or hand-set), the
+// endpoint_origin signal wins. Without this ordering, a stale
+// export.auto value could trick the reaper into deleting issues.jsonl
+// on an opt-out rig.
+func TestScopeIsGCManagedExplicitOptOutBeatsExportAutoFalse(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\nexport.auto: false\ngc.endpoint_origin: explicit\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if scopeIsGCManaged(scope) {
+		t.Fatalf("scopeIsGCManaged = true, want false for explicit opt-out (export.auto:false must not override endpoint_origin)")
+	}
+}
+
+// TestReapStaleBdExportJSONLRemovesFileOnManagedScope verifies the
+// transitional cleanup that breaks the sa-41j3kp loop on samtown-style
+// long-lived cities. issues.jsonl from a pre-PR-1965 auto-export is
+// removed on the next bd-store construction, so the next bd create does
+// not stall on auto-import.
+func TestReapStaleBdExportJSONLRemovesFileOnManagedScope(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"zz-1"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	reapStaleBdExportJSONL(scope)
+
+	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
+		t.Fatalf("jsonl present after reap; stat err = %v, want IsNotExist", err)
+	}
+}
+
+func TestControlBdStoreForCityReapsStaleBdExportJSONL(t *testing.T) {
+	cityPath := t.TempDir()
+	beadsDir := filepath.Join(cityPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"gc-1"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	controlBdStoreForCity(cityPath, cityPath, nil)
+
+	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
+		t.Fatalf("jsonl present after control city store construction; stat err = %v, want IsNotExist", err)
+	}
+}
+
+func TestControlBdStoreForRigReapsStaleBdExportJSONL(t *testing.T) {
+	cityPath := t.TempDir()
+	rigDir := filepath.Join(cityPath, "repo")
+	beadsDir := filepath.Join(rigDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"repo-1"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: repo\ngc.endpoint_origin: inherited_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir, Prefix: "repo"}}}
+
+	controlBdStoreForRig(rigDir, cityPath, cfg)
+
+	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
+		t.Fatalf("jsonl present after control rig store construction; stat err = %v, want IsNotExist", err)
+	}
+}
+
+// TestReapStaleBdExportJSONLLeavesFileOnExplicitOptOut verifies the
+// opt-out path: rigs with gc.endpoint_origin: explicit keep issues.jsonl
+// because they're deliberately using JSONL-based sharing.
+func TestReapStaleBdExportJSONLLeavesFileOnExplicitOptOut(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"zz-1"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\ngc.endpoint_origin: explicit\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	reapStaleBdExportJSONL(scope)
+
+	if _, err := os.Stat(jsonlPath); err != nil {
+		t.Fatalf("jsonl removed on explicit opt-out; stat err = %v, want nil", err)
+	}
+}
+
+// TestReapStaleBdExportJSONLLeavesFileOnUnmanagedScope verifies that an
+// unmanaged scope (no config.yaml, or config without any gc/managed signal)
+// keeps issues.jsonl intact. The reaper must not be aggressive on scopes
+// that gc does not own.
+func TestReapStaleBdExportJSONLLeavesFileOnUnmanagedScope(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"zz-1"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+	// No config.yaml at all — definitely not gc-managed.
+
+	reapStaleBdExportJSONL(scope)
+
+	if _, err := os.Stat(jsonlPath); err != nil {
+		t.Fatalf("jsonl removed on unmanaged scope; stat err = %v, want nil", err)
 	}
 }

@@ -486,25 +486,59 @@ wait_for_bd_runtime_schema() {
     return 1
 }
 
-# ensure_types_custom_in_yaml writes types.custom to .beads/config.yaml when
-# the key is absent. bd reads this YAML key as a fallback when the database
-# config table is unset (see beads internal/config: GetCustomTypesFromYAML),
-# so writing here registers the types without paying bd's per-command
-# auto-migrate cost (~50s on populated databases). Idempotent: re-running
-# never appends duplicates.
+# ensure_types_custom_in_yaml writes types.custom to .beads/config.yaml.
+# bd reads this YAML key as a fallback when the database config table is
+# unset (see beads internal/config: GetCustomTypesFromYAML), so writing
+# here registers the types without paying bd's per-command auto-migrate
+# cost (~50s on populated databases).
+#
+# Idempotent against the desired effective set: re-running with the SAME
+# baseline is a no-op. The rewrite NEVER narrows the type set: if the YAML
+# already contains pack-defined or user-defined custom types beyond $types
+# (the GC baseline), those extensions are preserved. This matches the
+# merge semantics of internal/doctor/checks_custom_types.go:mergeCustomTypes
+# and fixes the gascity-side failure surfaced in #2154 — a stale or partial
+# line is replaced with the union of existing and required entries, never
+# overwritten with just the baseline.
 ensure_types_custom_in_yaml() {
     local dir="$1"
     local types="$2"
     local config_yaml="$dir/.beads/config.yaml"
     [ -f "$config_yaml" ] || return 0
     [ -n "$types" ] || return 0
-    if grep -q "^types\.custom:" "$config_yaml" 2>/dev/null; then
+
+    local current
+    current=$(sed -n 's/^types\.custom: *//p' "$config_yaml" 2>/dev/null | head -1)
+
+    local merged
+    merged=$(printf '%s,%s' "$current" "$types" | awk -F, '
+        {
+            for (i = 1; i <= NF; i++) {
+                t = $i
+                sub(/^[ \t]+/, "", t)
+                sub(/[ \t]+$/, "", t)
+                if (t == "") continue
+                if (!(t in seen)) {
+                    seen[t] = 1
+                    out = (out == "" ? t : out "," t)
+                }
+            }
+            print out
+        }
+    ')
+
+    # Short-circuit when the merged set already equals what's on disk:
+    # avoids mtime churn that downstream watchers might misread as a real
+    # change. Includes the case where current is already a superset of
+    # the baseline (operator/pack types appended to the GC list).
+    if [ "$current" = "$merged" ]; then
         return 0
     fi
+
     local tmp
     tmp=$(mktemp "$config_yaml.tmp.XXXXXX") || return 0
-    cat "$config_yaml" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
-    printf 'types.custom: %s\n' "$types" >> "$tmp"
+    sed '/^types\.custom:/d' "$config_yaml" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    printf 'types.custom: %s\n' "$merged" >> "$tmp"
     mv -f "$tmp" "$config_yaml" || rm -f "$tmp"
 }
 
@@ -2101,10 +2135,17 @@ op_init() {
     # beads (#1039). Must match doctor.RequiredCustomTypes.
     local custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step}"
 
-    # If already initialized on disk and the server has a bd schema, ensure the
-    # database is also registered with the running server. Local metadata can be
-    # written before bd init seeds tables, so require the server-side schema
-    # before taking the fast path.
+    # If already initialized on disk, ensure the database is also registered
+    # with the running server. gc's normalizeCanonicalBdScopeFilesForInit
+    # writes metadata.json (dolt_database/dolt_mode) BEFORE invoking us, so a
+    # fresh init also reaches this branch — that is intentional. The branch
+    # does NOT blindly skip init: it only exits early when the server already
+    # has a live bd schema (bd_runtime_schema_ready). Otherwise it sets
+    # bd_init_force="--force" so the fall-through bd init reinitializes over
+    # the gc-pre-seeded metadata stub instead of aborting with bd's "This
+    # workspace is already initialized" guard. Gating this branch on project_id
+    # instead breaks fresh init: gc-pre-seeded metadata has no project_id, so
+    # --force is never set and bd init aborts.
     if [ -f "$dir/.beads/metadata.json" ]; then
         if ensure_database_registered "$dolt_database"; then
             if bd_runtime_schema_ready "$dolt_database"; then
@@ -2322,12 +2363,40 @@ op_probe() {
     exit 2
 }
 
+enospc_helper="$(CDPATH= cd -- "$(dirname "$0")" && pwd)/dolt-enospc.sh"
+if [ -r "$enospc_helper" ]; then
+    . "$enospc_helper"
+else
+    # Some focused shell harnesses execute gc-beads-bd's prelude as a single
+    # temporary file without sibling assets. Keep the production helper as the
+    # canonical copy, but preserve the same detector behavior for those harnesses.
+    recovery_should_skip_due_to_enospc() {
+        [ -n "${LOG_FILE:-}" ] && [ -r "$LOG_FILE" ] || return 1
+        tail -n 1000 "$LOG_FILE" 2>/dev/null \
+            | grep -qE 'no space left on device|copy_file_range:.*no space|ENOSPC' \
+            || return 1
+        return 0
+    }
+fi
+
 # op_recover stops the dolt server, restarts it, and verifies health.
 op_recover() {
     local read_only_status
 
     if is_remote; then
         die "recovery not supported for remote dolt servers"
+    fi
+
+    # Skip auto-recovery when dolt has been failing due to disk exhaustion.
+    # Restarting dolt does not free disk space, and the recovery cycle
+    # itself amplifies the failure: each restart triggers a conjoin/backup
+    # sync that writes another partial table file to the backup remote.
+    # Require manual intervention (free disk space) before recovery
+    # resumes. See gastownhall/gascity#2158.
+    if recovery_should_skip_due_to_enospc; then
+        echo "skipping dolt recovery: recent dolt log shows ENOSPC — manual intervention required" >&2
+        echo "  free disk space, then re-run health checks" >&2
+        die "dolt recovery skipped: ENOSPC detected"
     fi
 
     if load_recover_managed_from_gc; then

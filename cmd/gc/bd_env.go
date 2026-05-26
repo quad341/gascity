@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,18 +10,34 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltauth"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
 const defaultManagedDoltHost = "127.0.0.1"
+
+var postgresCredentialResolvedSeen sync.Map // map[string]struct{}
+
+func postgresCredentialResolvedKey(cityPath string, payload pgauth.PostgresCredentialResolvedPayload) string {
+	return strings.Join([]string{
+		cityPath,
+		payload.ScopeKind,
+		payload.ScopeName,
+		payload.Source,
+		payload.Host,
+		payload.Port,
+		payload.User,
+	}, "\x00")
+}
 
 // bdCommandRunnerForCity centralizes bd subprocess env construction so all
 // GC-managed bd calls resolve Dolt against the same city-scoped runtime.
@@ -39,6 +56,7 @@ func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 	if err != nil {
 		cfg = nil
 	}
+	reapStaleBdExportJSONL(dir)
 	return beads.NewBdStoreWithPrefix(dir, bdCommandRunnerForCity(cityPath), issuePrefixForScope(dir, cityPath, cfg))
 }
 
@@ -55,10 +73,92 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 			}
 		}
 	}
+	reapStaleBdExportJSONL(rigDir)
 	return beads.NewBdStoreWithPrefix(rigDir, bdCommandRunnerForRig(cityPath, cfg, rigDir), prefix)
 }
 
+// reapStaleBdExportJSONL removes .beads/issues.jsonl best-effort when the
+// scope is gc-managed. The file is a stale export from when bd's auto-export
+// was on (the upstream default); keeping it on disk causes bd 1.x to detect
+// a "fresh clone" / "empty database" on the next write and stall bd create /
+// gc mail send for the full 2m subprocess timeout while it re-imports the
+// JSONL (sa-41j3kp).
+//
+// Cleanup conditions (any of which proves the scope is gc-managed and the
+// JSONL is therefore stale):
+//
+//   - config.yaml explicitly sets export.auto:false (PR 1965 canonical state)
+//   - config.yaml's gc.endpoint_origin is one of the managed origins
+//
+// Best-effort: any error is ignored because the env-var BD_EXPORT_AUTO=false
+// in bdRuntimeEnv is a second line of defense, and a concurrent reader of the
+// file (e.g., a bd-aware viewer) shouldn't fail the caller's operation. Reads
+// use os.Stat/os.Remove (not fsys.OSFS) so the helper stays callable from
+// store constructors that don't carry an fs seam.
+func reapStaleBdExportJSONL(scopeRoot string) {
+	scopeRoot = strings.TrimSpace(scopeRoot)
+	if scopeRoot == "" {
+		return
+	}
+	jsonlPath := filepath.Join(scopeRoot, ".beads", "issues.jsonl")
+	if _, err := os.Stat(jsonlPath); err != nil {
+		// Fast path: no file → nothing to do. This is the steady state
+		// once the cleanup has run once, so the rest of the helper is
+		// only reached during the one-shot transition.
+		return
+	}
+	if !scopeIsGCManaged(scopeRoot) {
+		// Unmanaged scope: leave the file alone. Removing it under those
+		// conditions could race with a legitimate auto-exporter (e.g., a
+		// rig that opted out of managed canonicalization).
+		return
+	}
+	_ = os.Remove(jsonlPath)
+}
+
+// scopeIsGCManaged reports whether a scope's .beads/config.yaml proves the
+// scope is gc-managed under the canonical (non-explicit) shape. Either of
+// two signals counts as proof:
+//   - export.auto is explicitly false (PR 1965 wrote it; the user did not
+//     opt back into auto-export afterward)
+//   - gc.endpoint_origin is one of the canonical managed origins (the scope
+//     was initialized by gc, even if the export.auto key has not yet been
+//     normalized into the config on disk)
+//
+// Either signal alone is sufficient: the first covers post-normalization
+// state, the second covers the transitional state where samtown-style
+// long-lived cities still have a pre-PR-1965 config but were always
+// gc-managed.
+//
+// EndpointOriginExplicit is intentionally excluded: per PR 1965, that is
+// the deliberate opt-out path for rigs that want to keep JSONL-based
+// sharing, so issues.jsonl there is load-bearing, not stale. The
+// endpoint-origin check runs first so that an opt-out rig that *also*
+// has export.auto:false (e.g. left over from a prior canonicalization,
+// or hand-set) is still treated as unmanaged and never reaped.
+func scopeIsGCManaged(scopeRoot string) bool {
+	configPath := filepath.Join(scopeRoot, ".beads", "config.yaml")
+	state, stateOK, stateErr := contract.ReadConfigState(fsys.OSFS{}, configPath)
+	if stateErr == nil && stateOK {
+		switch state.EndpointOrigin {
+		case contract.EndpointOriginExplicit:
+			// Deliberate opt-out — JSONL is load-bearing, leave alone
+			// regardless of any other signal in the config.
+			return false
+		case contract.EndpointOriginManagedCity,
+			contract.EndpointOriginCityCanonical,
+			contract.EndpointOriginInheritedCity:
+			return true
+		}
+	}
+	if autoExport, ok, err := contract.ReadExportAuto(fsys.OSFS{}, configPath); err == nil && ok && !autoExport {
+		return true
+	}
+	return false
+}
+
 func controlBdStoreForCity(dir, cityPath string, cfg *config.City) *beads.BdStore {
+	reapStaleBdExportJSONL(dir)
 	return beads.NewBdStoreWithPrefix(dir, controlBdCommandRunnerForCity(cityPath), issuePrefixForScope(dir, cityPath, cfg))
 }
 
@@ -72,6 +172,7 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 			}
 		}
 	}
+	reapStaleBdExportJSONL(rigDir)
 	return beads.NewBdStoreWithPrefix(rigDir, controlBdCommandRunnerForRig(cityPath, cfg, rigDir), prefix)
 }
 
@@ -232,7 +333,7 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 		mirrorBeadsDoltEnv(env)
 		return true, nil
 	case "postgres":
-		if err := applyResolvedScopePostgresEnv(env, scopeRoot, meta); err != nil {
+		if err := applyResolvedScopePostgresEnv(env, cityPath, scopeRoot, meta); err != nil {
 			return true, err
 		}
 		return true, nil
@@ -255,7 +356,7 @@ func applyCityPostgresBackendEnv(env map[string]string, cityPath string) (bool, 
 	}
 	switch meta.Backend {
 	case "postgres":
-		if err := applyResolvedScopePostgresEnv(env, cityPath, meta); err != nil {
+		if err := applyResolvedScopePostgresEnv(env, cityPath, cityPath, meta); err != nil {
 			return true, err
 		}
 		return true, nil
@@ -280,7 +381,11 @@ func scopeMetadataJSONPath(scopeRoot string) string {
 //
 // On resolver exhaustion returns an error wrapping
 // pgauth.ErrNoPasswordResolvable; callers can match with errors.Is.
-func applyResolvedScopePostgresEnv(env map[string]string, scopeRoot string, meta contract.MetadataState) error {
+//
+// On success emits a pg.credential_resolved event identifying the scope
+// and the resolution tier that supplied the value (best-effort; recorder
+// failures do not propagate).
+func applyResolvedScopePostgresEnv(env map[string]string, cityPath, scopeRoot string, meta contract.MetadataState) error {
 	if env == nil {
 		return nil
 	}
@@ -305,7 +410,61 @@ func applyResolvedScopePostgresEnv(env map[string]string, scopeRoot string, meta
 	env["BEADS_POSTGRES_USER"] = meta.PostgresUser
 	env["BEADS_POSTGRES_DATABASE"] = meta.PostgresDatabase
 	mirrorBeadsPostgresEnv(env)
+	emitPostgresCredentialResolved(cityPath, scopeRoot, meta, resolved.Source)
 	return nil
+}
+
+// emitPostgresCredentialResolved records a pg.credential_resolved event
+// describing the scope and the resolution tier that supplied the password.
+// Best-effort: recorder failures (file unreachable, JSONL write error) do
+// not propagate to the caller. The payload deliberately omits the password
+// value (asserted by TestPostgresEventOmitsPassword).
+func emitPostgresCredentialResolved(cityPath, scopeRoot string, meta contract.MetadataState, source pgauth.Source) {
+	scopeKind, scopeName := scopeKindAndName(cityPath, scopeRoot)
+	subject := "city/" + scopeName
+	if scopeKind == "rig" {
+		subject = "rigs/" + scopeName
+	}
+	payload := pgauth.PostgresCredentialResolvedPayload{
+		ScopeKind: scopeKind,
+		ScopeName: scopeName,
+		Source:    source.String(),
+		Host:      meta.PostgresHost,
+		Port:      meta.PostgresPort,
+		User:      meta.PostgresUser,
+	}
+	if _, loaded := postgresCredentialResolvedSeen.LoadOrStore(postgresCredentialResolvedKey(cityPath, payload), struct{}{}); loaded {
+		return
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		// Marshal of a flat-string struct should never fail; if it
+		// does, there is no useful payload to record.
+		return
+	}
+	rec, err := events.NewFileRecorder(filepath.Join(cityPath, ".gc", "events.jsonl"), io.Discard)
+	if err != nil {
+		return
+	}
+	defer rec.Close() //nolint:errcheck // best-effort: emission must not surface I/O errors
+	rec.Record(events.Event{
+		Type:    events.PostgresCredentialResolved,
+		Actor:   eventActor(),
+		Subject: subject,
+		Payload: payloadBytes,
+	})
+}
+
+// scopeKindAndName returns ("city", <city-name>) when scopeRoot is the
+// city itself, or ("rig", <rig-name>) when scopeRoot is a rig under or
+// outside the city. Path comparison is best-effort lexical equality after
+// filepath.Clean; callers tolerate ambiguity (the recorded event remains
+// useful even if a non-canonical path snaps to the rig branch).
+func scopeKindAndName(cityPath, scopeRoot string) (string, string) {
+	if filepath.Clean(scopeRoot) == filepath.Clean(cityPath) {
+		return "city", filepath.Base(filepath.Clean(cityPath))
+	}
+	return "rig", filepath.Base(filepath.Clean(scopeRoot))
 }
 
 // mirrorBeadsPostgresEnv copies canonical (GC_*) PG env keys to their
@@ -663,6 +822,19 @@ func bdTransportErrorMatches(cityPath, scopeRoot string, env map[string]string, 
 	return false
 }
 
+// bdSilentFallbackMarkerImport and bdSilentFallbackMarkerEmptyDB are the
+// substring pair bd emits when it loses the managed Dolt server and silently
+// falls back to opening the on-disk store with a JSONL auto-import. They are
+// load-bearing in three places — the two transport-error classifiers below
+// and bdOutputIndicatesSilentFallback — so they live here as the single
+// source of truth. If bd's banner wording ever changes, this is the only
+// edit site. (The root cause is fixed upstream in beads post-#3691; these
+// markers remain the symptom detector for deployments still on stable bd.)
+const (
+	bdSilentFallbackMarkerImport  = "auto-importing"
+	bdSilentFallbackMarkerEmptyDB = "into empty database"
+)
+
 func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
 	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, []string{
 		"server unreachable",
@@ -678,8 +850,8 @@ func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string
 		// rather than a network error. Treat the auto-import marker as a
 		// transport failure so the managed-retry path republishes the correct
 		// port and retries against the live server. See gastownhall/gascity#1930.
-		"auto-importing",
-		"into empty database",
+		bdSilentFallbackMarkerImport,
+		bdSilentFallbackMarkerEmptyDB,
 	})
 }
 
@@ -691,9 +863,25 @@ func bdTransportRecoverableError(cityPath, scopeRoot string, env map[string]stri
 		// When bd auto-imports into an empty on-disk store it has lost the
 		// managed Dolt server; republishing the port via the recovery path
 		// is what unsticks the next attempt. See gastownhall/gascity#1930.
-		"auto-importing",
-		"into empty database",
+		bdSilentFallbackMarkerImport,
+		bdSilentFallbackMarkerEmptyDB,
 	})
+}
+
+// bdOutputIndicatesSilentFallback reports whether the given bd output
+// (typically captured stderr) contains the marker pair that bd emits
+// when it loses the managed Dolt server and silently falls back to
+// opening the on-disk store with a JSONL auto-import. Operators of
+// `gc bd ...` rely on this to convert the silent fallback into a loud,
+// non-zero-exit error — in managed mode (BD_EXPORT_AUTO=false) the
+// fallback drops writes. See gastownhall/gascity#2080 (bd update path)
+// and gastownhall/gascity#2079 (bd close path) — both subcommands flow
+// through the shared doBd handoff, so a single detection site covers
+// the bd-write-persistence quad.
+func bdOutputIndicatesSilentFallback(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, bdSilentFallbackMarkerImport) &&
+		strings.Contains(lower, bdSilentFallbackMarkerEmptyDB)
 }
 
 func bdCommandRunnerWithManagedRetry(cityPath string, envFn func(dir string) map[string]string) beads.CommandRunner {
@@ -906,6 +1094,16 @@ func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
 	// dolt.auto-start:false config (beads resolveAutoStart priority bug) and
 	// starts rogue servers from the agent's cwd with the wrong data_dir.
 	env["BEADS_DOLT_AUTO_START"] = "0"
+	// Suppress bd's auto-export of issues.jsonl on every write. The canonical
+	// config also persists export.auto:false (see internal/beads/contract/files.go),
+	// but the env var is the bulletproof per-invocation guard: it covers fresh
+	// scopes whose config has not yet been canonicalized, and it short-circuits
+	// the export → next-write-auto-import stall cycle (sa-41j3kp) even when an
+	// out-of-band caller has left a stale .beads/issues.jsonl on disk. Without
+	// this, bd's "auto-importing N bytes ... into empty database" path can
+	// stall bd create / gc mail send for the full 2m subprocess timeout on
+	// large datasets.
+	env["BD_EXPORT_AUTO"] = "false"
 	if !cityUsesBdStoreContract(cityPath) {
 		return env, nil
 	}
@@ -937,6 +1135,14 @@ func isRecoverableManagedDoltEnvError(err error) bool {
 
 func cityRuntimeEnvMapForCity(cityPath string) map[string]string {
 	return citylayout.CityRuntimeEnvMapForRuntimeDir(cityPath, citylayout.TrustedAmbientCityRuntimeDir(cityPath))
+}
+
+// cityIdentityAnchorsForCity returns only the three identity anchors
+// (GC_CITY, GC_CITY_PATH, GC_CITY_RUNTIME_DIR) for cityPath. The shared
+// projection lives in internal/citylayout so CLI and API session resolvers
+// keep the identity-only contract in sync.
+func cityIdentityAnchorsForCity(cityPath string) map[string]string {
+	return citylayout.CityIdentityEnvMap(cityPath)
 }
 
 func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
@@ -998,6 +1204,9 @@ func mirrorBeadsDoltEnv(env map[string]string) {
 	}
 }
 
+// cityForStoreDir resolves ambient store contexts. GC_CITY intentionally wins
+// over filesystem discovery here; callers with an authoritative city path or
+// hook-projected store root must pass that city directly.
 func cityForStoreDir(dir string) string {
 	if cityPath, ok := resolveExplicitCityPathEnv(); ok {
 		return cityPath

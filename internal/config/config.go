@@ -174,8 +174,13 @@ type City struct {
 	// binding name; the value specifies the source and optional version,
 	// export, and transitive controls. Processed during ExpandCityPacks.
 	Imports map[string]Import `toml:"imports,omitempty"`
-	// Agents lists all configured agents in this city.
-	Agents []Agent `toml:"agent"`
+	// Defaults holds city-level defaults that seed generated config. The
+	// canonical default-rig import table is [defaults.rig.imports].
+	Defaults PackDefaults `toml:"defaults,omitempty"`
+	// Agents lists all configured agents in this city. Optional: PackV2
+	// cities compose agents through [imports.*] and ship without any
+	// [[agent]] block.
+	Agents []Agent `toml:"agent,omitempty"`
 	// NamedSessions lists canonical alias-backed sessions built from
 	// reusable agent templates.
 	NamedSessions []NamedSession `toml:"named_session,omitempty"`
@@ -526,6 +531,9 @@ type AgentOverride struct {
 	// WorkDir overrides the agent's working directory without changing
 	// its qualified identity or rig association.
 	WorkDir *string `toml:"work_dir,omitempty"`
+	// TmuxAlias overrides the tmux session name template
+	// (see Agent.TmuxAlias for semantics).
+	TmuxAlias *string `toml:"tmux_alias,omitempty"`
 	// Scope overrides the agent's scope ("city" or "rig").
 	Scope *string `toml:"scope,omitempty"`
 	// Suspended sets the agent's suspended state.
@@ -539,7 +547,8 @@ type AgentOverride struct {
 	// PreStart overrides the agent's pre_start commands.
 	PreStart []string `toml:"pre_start,omitempty"`
 	// PromptTemplate overrides the prompt template path.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the declaring config file's directory
+	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	PromptTemplate *string `toml:"prompt_template,omitempty"`
 	// Session overrides the session transport ("acp").
 	Session *string `toml:"session,omitempty"`
@@ -547,6 +556,8 @@ type AgentOverride struct {
 	Provider *string `toml:"provider,omitempty"`
 	// StartCommand overrides the start command.
 	StartCommand *string `toml:"start_command,omitempty"`
+	// Lifecycle overrides the runtime lifecycle ("one_shot" or empty).
+	Lifecycle *string `toml:"lifecycle,omitempty" jsonschema:"enum=one_shot"`
 	// Nudge overrides the nudge text.
 	Nudge *string `toml:"nudge,omitempty"`
 	// IdleTimeout overrides the idle timeout duration string (e.g., "30s", "5m", "1h").
@@ -585,7 +596,8 @@ type AgentOverride struct {
 	SessionLive []string `toml:"session_live,omitempty"`
 	// OverlayDir overrides the agent's overlay_dir path. Copies contents
 	// additively into the agent's working directory at startup.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the declaring config file's directory
+	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	OverlayDir *string `toml:"overlay_dir,omitempty"`
 	// DefaultSlingFormula overrides the default sling formula.
 	DefaultSlingFormula *string `toml:"default_sling_formula,omitempty"`
@@ -914,6 +926,10 @@ type PackDoctorEntry struct {
 	// Fix is an optional path to a remediation script, relative to the pack
 	// directory. When set, the check opts into `gc doctor --fix`.
 	Fix string `toml:"fix,omitempty"`
+	// Warmup, when true, includes this check in the `gc start` warm-up
+	// scan. Default false. The check still runs on demand via `gc doctor`
+	// regardless of this flag.
+	Warmup bool `toml:"warmup,omitempty"`
 }
 
 // PackCommandEntry declares a CLI subcommand provided by a pack.
@@ -1085,10 +1101,15 @@ type Workspace struct {
 	Includes []string `toml:"includes,omitempty"`
 	// DefaultRigIncludes is the legacy city.toml default-rig pack list.
 	//
-	// Deprecated: use root pack.toml [defaults.rig.imports.<binding>] instead.
+	// Deprecated: use city.toml [defaults.rig.imports.<binding>] instead.
 	// Run gc doctor to inspect; gc doctor --fix handles the safe mechanical
 	// rewrites available in this release wave.
 	DefaultRigIncludes []string `toml:"default_rig_includes,omitempty"`
+	// Env defines workspace-wide environment variables applied to every
+	// managed session. Lowest config-precedence — overridden by provider,
+	// agent, and patch env. Use for cross-cutting variables like
+	// GC_TARGET_BRANCH that every agent should inherit.
+	Env map[string]string `toml:"env,omitempty"`
 }
 
 // LegacyIncludes returns the compatibility-only city.toml include list.
@@ -1423,10 +1444,12 @@ type DoltConfig struct {
 	ArchiveLevel *int `toml:"archive_level,omitempty" jsonschema:"default=0"`
 }
 
-// FormulasConfig holds formula directory settings.
+// FormulasConfig holds legacy formula directory settings.
 type FormulasConfig struct {
-	// Dir is the path to the formulas directory. Defaults to "formulas".
-	Dir string `toml:"dir,omitempty" jsonschema:"default=formulas"`
+	// Dir is the legacy path to the formulas directory. PackV2 cities and
+	// packs use the well-known formulas/ directory; authored [formulas].dir
+	// is rejected for schema 2 configs.
+	Dir string `toml:"dir,omitempty" jsonschema:"-"`
 }
 
 // OrdersConfig holds order settings.
@@ -1645,8 +1668,9 @@ func parseHumanSize(s string) (int64, bool) {
 
 // ConvergenceConfig holds convergence loop limits.
 type ConvergenceConfig struct {
-	// MaxPerAgent is the maximum number of active convergence loops per agent.
-	// 0 means use default (2).
+	// MaxPerAgent is the maximum number of active convergence loops per agent
+	// in each bead store scope. City/HQ and each bound rig enforce the limit
+	// independently. 0 means use default (2).
 	MaxPerAgent int `toml:"max_per_agent,omitempty" jsonschema:"default=2"`
 	// MaxTotal is the maximum total number of active convergence loops.
 	// 0 means use default (10).
@@ -1707,6 +1731,22 @@ type DaemonConfig struct {
 	// agents during shutdown. Duration string (e.g., "5s", "30s"). Set to "0s"
 	// for immediate kill. Defaults to "5s".
 	ShutdownTimeout string `toml:"shutdown_timeout,omitempty" jsonschema:"default=5s"`
+	// DoltStopTimeout is the SIGTERM→SIGKILL grace period for the managed dolt
+	// subprocess during stop, unregister, restart, and startup/recovery
+	// cleanup. Independent of ShutdownTimeout (which gates agent drain) so a
+	// slow session drain cannot steal dolt's flush window. Duration string
+	// (e.g., "30s", "1m"). A too-short value risks SIGKILL during a journal
+	// index update or manifest rotation, which corrupts dolt's chunk journal
+	// (see gastownhall/gascity#2090). Defaults to "30s", which absorbs the
+	// longest observed flush window on commodity SSDs without unduly delaying
+	// unregister. Set to "0s" for immediate SIGKILL with no grace. Negative
+	// values are rejected at config load. Note: when a city is stopped via the
+	// controller (`gc stop` while a controller is running), the standalone
+	// controller-stop wait budget is `shutdown_timeout` + 15s (20s at the
+	// default `shutdown_timeout` of "5s"); a `dolt_stop_timeout` larger than
+	// that budget can be cut short on that path even though the direct
+	// stop/unregister path always honors the full grace.
+	DoltStopTimeout string `toml:"dolt_stop_timeout,omitempty" jsonschema:"default=30s"`
 	// WispGCInterval is how often wisp GC runs. Duration string (e.g., "5m", "1h").
 	// Wisp GC is disabled unless both WispGCInterval and WispTTL are set.
 	WispGCInterval string `toml:"wisp_gc_interval,omitempty"`
@@ -1730,8 +1770,11 @@ type DaemonConfig struct {
 	// dedicated dolt server, or lower to reduce contention on slow storage.
 	ProbeConcurrency *int `toml:"probe_concurrency,omitempty" jsonschema:"default=8"`
 	// MaxWakesPerTick caps how many sessions the reconciler may start in a
-	// single tick. Nil (unset) defaults to 5. Values <= 0 are treated as the
-	// default — set a positive integer to override.
+	// single tick. Fresh generic pool session-bead creation uses the same
+	// budget so the controller does not materialize more ordinary pool sessions
+	// than it can wake. Bounded dependency-floor prerequisites are exempt.
+	// Nil (unset) defaults to 5. Values <= 0 are treated as the default — set a
+	// positive integer to override.
 	MaxWakesPerTick *int `toml:"max_wakes_per_tick,omitempty" jsonschema:"default=5"`
 	// NudgeDispatcher selects how queued nudges get delivered to running
 	// sessions. "legacy" (default) auto-spawns a per-session `gc nudge poll`
@@ -1747,6 +1790,17 @@ type DaemonConfig struct {
 	// false as a global kill switch (e.g., for production cities where a
 	// rebuild on the host should not auto-restart the supervisor).
 	AutoRestartOnDrift *bool `toml:"auto_restart_on_drift,omitempty" jsonschema:"default=true"`
+	// StartReadyTimeout is how long `gc start` and `gc register` wait for
+	// the supervisor to report the city as Running. Cities with many
+	// registered or adopted sessions take longer to start because the
+	// per-tick wake budget (max_wakes_per_tick) throttles startup: wall
+	// time to wake N sessions is roughly ceil(N / max_wakes_per_tick) *
+	// patrol_interval. At the defaults (5 wakes / 30s), ~40 sessions
+	// need ~4 minutes. Duration string (e.g., "5m", "10m"). Defaults to
+	// DefaultStartReadyTimeout (5m). When set, this value replaces the
+	// default start/register budget; [session].startup_timeout may still
+	// extend the effective wait for a slow single session.
+	StartReadyTimeout string `toml:"start_ready_timeout,omitempty" jsonschema:"default=5m"`
 }
 
 // AutoRestartOnDriftEnabled reports whether the supervisor should be
@@ -1857,6 +1911,28 @@ func (d *DaemonConfig) ShutdownTimeoutDuration() time.Duration {
 	return dur
 }
 
+// DefaultDoltStopTimeout is the SIGTERM→SIGKILL grace for the managed dolt
+// subprocess when no value is configured. 30s is long enough to ride out the
+// longest observed journal-index update on commodity SSDs (#2090) while still
+// guaranteeing forward progress on unregister/restart.
+const DefaultDoltStopTimeout = 30 * time.Second
+
+// DoltStopTimeoutDuration returns the managed-dolt stop grace as a
+// time.Duration. Defaults to DefaultDoltStopTimeout (30s) when empty or
+// unparseable. Zero is allowed and means immediate SIGKILL — callers that
+// must guarantee a flush window should treat zero as a misconfiguration
+// upstream rather than silently overriding it here.
+func (d *DaemonConfig) DoltStopTimeoutDuration() time.Duration {
+	if d.DoltStopTimeout == "" {
+		return DefaultDoltStopTimeout
+	}
+	dur, err := time.ParseDuration(d.DoltStopTimeout)
+	if err != nil {
+		return DefaultDoltStopTimeout
+	}
+	return dur
+}
+
 // DefaultProbeConcurrency is the default bd probe concurrency limit.
 // Used by ProbeConcurrencyOrDefault and referenced by cmd/gc/pool.go
 // so the default lives in one place.
@@ -1897,6 +1973,27 @@ func (d *DaemonConfig) DriftDrainTimeoutDuration() time.Duration {
 	dur, err := time.ParseDuration(d.DriftDrainTimeout)
 	if err != nil {
 		return 2 * time.Minute
+	}
+	return dur
+}
+
+// DefaultStartReadyTimeout is the default wall-clock budget `gc start` and
+// `gc register` allow for the supervisor to report a city as Running.
+// Sized to cover cities with up to ~40 sessions at the default per-tick
+// wake budget; operators with larger cities override via
+// [daemon].start_ready_timeout.
+const DefaultStartReadyTimeout = 5 * time.Minute
+
+// StartReadyTimeoutDuration returns the start-ready wait budget as a
+// time.Duration. Defaults to DefaultStartReadyTimeout when empty or
+// unparseable.
+func (d *DaemonConfig) StartReadyTimeoutDuration() time.Duration {
+	if d.StartReadyTimeout == "" {
+		return DefaultStartReadyTimeout
+	}
+	dur, err := time.ParseDuration(d.StartReadyTimeout)
+	if err != nil {
+		return DefaultStartReadyTimeout
 	}
 	return dur
 }
@@ -2024,6 +2121,11 @@ func normalizeAgentDefaultsAlias(cfg *City, meta toml.MetaData) {
 	}
 }
 
+const (
+	// AgentLifecycleOneShot marks an agent command as intentionally short-lived.
+	AgentLifecycleOneShot = "one_shot"
+)
+
 // Agent defines a configured agent in the city.
 type Agent struct {
 	// Name is the unique identifier for this agent.
@@ -2037,6 +2139,21 @@ type Agent struct {
 	// agent's qualified identity. Relative paths resolve against city root
 	// and may use the same template placeholders as session_setup.
 	WorkDir string `toml:"work_dir,omitempty"`
+	// TmuxAlias overrides the tmux session_name for pool and factory-created
+	// manual sessions of this agent. When unset, sessions fall back to the
+	// universal derivation ("s-<beadID>" for ad-hoc sessions,
+	// "<basename>-<beadID>" for pool sessions). When set, it is expanded as a
+	// Go text/template using the same PathContext fields as work_dir /
+	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName),
+	// sanitized for tmux, and validated as an explicit session name. For pool
+	// sessions, a live-name collision appends the bead ID as a deterministic
+	// suffix. For manual `gc session new` sessions, tmux_alias becomes the
+	// explicit session_name and takes precedence over --alias, which remains the
+	// command/mail alias; duplicate explicit names fail closed. Configured named
+	// sessions keep their named-session runtime name instead of using
+	// tmux_alias. When no --alias is supplied, work_dir templates that use
+	// {{.Agent}} see the resolved tmux_alias as the concrete session identity.
+	TmuxAlias string `toml:"tmux_alias,omitempty"`
 	// Scope defines where this agent is instantiated: "city" (one per city)
 	// or "rig" (one per rig, the default). Only meaningful for pack-defined
 	// agents; inline agents in city.toml use Dir directly.
@@ -2062,6 +2179,10 @@ type Agent struct {
 	Provider string `toml:"provider,omitempty"`
 	// StartCommand overrides the provider's command for this agent.
 	StartCommand string `toml:"start_command,omitempty"`
+	// Lifecycle controls runtime lifetime semantics. Empty uses the default
+	// long-lived session lifecycle; "one_shot" means the command is expected
+	// to do bounded work and exit cleanly.
+	Lifecycle string `toml:"lifecycle,omitempty" jsonschema:"enum=one_shot"`
 	// Args overrides the provider's default arguments.
 	Args []string `toml:"args,omitempty"`
 	// PromptMode controls how prompts are delivered: "arg", "flag", or "none".
@@ -2273,6 +2394,7 @@ type Agent struct {
 	// Fallback marks this agent as a fallback definition. During pack
 	// composition, a non-fallback agent with the same name wins silently.
 	// When two fallbacks collide, the first loaded (depth-first) wins.
+	// See docs/guides/migrating-to-pack-vnext.md for migration guidance.
 	Fallback bool `toml:"fallback,omitempty"`
 	// DependsOn lists agent names that must be awake before this agent wakes.
 	// Used for dependency-ordered startup and shutdown. Validated for cycles
@@ -2431,6 +2553,28 @@ func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
 }
 
+// bdReadyPoolDemandShell returns the bd ready predicate for unassigned,
+// non-epic pool demand routed to target. This is the one-source-of-truth for the
+// "is there work on this routed queue?" question that both the worker (via
+// EffectiveWorkQuery Tier 3) and the reconciler (via EffectivePoolDemandQuery,
+// count-form) ask. Diverging the two re-introduces the protocol-mismatch class;
+// see the "scale_check ↔ work_query correspondence" note in
+// engdocs/architecture/dispatch.md.
+//
+// Callers append their own bd flags (--limit=1 for first-row work_query;
+// piped to jq 'length' for the count-form) and shell handling.
+func bdReadyPoolDemandShell(target string) string {
+	return `bd ready --metadata-field gc.routed_to=` + target + ` --unassigned --exclude-type=epic --json`
+}
+
+func (a *Agent) poolDemandTarget() string {
+	target := a.QualifiedName()
+	if a.PoolName != "" {
+		target = a.PoolName
+	}
+	return target
+}
+
 // EffectiveWorkQuery returns the work query command for this agent.
 // If WorkQuery is set, returns it as-is. Otherwise returns the default
 // three-tier query with multi-identifier assignee resolution.
@@ -2455,14 +2599,15 @@ func (a *Agent) AttachEnabled() bool {
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only
 // the routed_to tier fires to detect new demand.
+//
+// Tier 3's predicate is shared with EffectivePoolDemandQuery via
+// bdReadyPoolDemandShell so reconciler spawn decisions and worker claim
+// decisions stay symmetric.
 func (a *Agent) EffectiveWorkQuery() string {
 	if a.WorkQuery != "" {
 		return a.WorkQuery
 	}
-	target := a.QualifiedName()
-	if a.PoolName != "" {
-		target = a.PoolName
-	}
+	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
 		return `sh -c '` +
@@ -2484,8 +2629,7 @@ func (a *Agent) EffectiveWorkQuery() string {
 			`ephemeral|"") ;; ` +
 			`*) exit 0 ;; ` +
 			`esac; ` +
-			`r=$(bd ready --metadata-field gc.routed_to=` + target +
-			` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+			`r=$(` + bdReadyPoolDemandShell(target) + ` --limit=1 2>/dev/null); ` +
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 			`printf "[]"'`
 	}
@@ -2519,11 +2663,9 @@ func (a *Agent) EffectiveWorkQuery() string {
 		`ephemeral|"") ;; ` +
 		`*) exit 0 ;; ` +
 		`esac; ` +
-		`r=$(bd ready --metadata-field gc.routed_to=` + target +
-		` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(` + bdReadyPoolDemandShell(target) + ` --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`bd ready --metadata-field gc.routed_to=` + legacyTarget +
-		` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null'`
+		bdReadyPoolDemandShell(legacyTarget) + ` --limit=1 2>/dev/null'`
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {
@@ -2584,18 +2726,38 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 	return dur
 }
 
-// EffectiveScaleCheck returns the scale check command for this agent.
-// If ScaleCheck is set, returns it. Otherwise returns a default that
-// counts new unassigned work routed to this agent's template via ready().
-// Assigned in-progress work is resumed from session beads, so it must not
-// create additional generic pool demand here.
-func (a *Agent) EffectiveScaleCheck() string {
+// EffectivePoolDemandQuery returns the count-form pool-demand query the
+// reconciler runs to detect new unassigned routed work. It is the
+// reconciler-side counterpart to EffectiveWorkQuery's Tier 3 (the worker
+// claim path): both derive their predicate from bdReadyPoolDemandShell so
+// any future change to the pool-demand shape flows to both paths
+// simultaneously.
+//
+// If ScaleCheck is set (user override), it takes precedence and is
+// returned as-is. Otherwise the default count-form is returned.
+//
+// Assigned in-progress work is resumed from session beads, so it must
+// not create additional generic pool demand here.
+//
+// See engdocs/architecture/dispatch.md "scale_check ↔ work_query
+// correspondence" and the protocol-mismatch class regression addressed
+// by PR #1516.
+func (a *Agent) EffectivePoolDemandQuery() string {
 	if a.ScaleCheck != "" {
 		return a.ScaleCheck
 	}
-	template := a.QualifiedName()
-	return `ready_json=$(bd ready --metadata-field gc.routed_to=` + template +
-		` --unassigned --limit 0 --json) && printf '%s\n' "$ready_json" | jq 'length'`
+	target := a.poolDemandTarget()
+	return `ready_json=$(` + bdReadyPoolDemandShell(target) +
+		` --limit 0) && printf '%s\n' "$ready_json" | jq 'length'`
+}
+
+// EffectiveScaleCheck returns the scale check command for this agent.
+// Pass-through to EffectivePoolDemandQuery for back-compat with code and
+// configs that name the predicate "scale_check"; new call sites should
+// prefer EffectivePoolDemandQuery to make the dependency on the
+// work_query predicate explicit.
+func (a *Agent) EffectiveScaleCheck() string {
+	return a.EffectivePoolDemandQuery()
 }
 
 // EffectiveMaxActiveSessions returns the agent's max active sessions.
@@ -3034,6 +3196,7 @@ func newControlDispatcherAgent(dir string) Agent {
 		Dir:               dir,
 		Description:       "Built-in deterministic graph.v2 workflow control worker",
 		StartCommand:      ControlDispatcherStartCommandFor(qualifiedName),
+		ProcessNames:      []string{"gc"},
 		MaxActiveSessions: &one,
 		Implicit:          true,
 	}
@@ -3120,6 +3283,13 @@ func ValidateAgents(agents []Agent) error {
 			// valid
 		default:
 			return fmt.Errorf("agent %q: prompt_mode must be \"arg\", \"flag\", \"none\", or empty, got %q", a.QualifiedName(), a.PromptMode)
+		}
+		// Lifecycle enum.
+		switch a.Lifecycle {
+		case "", AgentLifecycleOneShot:
+			// valid
+		default:
+			return fmt.Errorf("agent %q: lifecycle must be %q or empty, got %q", a.QualifiedName(), AgentLifecycleOneShot, a.Lifecycle)
 		}
 		// PromptFlag required when prompt_mode = "flag".
 		if a.PromptMode == "flag" && a.PromptFlag == "" {
@@ -3394,8 +3564,9 @@ func WizardCity(name, provider, startCommand string) City {
 // GastownCity returns a City configured for the gastown orchestration pack.
 // Agents come from the pack (.gc/system/packs/gastown); no inline agents are
 // defined. The root city pack imports gastown and sets canonical
-// DefaultRigImports so newly added rigs inherit the same pack by default. If
-// startCommand is set, it takes precedence over provider.
+// DefaultRigImports so newly added rigs inherit the same pack by default. It
+// also sets global fragments and daemon config. If startCommand is set, it
+// takes precedence over provider.
 func GastownCity(name, provider, startCommand string) City {
 	ws := Workspace{
 		Name:            name,

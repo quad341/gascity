@@ -42,12 +42,41 @@ const (
 	SessionMaxAgeKilled = "session.max_age_killed"
 	SessionSuspended    = "session.suspended"
 	SessionUpdated      = "session.updated"
-	ConvoyCreated       = "convoy.created"
-	ConvoyClosed        = "convoy.closed"
-	ControllerStarted   = "controller.started"
-	ControllerStopped   = "controller.stopped"
-	CitySuspended       = "city.suspended"
-	CityResumed         = "city.resumed"
+	// SessionDrainAckedWithAssignedWork fires when a session acknowledges
+	// drain (via `gc runtime drain-ack`) while still holding the assignee
+	// on an open or in-progress work bead. Distinguishes a worker that
+	// exited mid-task (e.g., per-turn cap, crash) from a worker that
+	// performed a clean phase handoff (the latter null the bead's
+	// assignee before drain-acking). The reconciler emits this as a
+	// mechanism-only signal; pack-level subscribers own the recovery
+	// policy (commit-and-push, clear-assignee-and-respawn, or escalate).
+	// See gastownhall/gascity#2293.
+	SessionDrainAckedWithAssignedWork = "session.drain_acked_with_assigned_work"
+	// SessionStranded fires when a pool slot retains an in-progress work
+	// bead after its runtime has exited — i.e., the worker process is
+	// gone but the bead's assignee/state still references it. Surfaces
+	// the reconciler-detected leak so pack-level subscribers can decide
+	// whether to clear-assignee-and-respawn or escalate.
+	SessionStranded = "session.stranded"
+	// SessionWorkQueryFailed fires when the current managed session's
+	// work-discovery query subprocess is killed by an external signal or
+	// aborted by the runner-imposed timeout before producing output.
+	// Emission requires the current session ID so the lifecycle payload
+	// remains correlated; the companion reconciler handler is tracked in
+	// #1497.
+	SessionWorkQueryFailed = "session.work_query_failed"
+	ConvoyCreated          = "convoy.created"
+	ConvoyClosed           = "convoy.closed"
+	ControllerStarted      = "controller.started"
+	ControllerStopped      = "controller.stopped"
+	// SupervisorShutdownRequested fires when the supervisor's main loop
+	// observes a shutdown trigger (signal or socket stop) and is about to
+	// cancel the supervisor context. Carries attribution so operators can
+	// answer "why did the supervisor exit" without scraping macOS/launchd
+	// logs.
+	SupervisorShutdownRequested = "supervisor.shutdown_requested"
+	CitySuspended               = "city.suspended"
+	CityResumed                 = "city.resumed"
 	// Typed async request result events. 5 success types (one per
 	// operation, fully typed payload) + 1 shared failure type.
 	RequestResultCityCreate     = "request.result.city.create"
@@ -83,6 +112,19 @@ const (
 	// archive's filename and seq range so log readers can stitch back
 	// across rotations.
 	EventsRotated = "events.rotated"
+
+	// Dolt store maintenance events. Emitted by the supervisor's
+	// StoreMaintenanceLoop (internal/supervisor/maintenance.go) after
+	// each scheduled maintenance cycle completes or fails.
+	StoreMaintenanceDone   = "gc.store.maintenance.done"
+	StoreMaintenanceFailed = "gc.store.maintenance.failed"
+
+	// Postgres credential resolution. Emitted by the bd-env projection
+	// path on every successful pgauth resolve. The payload identifies
+	// the scope and the resolution tier that supplied the value; it
+	// MUST NOT carry the password value (asserted by
+	// TestPostgresEventOmitsPassword).
+	PostgresCredentialResolved = "pg.credential_resolved"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -93,6 +135,9 @@ var KnownEventTypes = []string{
 	SessionWoke, SessionStopped, SessionCrashed,
 	SessionDraining, SessionUndrained, SessionQuarantined,
 	SessionIdleKilled, SessionMaxAgeKilled, SessionSuspended, SessionUpdated,
+	SessionDrainAckedWithAssignedWork,
+	SessionStranded,
+	SessionWorkQueryFailed,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
@@ -105,10 +150,13 @@ var KnownEventTypes = []string{
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
+	SupervisorShutdownRequested,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,
 	EventsRotated,
+	StoreMaintenanceDone, StoreMaintenanceFailed,
+	PostgresCredentialResolved,
 }
 
 // Event is a single recorded occurrence in the system.

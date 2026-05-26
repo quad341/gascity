@@ -117,6 +117,15 @@ func TestProviderStatusFixHintIncludesClaudeOAuthToken(t *testing.T) {
 	}
 }
 
+func TestProviderStatusFixHintIncludesClaudeSetupTokenForNeedsAuth(t *testing.T) {
+	got := providerStatusFixHint("claude", api.ProbeStatusNeedsAuth)
+	for _, want := range []string{"`claude auth login`", "`claude setup-token`", "`CLAUDE_CODE_OAUTH_TOKEN`"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("providerStatusFixHint = %q, want %s", got, want)
+		}
+	}
+}
+
 func TestFinalizeInitBlocksProviderReadinessBeforeSupervisorRegistration(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
@@ -172,6 +181,9 @@ func TestFinalizeInitBlocksProviderReadinessBeforeSupervisorRegistration(t *test
 	}
 	if !strings.Contains(stderr.String(), "run `claude auth login`") {
 		t.Fatalf("stderr = %q, want Claude fix hint", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "`claude setup-token`") {
+		t.Fatalf("stderr = %q, want Claude setup-token hint", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "Override: gc init --skip-provider-readiness") {
 		t.Fatalf("stderr = %q, want init override hint", stderr.String())
@@ -733,6 +745,41 @@ func TestCheckHardDependenciesAcceptsPythonFallbackForBdContract(t *testing.T) {
 	}
 }
 
+func TestCheckHardDependenciesRejectsBdBelowExplicitIDSupport(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) {
+		return "/usr/bin/" + name, nil
+	}
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRunVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		switch binary {
+		case "bd":
+			return "bd version 1.0.3", nil
+		case "dolt":
+			return "dolt version " + doltMinVersion, nil
+		case "flock", "tmux", "jq", "git", "pgrep", "lsof":
+			return binary + " version", nil
+		default:
+			return binary + " version " + doltMinVersion, nil
+		}
+	}
+	t.Cleanup(func() { initRunVersion = oldRunVersion })
+
+	missing := checkHardDependencies(t.TempDir())
+	if len(missing) != 1 {
+		t.Fatalf("missing deps = %#v, want only bd version rejection", missing)
+	}
+	for _, want := range []string{"bd", "1.0.3", "1.0.4"} {
+		if !strings.Contains(missing[0].name, want) {
+			t.Fatalf("missing dep = %#v, want %q", missing[0], want)
+		}
+	}
+}
+
 func TestCheckHardDependenciesRejectsDoltPreReleaseAtFloor(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
@@ -880,6 +927,7 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock(t *testing
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	stubInitDependencyChecks(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
@@ -1410,6 +1458,7 @@ func TestInitRunDoltConfigGetTreatsSilentEmptyExitAsMissingKey(t *testing.T) {
 func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkip(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	configureIsolatedRuntimeEnv(t)
+	stubInitDependencyChecks(t)
 	stubInitDoltAuthorIdentity(t, map[string]string{
 		"user.name":  "gc-test",
 		"user.email": "gc-test@test.local",
@@ -1463,6 +1512,7 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkip
 func TestFinalizeInitDoesNotRunBdProviderBeforeProviderReadinessBlock(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_DOLT", "")
+	stubInitDependencyChecks(t)
 	stubInitDoltAuthorIdentity(t, map[string]string{
 		"user.name":  "gc-test",
 		"user.email": "gc-test@test.local",

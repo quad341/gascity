@@ -11,7 +11,7 @@ set -euo pipefail
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 . "$PACK_DIR/assets/scripts/runtime.sh"
 
-PORT="${GC_DOLT_PORT:-3307}"
+PORT="$GC_DOLT_PORT"
 HOST="${GC_DOLT_HOST:-127.0.0.1}"
 USER="${GC_DOLT_USER:-root}"
 LATENCY_WARN_S="${GC_DOCTOR_LATENCY_WARN_S:-1}"
@@ -71,16 +71,31 @@ append_backup_stale() {
     fi
 }
 
+send_mayor_mail() {
+    local mail_err
+    if ! mail_err=$(gc mail send mayor/ --from controller "$@" 2>&1 >/dev/null); then
+        if [ -n "$mail_err" ]; then
+            echo "doctor: mail send failed: $mail_err" >&2
+        else
+            echo "doctor: mail send failed" >&2
+        fi
+        return 1
+    fi
+}
+
 # --- Step 1: Probe connectivity and measure latency ---
 
 PROBE_START=$(date +%s)
 if ! dolt_sql -q "SELECT active_branch()" >/dev/null 2>&1; then
-    gc mail send mayor/ \
+    if send_mayor_mail \
         -s "ESCALATION: Dolt server unreachable on port $PORT [CRITICAL]" \
-        -m "Doctor probe failed: server did not respond to active_branch() query." \
-        2>/dev/null || true
-    gc session nudge deacon/ "DOG_DONE: doctor — server: UNREACHABLE (escalated)" 2>/dev/null || true
-    echo "doctor: server unreachable on port $PORT (escalated)"
+        -m "Doctor probe failed: server did not respond to active_branch() query."; then
+        gc session nudge deacon/ "DOG_DONE: doctor — server: UNREACHABLE (escalated)" 2>/dev/null || true
+        echo "doctor: server unreachable on port $PORT (escalated)"
+    else
+        gc session nudge deacon/ "DOG_DONE: doctor — server: UNREACHABLE (mail failed)" 2>/dev/null || true
+        echo "doctor: server unreachable on port $PORT (mail failed)"
+    fi
     exit 0
 fi
 PROBE_END=$(date +%s)
@@ -116,14 +131,28 @@ if [ "${ORPHAN_COUNT:-0}" -gt 0 ]; then
 fi
 
 # Backup freshness: check newest backup artifact per database.
+# Scope mirrors mol-dog-backup.sh: only DBs with a configured <db>-backup
+# remote are eligible. Cities with user DBs but no backup remotes
+# (legitimate config) must not get false stale-backup alarms.
+BACKUP_ELIGIBLE_DBS=""
+for db in $USER_DBS; do
+    db_dir="$DOLT_DATA_DIR/$db"
+    if [ -d "$db_dir/.dolt" ]; then
+        if (cd "$db_dir" && dolt backup 2>/dev/null | awk '{print $1}' | grep -qx "${db}-backup"); then
+            BACKUP_ELIGIBLE_DBS="$BACKUP_ELIGIBLE_DBS $db"
+        fi
+    fi
+done
+BACKUP_ELIGIBLE_DBS=$(printf '%s\n' "$BACKUP_ELIGIBLE_DBS" | tr ' ' '\n' | grep -v '^$' || true)
+
 BACKUP_STALE=""
-if [ -n "$USER_DBS" ]; then
+if [ -n "$BACKUP_ELIGIBLE_DBS" ]; then
     if [ ! -d "$BACKUP_ARTIFACT_DIR" ]; then
         BACKUP_STALE=" [WARN: backup artifact dir missing]"
     else
         BACKUP_STALE_ITEMS=""
         NOW_S=$(date +%s)
-        for db in $USER_DBS; do
+        for db in $BACKUP_ELIGIBLE_DBS; do
             NEWEST_BACKUP_MTIME=$(newest_backup_mtime_for_db "$db")
             if [ "$NEWEST_BACKUP_MTIME" -le 0 ]; then
                 append_backup_stale "$db backup missing"
@@ -144,13 +173,14 @@ fi
 
 WARNINGS="${LATENCY_WARN}${CONN_WARN}${ORPHAN_WARN}${BACKUP_STALE}"
 if [ -n "$WARNINGS" ]; then
-    gc mail send mayor/ \
+    if ! send_mayor_mail \
         -s "Dolt health advisory [MEDIUM]" \
         -m "Latency: ${LATENCY_S}s${LATENCY_WARN}
 Connections: ${CONN_COUNT}/${CONN_MAX}${CONN_WARN}
 Disk: ${DISK_USAGE}
-Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}" \
-        2>/dev/null || true
+Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}"; then
+        :
+    fi
 fi
 
 SUMMARY="doctor — server: ok, latency: ${LATENCY_S}s, conns: ${CONN_COUNT}/${CONN_MAX}, disk: ${DISK_USAGE}, orphans: ${ORPHAN_COUNT}"

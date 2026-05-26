@@ -687,11 +687,11 @@ formula_v2 = true
 
 [[rigs]]
 name = "alpha"
-path = "rigs/alpha"
 prefix = "BL"
 `), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
+	writeCatalogFile(t, cityDir, ".gc/site.toml", "[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
@@ -1788,9 +1788,10 @@ func TestRunWorkflowServeWarnsWhenLegacyRigTraceFileStillExists(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"alpha\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
+	writeCatalogFile(t, cityDir, ".gc/site.toml", "[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
 	rigRoot := filepath.Join(cityDir, "rigs", "alpha")
 	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
 		t.Fatalf("mkdir rig root: %v", err)
@@ -1839,9 +1840,10 @@ func TestRunWorkflowServeWarnsWhenLegacyEnvRigTraceFileStillExistsOutsideConfigu
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"alpha\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
+	writeCatalogFile(t, cityDir, ".gc/site.toml", "[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
 	rigRoot := filepath.Join(cityDir, "rigs", "beta")
 	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
 		t.Fatalf("mkdir rig root: %v", err)
@@ -1947,7 +1949,7 @@ func TestRunControlDispatcherWithStoreRoutesRalphTraceWarningToStderr(t *testing
 			"gc.attempt":         "1",
 			"gc.step_ref":        "implement.check.1",
 			"gc.check_mode":      "exec",
-			"gc.check_path":      checkPath,
+			"gc.check_path":      "pass-check.sh",
 			"gc.check_timeout":   "30s",
 			"gc.max_attempts":    "1",
 			"gc.root_bead_id":    workflow.ID,
@@ -2051,7 +2053,7 @@ func TestRunControlDispatcherWithStoreWarnsOnLegacyTracePath(t *testing.T) {
 			"gc.attempt":         "1",
 			"gc.step_ref":        "implement.check.1",
 			"gc.check_mode":      "exec",
-			"gc.check_path":      checkPath,
+			"gc.check_path":      "pass-check.sh",
 			"gc.check_timeout":   "30s",
 			"gc.max_attempts":    "1",
 			"gc.root_bead_id":    workflow.ID,
@@ -2166,7 +2168,7 @@ func TestRunWorkflowServeDedupsTraceWarningsAcrossNestedControlDispatch(t *testi
 				"gc.attempt":         "1",
 				"gc.step_ref":        stepID + ".check.1",
 				"gc.check_mode":      "exec",
-				"gc.check_path":      checkPath,
+				"gc.check_path":      "pass-check.sh",
 				"gc.check_timeout":   "30s",
 				"gc.max_attempts":    "1",
 				"gc.root_bead_id":    workflow.ID,
@@ -2302,7 +2304,7 @@ func TestRunWorkflowServeDedupsLegacyTraceWarningsAcrossNestedControlDispatch(t 
 				"gc.attempt":         "1",
 				"gc.step_ref":        stepID + ".check.1",
 				"gc.check_mode":      "exec",
-				"gc.check_path":      checkPath,
+				"gc.check_path":      "pass-check.sh",
 				"gc.check_timeout":   "30s",
 				"gc.max_attempts":    "1",
 				"gc.root_bead_id":    workflow.ID,
@@ -2628,10 +2630,13 @@ func TestRunWorkflowServeOverridesInheritedCityBeadsDir(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cityToml := fmt.Sprintf("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"myrig\"\npath = %q\n\n[[agent]]\nname = \"worker\"\ndir = \"myrig\"\n", rigDir)
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"myrig\"\n"
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeCatalogFile(t, cityDir, "pack.toml", "[pack]\nname = \"test-city\"\nschema = 2\n")
+	writeCatalogFile(t, cityDir, ".gc/site.toml", fmt.Sprintf("[[rig]]\nname = \"myrig\"\npath = %q\n", rigDir))
+	writeCatalogFile(t, cityDir, "agents/worker/agent.toml", "dir = \"myrig\"\n")
 
 	t.Setenv("GC_CITY", cityDir)
 	// Pollute parent env with a city-scoped BEADS_DIR. Without the fix,
@@ -2697,7 +2702,7 @@ func TestRunWorkflowServeProcessesControlBeadsInAgentStoreScope(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cityToml := fmt.Sprintf(`[workspace]
+	cityToml := `[workspace]
 name = "test-city"
 
 [daemon]
@@ -2705,11 +2710,11 @@ formula_v2 = true
 
 [[rigs]]
 name = "myrig"
-path = %q
-`, rigDir)
+`
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeCatalogFile(t, cityDir, ".gc/site.toml", fmt.Sprintf("[[rig]]\nname = \"myrig\"\npath = %q\n", rigDir))
 	t.Setenv("GC_CITY", cityDir)
 
 	prevCityFlag := cityFlag
@@ -2970,19 +2975,13 @@ name = "test-city"
 
 [[rigs]]
 name = "rigrepo"
-path = "rigrepo"
-
-[[agent]]
-name = "polecat"
-dir = "rigrepo"
-
-[agent.pool]
-min = 0
-max = 5
 `
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeCatalogFile(t, cityDir, "pack.toml", "[pack]\nname = \"test-city\"\nschema = 2\n")
+	writeCatalogFile(t, cityDir, ".gc/site.toml", "[[rig]]\nname = \"rigrepo\"\npath = \"rigrepo\"\n")
+	writeCatalogFile(t, cityDir, "agents/polecat/agent.toml", "dir = \"rigrepo\"\nmin_active_sessions = 0\nmax_active_sessions = 5\n")
 
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_ALIAS", "rigrepo/furiosa")
@@ -3292,6 +3291,66 @@ func TestRunWorkflowServeTreatsTransientControllerSpawnPendingAsNonFatal(t *test
 	}
 }
 
+func TestRunWorkflowServeTreatsTransientControlErrorAsPending(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	var attempted []string
+	var processed []string
+	calls := 0
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		calls++
+		if calls == 1 {
+			return []hookBead{
+				{ID: "gc-transient", Metadata: map[string]string{"gc.kind": "ralph"}},
+				{ID: "gc-ready", Metadata: map[string]string{"gc.kind": "scope-check"}},
+			}, nil
+		}
+		return nil, nil
+	}
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+		attempted = append(attempted, beadID)
+		if beadID == "gc-transient" {
+			return fmt.Errorf("gc-transient: spawning iteration 2: adding dep: failed to check for dependency cycle: invalid connection: i/o timeout")
+		}
+		processed = append(processed, beadID)
+		return nil
+	}
+
+	if err := runWorkflowServe("", false, io.Discard, io.Discard); err != nil {
+		t.Fatalf("runWorkflowServe: %v", err)
+	}
+
+	if !slices.Equal(attempted, []string{"gc-transient", "gc-ready"}) {
+		t.Fatalf("attempted beads = %#v, want transient bead skipped before ready bead is processed", attempted)
+	}
+	if !slices.Equal(processed, []string{"gc-ready"}) {
+		t.Fatalf("processed beads = %#v, want only later ready bead to be processed", processed)
+	}
+}
+
 func TestRunControlDispatcherQuarantinesMalformedControlGraph(t *testing.T) {
 	clearGCEnv(t)
 
@@ -3535,6 +3594,83 @@ func TestRunWorkflowServeReturnsQueryError(t *testing.T) {
 	}
 }
 
+func TestRunWorkflowServeQueryKillEmitsCurrentSessionPayload(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "backend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+	cityToml := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[[rigs]]
+name = "backend"
+path = %q
+
+[[agent]]
+name = "worker"
+dir = "backend"
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_SESSION_ID", "sess-control-123")
+	t.Setenv("GC_TEMPLATE", "gascity/workflows.codex-min")
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	cityFlag = ""
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+	})
+
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		return nil, errors.New("signal: killed")
+	}
+	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer) error {
+		t.Fatal("controlDispatcherServe should not be called on query failure")
+		return nil
+	}
+
+	err := runWorkflowServe("backend/worker", false, io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("runWorkflowServe returned nil error, want query failure")
+	}
+	evts, readErr := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.SessionWorkQueryFailed})
+	if readErr != nil {
+		t.Fatalf("read work-query failure events: %v", readErr)
+	}
+	if len(evts) != 1 {
+		t.Fatalf("work-query failure events = %d, want 1: %+v", len(evts), evts)
+	}
+	if evts[0].Subject != "gascity/workflows.codex-min" {
+		t.Fatalf("event subject = %q, want current session template", evts[0].Subject)
+	}
+	payload := decodeSessionLifecyclePayload(t, evts[0])
+	if payload.SessionID != "sess-control-123" {
+		t.Fatalf("payload SessionID = %q, want sess-control-123", payload.SessionID)
+	}
+	if payload.Template != "gascity/workflows.codex-min" {
+		t.Fatalf("payload Template = %q, want current session template", payload.Template)
+	}
+	if payload.Template == "backend/worker" {
+		t.Fatalf("payload Template used target agent %q, want current session context", payload.Template)
+	}
+	if payload.Reason != "work query killed (signal: killed)" {
+		t.Fatalf("payload Reason = %q, want work query killed (signal: killed)", payload.Reason)
+	}
+}
+
 func TestRunWorkflowServeExpandsTemplateCommandsWithCityFallback(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
@@ -3544,18 +3680,15 @@ func TestRunWorkflowServeExpandsTemplateCommandsWithCityFallback(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cityToml := fmt.Sprintf(`[[rigs]]
+	cityToml := `[[rigs]]
 name = "frontend"
-path = %q
-
-[[agent]]
-name = "worker"
-dir = "frontend"
-work_query = "bd {{.CityName}} {{.Rig}} {{.AgentBase}}"
-`, rigDir)
+`
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeCatalogFile(t, cityDir, "pack.toml", "[pack]\nname = \"demo-city\"\nschema = 2\n")
+	writeCatalogFile(t, cityDir, ".gc/site.toml", fmt.Sprintf("[[rig]]\nname = \"frontend\"\npath = %q\n", rigDir))
+	writeCatalogFile(t, cityDir, "agents/worker/agent.toml", "dir = \"frontend\"\nwork_query = \"bd {{.CityName}} {{.Rig}} {{.AgentBase}}\"\n")
 
 	prevList := workflowServeList
 	t.Cleanup(func() { workflowServeList = prevList })
@@ -3613,7 +3746,7 @@ func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
 	}
 	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
 		processed = append(processed, beadID)
-		return os.ErrDeadlineExceeded
+		return errors.New("synthetic dispatch failure")
 	}
 
 	wfcAgent := config.Agent{Name: "control-dispatcher", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}
@@ -3625,8 +3758,8 @@ func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
 		nil,
 		io.Discard,
 	)
-	if err == nil || !strings.Contains(err.Error(), os.ErrDeadlineExceeded.Error()) {
-		t.Fatalf("runWorkflowServeFollow error = %v, want wrapped %v", err, os.ErrDeadlineExceeded)
+	if err == nil || !strings.Contains(err.Error(), "synthetic dispatch failure") {
+		t.Fatalf("runWorkflowServeFollow error = %v, want wrapped synthetic dispatch failure", err)
 	}
 	if !slices.Equal(processed, []string{"gc-ready"}) {
 		t.Fatalf("processed beads = %#v, want sweep fallback to process gc-ready", processed)
@@ -3984,13 +4117,11 @@ name = "test-city"
 
 [beads]
 provider = "file"
-
-[[agent]]
-name = "control-dispatcher"
-start_command = "echo hello"
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
+	writeCatalogFile(t, cityPath, "pack.toml", "[pack]\nname = \"test-city\"\nschema = 2\n")
+	writeCatalogFile(t, cityPath, "agents/control-dispatcher/agent.toml", "start_command = \"echo hello\"\n")
 	t.Setenv("GC_CITY", cityPath)
 
 	store, err := openStoreAtForCity(cityPath, cityPath)
@@ -4135,11 +4266,11 @@ name = "test-city"
 
 [[rigs]]
 name = "alpha"
-path = "rigs/alpha"
 prefix = "BL"
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
+	writeCatalogFile(t, cityDir, ".gc/site.toml", "[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
@@ -4254,11 +4385,11 @@ name = "test-city"
 
 [[rigs]]
 name = "alpha"
-path = "rigs/alpha"
 prefix = "BL"
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
+	writeCatalogFile(t, cityDir, ".gc/site.toml", "[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
@@ -4376,11 +4507,11 @@ name = "test-city"
 
 [[rigs]]
 name = "alpha"
-path = "rigs/alpha"
 prefix = "BL"
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
+	writeCatalogFile(t, cityDir, ".gc/site.toml", "[[rig]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n")
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")

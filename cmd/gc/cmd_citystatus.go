@@ -15,15 +15,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// StatusJSON is the JSON output format for "gc status --json".
+// StatusJSON is the JSON output format for gc status.
 type StatusJSON struct {
-	CityName   string            `json:"city_name"`
-	CityPath   string            `json:"city_path"`
-	Controller ControllerJSON    `json:"controller"`
-	Suspended  bool              `json:"suspended"`
-	Agents     []StatusAgentJSON `json:"agents"`
-	Rigs       []StatusRigJSON   `json:"rigs"`
-	Summary    StatusSummaryJSON `json:"summary"`
+	CityName   string                 `json:"city_name"`
+	CityPath   string                 `json:"city_path"`
+	Controller ControllerJSON         `json:"controller"`
+	Suspended  bool                   `json:"suspended"`
+	Beads      *beads.BeadsDiagnostic `json:"beads,omitempty"`
+	Agents     []StatusAgentJSON      `json:"agents"`
+	Rigs       []StatusRigJSON        `json:"rigs"`
+	Summary    StatusSummaryJSON      `json:"summary"`
 }
 
 // ControllerJSON represents controller state in JSON output.
@@ -67,7 +68,7 @@ type StatusSummaryJSON struct {
 
 var (
 	observeSessionTargetForStatus = workerObserveSessionTargetWithConfig
-	openCityStoreAtForStatus      = openCityStoreAt
+	openCityStoreAtForStatus      = openCityStoreResultAt
 )
 
 var (
@@ -79,6 +80,7 @@ var (
 // newStatusCmd creates the "gc status [path]" command.
 func newStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonFlag bool
+	var formatFlag string
 	cmd := &cobra.Command{
 		Use:   "status [path]",
 		Short: "Show city-wide status overview",
@@ -86,13 +88,21 @@ func newStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 all agents with running status, rigs, and a summary count.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdCityStatus(args, jsonFlag, stdout, stderr) != 0 {
+			format := strings.ToLower(strings.TrimSpace(formatFlag))
+			switch format {
+			case "", "text", "json":
+			default:
+				fmt.Fprintf(stderr, "gc status: unsupported format %q\n", formatFlag) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			if cmdCityStatus(args, jsonFlag || format == "json", stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output in JSON format")
+	cmd.Flags().StringVar(&formatFlag, "format", "", "Output format: text or json")
 	return cmd
 }
 
@@ -110,7 +120,7 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 
-	store, code := openCityStatusStore(cityPath, stderr)
+	store, diagnostic, code := openCityStatusStore(cityPath, stderr)
 	if code != 0 {
 		return code
 	}
@@ -118,7 +128,7 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 	sp := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
 	dops := newDrainOps(sp)
 	if jsonOutput {
-		return doCityStatusJSONWithStoreAndSnapshot(sp, cfg, cityPath, store, statusSnapshot, stdout, stderr)
+		return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
 	}
 	return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
 }
@@ -252,7 +262,7 @@ func doCityStatus(
 	cityPath string,
 	stdout, stderr io.Writer,
 ) int {
-	store, code := openCityStatusStore(cityPath, stderr)
+	store, _, code := openCityStatusStore(cityPath, stderr)
 	if code != 0 {
 		return code
 	}
@@ -302,22 +312,24 @@ func doCityStatusJSON(
 	cityPath string,
 	stdout, stderr io.Writer,
 ) int {
-	store, code := openCityStatusStore(cityPath, stderr)
+	store, diagnostic, code := openCityStatusStore(cityPath, stderr)
 	if code != 0 {
 		return code
 	}
-	return doCityStatusJSONWithStoreAndSnapshot(sp, cfg, cityPath, store, loadStatusSessionSnapshot(store, stderr), stdout, stderr)
+	return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, loadStatusSessionSnapshot(store, stderr), stdout, stderr)
 }
 
-func doCityStatusJSONWithStoreAndSnapshot(
+func doCityStatusJSONWithDiagnosticAndSnapshot(
 	sp runtime.Provider,
 	cfg *config.City,
 	cityPath string,
 	store beads.Store,
+	diagnostic *beads.BeadsDiagnostic,
 	statusSnapshot *sessionBeadSnapshot,
 	stdout, stderr io.Writer,
 ) int {
 	snapshot := collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, statusSnapshot, stderr)
+	snapshot.Beads = diagnostic
 	// Track session-snapshot degradation so we can emit the JSON payload AND
 	// signal the failure via exit code. Restores the pre-#2005 contract that
 	// monitoring callers rely on (see #2147).

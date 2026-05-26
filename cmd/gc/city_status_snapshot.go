@@ -58,6 +58,7 @@ type cityStatusSnapshot struct {
 	CityPath      string
 	Controller    ControllerJSON
 	Suspended     bool
+	Beads         *beads.BeadsDiagnostic
 	Agents        []cityStatusAgentRow
 	Rigs          []StatusRigJSON
 	NamedSessions []cityStatusNamedSession
@@ -83,19 +84,19 @@ type rigStatusCounts struct {
 	Suspended int
 }
 
-func openCityStatusStore(cityPath string, stderr io.Writer) (beads.Store, int) {
+func openCityStatusStore(cityPath string, stderr io.Writer) (beads.Store, *beads.BeadsDiagnostic, int) {
 	if cityPath == "" {
-		return nil, 0
+		return nil, nil, 0
 	}
 	if !cityStatusStorePresent(cityPath) {
-		return nil, 0
+		return nil, nil, 0
 	}
 	opened, err := openCityStoreAtForStatus(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc status: opening bead store: %v\n", err) //nolint:errcheck // best-effort stderr
-		return nil, 1
+		return nil, nil, 1
 	}
-	return opened, 0
+	return opened.Store, diagnosticPtr(opened.Diagnostic), 0
 }
 
 func cityStatusStorePresent(cityPath string) bool {
@@ -393,10 +394,18 @@ func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSumma
 		CityPath:   snapshot.CityPath,
 		Controller: snapshot.Controller,
 		Suspended:  snapshot.Suspended,
+		Beads:      snapshot.Beads,
 		Agents:     agents,
 		Rigs:       snapshot.Rigs,
 		Summary:    summary,
 	}
+}
+
+func diagnosticPtr(diagnostic beads.BeadsDiagnostic) *beads.BeadsDiagnostic {
+	if diagnostic.Store == "" && !diagnostic.NativeStoreEligible && diagnostic.PreflightGate == "" && diagnostic.PreflightReason == "" {
+		return nil
+	}
+	return &diagnostic
 }
 
 func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.Writer) {

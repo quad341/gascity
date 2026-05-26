@@ -1654,7 +1654,18 @@ func TestSupervisorCreatesControllerSocketForManagedCity(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"),
-		[]byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		[]byte(`[workspace]
+name = "test-city"
+
+[orders]
+skip = ["beads-health", "cross-rig-deps", "gate-sweep", "mol-dog-jsonl", "mol-dog-reaper", "order-tracking-sweep", "orphan-sweep", "prune-branches", "spawn-storm-detect", "wisp-compact"]
+
+[session]
+provider = "fake"
+
+[daemon]
+shutdown_timeout = "500ms"
+`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

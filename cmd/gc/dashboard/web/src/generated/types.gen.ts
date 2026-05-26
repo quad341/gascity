@@ -2905,6 +2905,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeBeadClosed) | ({
     type: 'bead.created';
 } & TypedEventStreamEnvelopeBeadCreated) | ({
+    type: 'bead.deleted';
+} & TypedEventStreamEnvelopeBeadDeleted) | ({
     type: 'bead.updated';
 } & TypedEventStreamEnvelopeBeadUpdated) | ({
     type: 'city.created';
@@ -3027,6 +3029,20 @@ export type TypedEventStreamEnvelopeBeadCreated = {
     subject?: string;
     ts: string;
     type: 'bead.created';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope bead.deleted
+ */
+export type TypedEventStreamEnvelopeBeadDeleted = {
+    actor: string;
+    message?: string;
+    payload: BeadEventPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'bead.deleted';
     workflow?: WorkflowEventProjection;
 };
 
@@ -3712,6 +3728,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeBeadClosed) | ({
     type: 'bead.created';
 } & TypedTaggedEventStreamEnvelopeBeadCreated) | ({
+    type: 'bead.deleted';
+} & TypedTaggedEventStreamEnvelopeBeadDeleted) | ({
     type: 'bead.updated';
 } & TypedTaggedEventStreamEnvelopeBeadUpdated) | ({
     type: 'city.created';
@@ -3836,6 +3854,21 @@ export type TypedTaggedEventStreamEnvelopeBeadCreated = {
     subject?: string;
     ts: string;
     type: 'bead.created';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope bead.deleted
+ */
+export type TypedTaggedEventStreamEnvelopeBeadDeleted = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: BeadEventPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'bead.deleted';
     workflow?: WorkflowEventProjection;
 };
 

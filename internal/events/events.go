@@ -22,6 +22,7 @@ const (
 	SessionCrashed     = "session.crashed"
 	BeadCreated        = "bead.created"
 	BeadClosed         = "bead.closed"
+	BeadDeleted        = "bead.deleted"
 	BeadUpdated        = "bead.updated"
 	MailSent           = "mail.sent"
 	MailRead           = "mail.read"
@@ -92,7 +93,7 @@ var KnownEventTypes = []string{
 	SessionWoke, SessionStopped, SessionCrashed,
 	SessionDraining, SessionUndrained, SessionQuarantined,
 	SessionIdleKilled, SessionMaxAgeKilled, SessionSuspended, SessionUpdated,
-	BeadCreated, BeadClosed, BeadUpdated,
+	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,

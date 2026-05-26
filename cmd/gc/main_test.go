@@ -168,15 +168,26 @@ func configureFSPressureForTests() {
 }
 
 func TestMain(m *testing.M) {
-	if !isTestscriptCommandInvocation(os.Args[0]) {
-		clearProcessLiveEnvForTests()
+	if isTestscriptCommandInvocation(os.Args[0]) {
+		configureFSPressureForTests()
+		configureSupervisorHooksForTests()
+		testscript.Main(m, testscriptCommandFuncs())
+		return
 	}
+
+	clearProcessLiveEnvForTests()
 	if err := os.Setenv(managedDoltTestModeEnv, "1"); err != nil {
 		panic(err)
 	}
 	if err := os.Setenv(managedDoltTestParentPIDEnv, fmt.Sprintf("%d", os.Getpid())); err != nil {
 		panic(err)
 	}
+	tmpRoot := os.TempDir()
+	sweepOrphanPIDPrefixedDirs(tmpRoot, testCmdGCTempRootPrefix)
+	sweepOrphanPIDPrefixedDirs(tmpRoot, testGCHomeDirPrefix)
+	sweepOrphanPIDPrefixedDirs(tmpRoot, testRuntimeDirPrefix)
+	sweepOrphanPIDPrefixedDirs(tmpRoot, testProviderStubDirPrefix)
+
 	testTempRoot, err := os.MkdirTemp("/tmp", pidPrefixedTempPattern(testCmdGCTempRootPrefix))
 	if err != nil {
 		panic(err)
@@ -184,10 +195,6 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
 		panic(err)
 	}
-	tmpRoot := os.TempDir()
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testGCHomeDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testRuntimeDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testProviderStubDirPrefix)
 
 	gcHome, err := os.MkdirTemp("", pidPrefixedTempPattern(testGCHomeDirPrefix))
 	if err != nil {
@@ -216,13 +223,17 @@ func TestMain(m *testing.M) {
 	}
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
-	testscript.Main(newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFormulaDir, sharedTestCityDir), map[string]func(){
+	testscript.Main(newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFormulaDir, sharedTestCityDir), testscriptCommandFuncs())
+}
+
+func testscriptCommandFuncs() map[string]func() {
+	return map[string]func(){
 		"gc": func() {
 			configureTestscriptEnvDefaults()
 			os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 		},
 		"bd": bdTestCmd,
-	})
+	}
 }
 
 func TestTutorial01(t *testing.T) {

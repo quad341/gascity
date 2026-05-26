@@ -185,27 +185,26 @@ func computeAutoStagger(agentID string) time.Duration {
 	return time.Duration(int64(h.Sum32())%modMs) * time.Millisecond
 }
 
-// NewCachingStore wraps a BdStore with an in-memory read cache.
+// NewCachingStore wraps a Store with an in-memory read cache.
 // Call Prime() before serving reads, then StartReconciler() for
 // watchdog reconciliation. The onChange callback (optional) is called for
 // each detected external change with event type and bead JSON.
 //
-// Only BdStore is supported because the event hook path (bd hooks ->
-// gc event emit -> event bus -> ApplyEvent) requires dolt infrastructure.
-func NewCachingStore(backing *BdStore, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
+// BdStore-backed caches filter hook events by issue prefix. Other Store
+// implementations are valid backings, but run without foreign-event filtering.
+func NewCachingStore(backing Store, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
 	prefix := ""
-	if backing != nil {
+	if backing, ok := backing.(interface{ IDPrefix() string }); ok {
 		prefix = backing.IDPrefix()
 	}
 	cs := newCachingStore(backing, prefix, onChange)
-	if cs.idPrefix == "" {
+	if _, isBdStore := backing.(*BdStore); isBdStore && cs.idPrefix == "" {
 		cs.recordProblem("bd cache ownership", errors.New("missing issue prefix; foreign bead event filtering disabled"))
 	}
 	return cs
 }
 
-// NewCachingStoreForTest wraps any Store for testing. Production code
-// must use NewCachingStore with a *BdStore.
+// NewCachingStoreForTest wraps any Store for testing.
 func NewCachingStoreForTest(backing Store, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
 	return newCachingStore(backing, "", onChange)
 }

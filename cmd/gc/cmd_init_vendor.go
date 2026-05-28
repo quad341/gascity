@@ -34,18 +34,18 @@ type escapingImport struct {
 	originalSource string
 }
 
-func vendorExternalLocalPackDeps(fs fsys.FS, srcDir, cityPath string) error {
+func vendorExternalLocalPackDeps(fs fsys.FS, srcDir, cityPath string) ([]string, error) {
 	absSrcDir, err := filepath.Abs(srcDir)
 	if err != nil {
-		return fmt.Errorf("vendoring local deps: resolving source %q: %w", srcDir, err)
+		return nil, fmt.Errorf("vendoring local deps: resolving source %q: %w", srcDir, err)
 	}
 	absCityPath, err := filepath.Abs(cityPath)
 	if err != nil {
-		return fmt.Errorf("vendoring local deps: resolving city %q: %w", cityPath, err)
+		return nil, fmt.Errorf("vendoring local deps: resolving city %q: %w", cityPath, err)
 	}
 	queue, err := seedVendorQueue(fs, absCityPath, absSrcDir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	seen := make(map[string]vendoredPack)
 	return processVendorWork(fs, queue, seen, absSrcDir, absCityPath)
@@ -91,12 +91,13 @@ func seedVendorQueue(fs fsys.FS, cityPath, srcDir string) ([]localVendorWork, er
 	return queue, nil
 }
 
-func processVendorWork(fs fsys.FS, queue []localVendorWork, seen map[string]vendoredPack, srcDir, cityPath string) error {
+func processVendorWork(fs fsys.FS, queue []localVendorWork, seen map[string]vendoredPack, srcDir, cityPath string) ([]string, error) {
+	var vendored []string
 	for i := 0; i < len(queue); i++ {
 		work := queue[i]
 		imports, err := extractEscapingImports(fs, work.cityTomlPath, work.srcPackDir, srcDir)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		rewrites := make(map[string]string)
 		for _, imp := range imports {
@@ -105,21 +106,22 @@ func processVendorWork(fs fsys.FS, queue []localVendorWork, seen map[string]vend
 				continue
 			}
 			if len(seen) >= maxVendoredPacks {
-				return fmt.Errorf("vendoring local deps: dependency graph exceeds %d packs", maxVendoredPacks)
+				return nil, fmt.Errorf("vendoring local deps: dependency graph exceeds %d packs", maxVendoredPacks)
 			}
 			if _, err := fs.Stat(imp.absSourcePath); err != nil {
 				if errors.Is(err, iofs.ErrNotExist) {
-					return fmt.Errorf("vendoring local deps: pack %q declared in %q not found: %w", imp.absSourcePath, work.cityTomlPath, err)
+					return nil, fmt.Errorf("vendoring local deps: pack %q declared in %q not found: %w", imp.absSourcePath, work.cityTomlPath, err)
 				}
-				return fmt.Errorf("vendoring local deps: stating pack %q declared in %q: %w", imp.absSourcePath, work.cityTomlPath, err)
+				return nil, fmt.Errorf("vendoring local deps: stating pack %q declared in %q: %w", imp.absSourcePath, work.cityTomlPath, err)
 			}
 			name := chooseVendorName(imp.absSourcePath, seen, cityPath)
 			cityRelPath := "//" + filepath.ToSlash(filepath.Join(initVendorDir, name))
 			dst := filepath.Join(cityPath, initVendorDir, name)
 			if err := copyDirViaFS(fs, imp.absSourcePath, dst); err != nil {
-				return fmt.Errorf("vendoring local deps: copying %q to %q: %w", imp.absSourcePath, dst, err)
+				return nil, fmt.Errorf("vendoring local deps: copying %q to %q: %w", imp.absSourcePath, dst, err)
 			}
 			seen[imp.absSourcePath] = vendoredPack{cityRelPath: cityRelPath, vendorDst: dst}
+			vendored = append(vendored, name)
 			rewrites[imp.originalSource] = cityRelPath
 			queue = append(queue, localVendorWork{
 				srcPackDir:   imp.absSourcePath,
@@ -130,10 +132,11 @@ func processVendorWork(fs fsys.FS, queue []localVendorWork, seen map[string]vend
 			continue
 		}
 		if err := rewriteImportSources(fs, work.cityTomlPath, rewrites); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	sort.Strings(vendored)
+	return vendored, nil
 }
 
 func extractEscapingImports(fs fsys.FS, cityTomlPath, srcPackDir, srcDir string) ([]escapingImport, error) {

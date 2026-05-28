@@ -42,9 +42,11 @@ schema = 2
 	writeVendorTestFile(t, depDir, "skip_test.go", "package skip\n")
 	writeVendorTestFile(t, depDir, ".gc/state.json", "{}\n")
 
-	if err := vendorExternalLocalPackDeps(fsys.OSFS{}, srcDir, cityPath); err != nil {
+	vendored, err := vendorExternalLocalPackDeps(fsys.OSFS{}, srcDir, cityPath)
+	if err != nil {
 		t.Fatalf("vendorExternalLocalPackDeps: %v", err)
 	}
+	assertVendoredNames(t, vendored, "dolt")
 
 	vendorPack := filepath.Join(cityPath, "packs", "vendor", "dolt", "pack.toml")
 	if _, err := os.Stat(vendorPack); err != nil {
@@ -94,9 +96,11 @@ source = "//packs/vendor/already"
 	writeVendorTestFile(t, cityPath, "pack.toml", packToml)
 	writeVendorTestFile(t, cityPath, "packs/local/pack.toml", "[pack]\nname = \"local\"\nschema = 2\n")
 
-	if err := vendorExternalLocalPackDeps(fsys.OSFS{}, srcDir, cityPath); err != nil {
+	vendored, err := vendorExternalLocalPackDeps(fsys.OSFS{}, srcDir, cityPath)
+	if err != nil {
 		t.Fatalf("vendorExternalLocalPackDeps: %v", err)
 	}
+	assertVendoredNames(t, vendored)
 	if _, err := os.Stat(filepath.Join(cityPath, "packs", "vendor")); !os.IsNotExist(err) {
 		t.Fatalf("vendor dir should not exist, err=%v", err)
 	}
@@ -123,9 +127,11 @@ source = "../dep"
 	fs.Files["/city/pack.toml"] = append([]byte(nil), packToml...)
 	fs.Files["/dep/pack.toml"] = []byte("[pack]\nname = \"dep\"\nschema = 2\n")
 
-	if err := vendorExternalLocalPackDeps(fs, "/src", "/city"); err != nil {
+	vendored, err := vendorExternalLocalPackDeps(fs, "/src", "/city")
+	if err != nil {
 		t.Fatalf("vendorExternalLocalPackDeps: %v", err)
 	}
+	assertVendoredNames(t, vendored, "dep")
 	if _, ok := fs.Files["/city/packs/vendor/dep/pack.toml"]; !ok {
 		t.Fatalf("vendored pack.toml missing from fake FS")
 	}
@@ -165,9 +171,11 @@ name = "c"
 schema = 2
 `)
 
-	if err := vendorExternalLocalPackDeps(fsys.OSFS{}, srcDir, cityPath); err != nil {
+	vendored, err := vendorExternalLocalPackDeps(fsys.OSFS{}, srcDir, cityPath)
+	if err != nil {
 		t.Fatalf("vendorExternalLocalPackDeps: %v", err)
 	}
+	assertVendoredNames(t, vendored, "a", "b", "c")
 
 	for _, name := range []string{"a", "b", "c"} {
 		if _, err := os.Stat(filepath.Join(cityPath, "packs", "vendor", name, "pack.toml")); err != nil {
@@ -210,9 +218,11 @@ name = "d"
 schema = 2
 `)
 
-	if err := vendorExternalLocalPackDeps(fsys.OSFS{}, srcDir, cityPath); err != nil {
+	vendored, err := vendorExternalLocalPackDeps(fsys.OSFS{}, srcDir, cityPath)
+	if err != nil {
 		t.Fatalf("vendorExternalLocalPackDeps: %v", err)
 	}
+	assertVendoredNames(t, vendored, "b", "c", "d")
 
 	if _, err := os.Stat(filepath.Join(cityPath, "packs", "vendor", "d", "pack.toml")); err != nil {
 		t.Fatalf("vendored d pack.toml missing: %v", err)
@@ -253,15 +263,21 @@ schema = 2
 source = "../a"
 `)
 
-	done := make(chan error, 1)
+	type vendorResult struct {
+		names []string
+		err   error
+	}
+	done := make(chan vendorResult, 1)
 	go func() {
-		done <- vendorExternalLocalPackDeps(fsys.OSFS{}, srcDir, cityPath)
+		vendored, err := vendorExternalLocalPackDeps(fsys.OSFS{}, srcDir, cityPath)
+		done <- vendorResult{names: vendored, err: err}
 	}()
 	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("vendorExternalLocalPackDeps: %v", err)
+	case result := <-done:
+		if result.err != nil {
+			t.Fatalf("vendorExternalLocalPackDeps: %v", result.err)
 		}
+		assertVendoredNames(t, result.names, "a", "b")
 	case <-time.After(2 * time.Second):
 		t.Fatal("vendorExternalLocalPackDeps did not terminate")
 	}
@@ -288,9 +304,11 @@ source = "../right/shared"
 	writeVendorTestFile(t, filepath.Join(dir, "left", "shared"), "pack.toml", "[pack]\nname = \"left-shared\"\nschema = 2\n")
 	writeVendorTestFile(t, filepath.Join(dir, "right", "shared"), "pack.toml", "[pack]\nname = \"right-shared\"\nschema = 2\n")
 
-	if err := vendorExternalLocalPackDeps(fsys.OSFS{}, srcDir, cityPath); err != nil {
+	vendored, err := vendorExternalLocalPackDeps(fsys.OSFS{}, srcDir, cityPath)
+	if err != nil {
 		t.Fatalf("vendorExternalLocalPackDeps: %v", err)
 	}
+	assertVendoredNames(t, vendored, "shared", "shared-1")
 
 	if _, err := os.Stat(filepath.Join(cityPath, "packs", "vendor", "shared", "pack.toml")); err != nil {
 		t.Fatalf("vendored shared pack.toml missing: %v", err)
@@ -328,9 +346,12 @@ source = "../p00"
 		writeVendorTestFile(t, filepath.Join(dir, name), "pack.toml", content)
 	}
 
-	err := vendorExternalLocalPackDeps(fsys.OSFS{}, srcDir, cityPath)
+	vendored, err := vendorExternalLocalPackDeps(fsys.OSFS{}, srcDir, cityPath)
 	if err == nil {
 		t.Fatal("vendorExternalLocalPackDeps succeeded, want graph guard error")
+	}
+	if vendored != nil {
+		t.Fatalf("vendored = %v, want nil on graph guard error", vendored)
 	}
 	if !strings.Contains(err.Error(), "dependency graph exceeds") {
 		t.Fatalf("error = %v, want dependency graph guard", err)
@@ -388,6 +409,18 @@ func assertVendorFileContains(t *testing.T, root, rel, want string) {
 	got := readVendorTestFile(t, filepath.Join(root, rel))
 	if !strings.Contains(got, want) {
 		t.Fatalf("%s missing %q:\n%s", rel, want, got)
+	}
+}
+
+func assertVendoredNames(t *testing.T, got []string, want ...string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("vendored names = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("vendored names = %v, want %v", got, want)
+		}
 	}
 }
 

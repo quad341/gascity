@@ -1360,9 +1360,17 @@ func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride strin
 		fmt.Fprintf(stderr, "gc init: writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := vendorExternalLocalPackDeps(fs, srcDir, cityPath); err != nil {
+	vendored, err := vendorExternalLocalPackDeps(fs, srcDir, cityPath)
+	if err != nil {
 		fmt.Fprintf(stderr, "gc init --from: vendoring local pack deps: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	switch len(vendored) {
+	case 0:
+	case 1:
+		fmt.Fprintf(stdout, "Vendored 1 local pack dependency: %s\n", filepath.Join("packs", "vendor", vendored[0])) //nolint:errcheck // best-effort stdout
+	default:
+		fmt.Fprintf(stdout, "Vendored %d local pack dependencies: %s\n", len(vendored), strings.Join(vendored, ", ")) //nolint:errcheck // best-effort stdout
 	}
 	if shouldBootstrapScopedFileStore(cfg) {
 		if err := bootstrapScopedFileProviderCityFS(fs, cityPath); err != nil {

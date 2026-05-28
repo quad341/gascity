@@ -6,6 +6,7 @@ import (
 	"fmt"
 	iofs "io/fs"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -13,7 +14,10 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-const initVendorDir = "packs/vendor"
+const (
+	initVendorDir    = "packs/vendor"
+	maxVendoredPacks = 50
+)
 
 type localVendorWork struct {
 	srcPackDir   string
@@ -88,7 +92,8 @@ func seedVendorQueue(fs fsys.FS, cityPath, srcDir string) ([]localVendorWork, er
 }
 
 func processVendorWork(fs fsys.FS, queue []localVendorWork, seen map[string]vendoredPack, srcDir, cityPath string) error {
-	for _, work := range queue {
+	for i := 0; i < len(queue); i++ {
+		work := queue[i]
 		imports, err := extractEscapingImports(fs, work.cityTomlPath, work.srcPackDir, srcDir)
 		if err != nil {
 			return err
@@ -98,6 +103,9 @@ func processVendorWork(fs fsys.FS, queue []localVendorWork, seen map[string]vend
 			if existing, ok := seen[imp.absSourcePath]; ok {
 				rewrites[imp.originalSource] = existing.cityRelPath
 				continue
+			}
+			if len(seen) >= maxVendoredPacks {
+				return fmt.Errorf("vendoring local deps: dependency graph exceeds %d packs", maxVendoredPacks)
 			}
 			if _, err := fs.Stat(imp.absSourcePath); err != nil {
 				if errors.Is(err, iofs.ErrNotExist) {
@@ -113,6 +121,10 @@ func processVendorWork(fs fsys.FS, queue []localVendorWork, seen map[string]vend
 			}
 			seen[imp.absSourcePath] = vendoredPack{cityRelPath: cityRelPath, vendorDst: dst}
 			rewrites[imp.originalSource] = cityRelPath
+			queue = append(queue, localVendorWork{
+				srcPackDir:   imp.absSourcePath,
+				cityTomlPath: filepath.Join(dst, "pack.toml"),
+			})
 		}
 		if len(rewrites) == 0 {
 			continue
@@ -168,8 +180,13 @@ func extractEscapingImports(fs fsys.FS, cityTomlPath, srcPackDir, srcDir string)
 }
 
 func appendImportSources(sources []string, imports map[string]config.Import) []string {
-	for _, imp := range imports {
-		sources = append(sources, imp.Source)
+	keys := make([]string, 0, len(imports))
+	for name := range imports {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	for _, name := range keys {
+		sources = append(sources, imports[name].Source)
 	}
 	return sources
 }

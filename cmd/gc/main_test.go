@@ -4743,6 +4743,108 @@ schema = 2
 	}
 }
 
+func TestDoInitFromDirVendorsExternalLocalPackDeps(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	depDir := filepath.Join(dir, "dep")
+	if err := os.MkdirAll(depDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(depDir, "pack.toml"), []byte(`[pack]
+name = "dep"
+schema = 2
+version = "0.1.0"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srcDir := filepath.Join(dir, "city")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"), []byte(`[workspace]
+name = "city"
+provider = "claude"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"), []byte(`[pack]
+name = "city"
+schema = 2
+version = "0.1.0"
+
+[imports.dep]
+source = "../dep"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(dir, "new-city")
+	var stdout, stderr bytes.Buffer
+	code := doInitFromDir(srcDir, cityPath, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doInitFromDir = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	vendorPack := filepath.Join(cityPath, "packs", "vendor", "dep", "pack.toml")
+	if _, err := os.Stat(vendorPack); err != nil {
+		t.Fatalf("vendored pack.toml missing: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(cityPath, "pack.toml"))
+	if err != nil {
+		t.Fatalf("reading copied pack.toml: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `source = "//packs/vendor/dep"`) {
+		t.Fatalf("copied pack.toml source was not rewritten:\n%s", text)
+	}
+	if strings.Contains(text, `source = "../dep"`) {
+		t.Fatalf("copied pack.toml still contains original source:\n%s", text)
+	}
+	if _, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); err != nil {
+		t.Fatalf("config.LoadWithIncludes after vendoring: %v", err)
+	}
+}
+
+func TestDoInitFromDirFailsWhenExternalLocalPackVendoringFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "city")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"), []byte(`[workspace]
+name = "city"
+provider = "claude"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"), []byte(`[pack]
+name = "city"
+schema = 2
+
+[imports.missing]
+source = "../missing"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doInitFromDir(srcDir, filepath.Join(dir, "new-city"), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doInitFromDir = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc init --from: vendoring local pack deps:") {
+		t.Fatalf("stderr missing vendoring failure prefix:\n%s", stderr.String())
+	}
+}
+
 func TestInitFromWithoutPackTomlPreservesLegacyWorkspaceIdentity(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")

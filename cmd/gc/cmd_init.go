@@ -1360,6 +1360,10 @@ func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride strin
 		fmt.Fprintf(stderr, "gc init: writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if err := vendorExternalLocalPackDeps(fs, srcDir, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init --from: vendoring local pack deps: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if shouldBootstrapScopedFileStore(cfg) {
 		if err := bootstrapScopedFileProviderCityFS(fs, cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc init: bootstrapping file bead store: %v\n", err) //nolint:errcheck // best-effort stderr

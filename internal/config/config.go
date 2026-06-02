@@ -1181,6 +1181,78 @@ type BeadsConfig struct {
 	// Backend selects the bd storage engine when Provider is "bd".
 	// Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores.
 	Backend string `toml:"backend,omitempty"`
+	// EventHooks controls installation of the bead event-forwarding hooks
+	// (.beads/hooks/on_create,on_update,on_close). Defaults to true.
+	// This config surface is staged ahead of the native bead-event support;
+	// current hook behavior remains unchanged until lifecycle code opts in.
+	EventHooks *bool `toml:"event_hooks,omitempty" jsonschema:"default=true"`
+	// Policies defines per-bead-use storage and garbage-collection defaults.
+	// Policy names are interpreted by higher-level systems; unknown names are
+	// preserved so packs can stage future policy classes without breaking load.
+	Policies map[string]BeadPolicyConfig `toml:"policies,omitempty"`
+}
+
+// EventHooksEnabled reports whether bead event hooks should be installed.
+// Unset preserves the current default of enabled hooks.
+func (b BeadsConfig) EventHooksEnabled() bool {
+	return b.EventHooks == nil || *b.EventHooks
+}
+
+// BeadPolicyConfig holds storage and retention defaults for a named bead use.
+type BeadPolicyConfig struct {
+	// Storage selects the intended persistence tier: "history", "no_history",
+	// or "ephemeral". Creation paths apply this incrementally as they opt in.
+	Storage string `toml:"storage,omitempty" jsonschema:"enum=history,enum=no_history,enum=ephemeral"`
+	// DeleteAfterClose deletes matching GC-owned beads after they have been
+	// closed for this duration. Accepts Go duration syntax plus whole-day "d"
+	// units, e.g. "7d" or "1d12h". Empty means the policy is not GC-managed.
+	DeleteAfterClose string `toml:"delete_after_close,omitempty"`
+}
+
+const (
+	// BeadStorageHistory stores beads in the normal history-tracked table.
+	BeadStorageHistory = "history"
+	// BeadStorageNoHistory stores beads without Dolt history while keeping
+	// non-ephemeral semantics.
+	BeadStorageNoHistory = "no_history"
+	// BeadStorageEphemeral stores beads as ephemeral wisps.
+	BeadStorageEphemeral = "ephemeral"
+)
+
+// NormalizeBeadPolicyStorage returns the configured bead policy storage value.
+// Storage spellings are intentionally canonical so runtime validation matches
+// the generated schema enum.
+func NormalizeBeadPolicyStorage(storage string) string {
+	return storage
+}
+
+// ValidBeadPolicyStorage reports whether storage is one of the supported bead
+// storage classes. Empty storage is valid and means use the default.
+func ValidBeadPolicyStorage(storage string) bool {
+	switch NormalizeBeadPolicyStorage(storage) {
+	case "", BeadStorageHistory, BeadStorageNoHistory, BeadStorageEphemeral:
+		return true
+	default:
+		return false
+	}
+}
+
+// NormalizedStorage returns the canonical storage class for this policy.
+func (p BeadPolicyConfig) NormalizedStorage() string {
+	return NormalizeBeadPolicyStorage(p.Storage)
+}
+
+// DeleteAfterCloseDuration returns DeleteAfterClose as a duration. It accepts
+// ordinary Go durations plus a whole-day "d" unit, e.g. "7d" and "1d12h".
+func (p BeadPolicyConfig) DeleteAfterCloseDuration() time.Duration {
+	if p.DeleteAfterClose == "" {
+		return 0
+	}
+	dur, err := parseConfigDurationWithDays(p.DeleteAfterClose)
+	if err != nil || dur <= 0 {
+		return 0
+	}
+	return dur
 }
 
 // SessionConfig holds session provider settings.
@@ -2247,6 +2319,68 @@ func (d *DaemonConfig) WispGCEnabled() bool {
 	return d.WispGCIntervalDuration() > 0 && d.WispTTLDuration() > 0
 }
 
+// parseConfigDurationWithDays extends time.ParseDuration with a whole-day "d"
+// unit. It accepts ordinary Go durations unchanged and supports one leading day
+// component such as "7d" or "1d12h".
+func parseConfigDurationWithDays(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+	dayIdx := strings.IndexByte(raw, 'd')
+	if dayIdx < 0 {
+		return time.ParseDuration(raw)
+	}
+	days, err := parsePositiveDurationDays(raw[:dayIdx])
+	if err != nil {
+		return 0, err
+	}
+	dayDuration := time.Duration(days) * 24 * time.Hour
+	rest := raw[dayIdx+1:]
+	if rest == "" {
+		return dayDuration, nil
+	}
+	dur, err := time.ParseDuration(rest)
+	if err != nil {
+		return 0, err
+	}
+	return addConfigDurations(dayDuration, dur)
+}
+
+func parsePositiveDurationDays(raw string) (int64, error) {
+	if raw == "" {
+		return 0, fmt.Errorf("missing day count")
+	}
+	for _, r := range raw {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("invalid day count %q", raw)
+		}
+	}
+	days, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	if days <= 0 {
+		return 0, fmt.Errorf("day count must be positive")
+	}
+	if days > maxConfigDurationDays {
+		return 0, fmt.Errorf("day count %q exceeds maximum %d", raw, maxConfigDurationDays)
+	}
+	return days, nil
+}
+
+const maxConfigDurationDays = int64(1<<63-1) / int64(24*time.Hour)
+
+func addConfigDurations(a, b time.Duration) (time.Duration, error) {
+	if b > 0 && a > time.Duration(1<<63-1)-b {
+		return 0, fmt.Errorf("duration exceeds maximum")
+	}
+	if b < 0 && a < time.Duration(-1<<63)-b {
+		return 0, fmt.Errorf("duration is below minimum")
+	}
+	return a + b, nil
+}
+
 // FormulasDir returns the formulas directory, defaulting to "formulas".
 func (c *City) FormulasDir() string {
 	if c.Formulas.Dir != "" {
@@ -2656,7 +2790,7 @@ type Agent struct {
 	// Fallback marks this agent as a fallback definition. During pack
 	// composition, a non-fallback agent with the same name wins silently.
 	// When two fallbacks collide, the first loaded (depth-first) wins.
-	// See docs/guides/migrating-to-pack-vnext.md for migration guidance.
+	// See docs/guides/shareable-packs.md for pack layout guidance.
 	Fallback bool `toml:"fallback,omitempty"`
 	// DependsOn lists agent names that must be awake before this agent wakes.
 	// Used for dependency-ordered startup and shutdown. Validated for cycles
@@ -3710,16 +3844,24 @@ func ValidateAgents(agents []Agent) error {
 }
 
 // ValidateNamedSessions checks named session declarations after pack expansion.
-func ValidateNamedSessions(cfg *City) error {
+// It returns non-fatal warnings (e.g. a named session whose backing template
+// did not resolve) alongside any fatal structural error.
+func ValidateNamedSessions(cfg *City) (warnings []string, err error) {
 	return validateNamedSessions(cfg, true)
 }
 
 // validateNamedSessions checks named session declarations for structural
-// errors. When requireBackingTemplate is true, it also requires every named
-// session to resolve to an expanded backing agent template.
-func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
+// errors. When requireBackingTemplate is true, a named session whose backing
+// agent template does not resolve after pack expansion is reported as a
+// non-fatal warning and the session is skipped, rather than failing the whole
+// config load. This keeps one broken named session from bricking every command
+// (a typo'd template should not stop `gc session attach <other>`). The session
+// still errors clearly when a command actually targets it, at materialization
+// time. Genuine structural problems (duplicate identity, invalid scope/mode,
+// name collisions, capacity overflow) remain fatal.
+func validateNamedSessions(cfg *City, requireBackingTemplate bool) (warnings []string, err error) {
 	if cfg == nil || len(cfg.NamedSessions) == 0 {
-		return nil
+		return nil, nil
 	}
 	type sessionKey struct{ dir, identity string }
 	seen := make(map[sessionKey]bool, len(cfg.NamedSessions))
@@ -3729,53 +3871,56 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
 	for i := range cfg.NamedSessions {
 		s := &cfg.NamedSessions[i]
 		if s.Template == "" {
-			return fmt.Errorf("named_session[%d]: template is required", i)
+			return nil, fmt.Errorf("named_session[%d]: template is required", i)
 		}
 		if !validNamedSessionTemplate.MatchString(s.Template) {
-			return fmt.Errorf("named_session[%d]: template %q must match [a-zA-Z0-9][a-zA-Z0-9_-]* or binding.agent", i, s.Template)
+			return nil, fmt.Errorf("named_session[%d]: template %q must match [a-zA-Z0-9][a-zA-Z0-9_-]* or binding.agent", i, s.Template)
 		}
 		if s.Name != "" && !validAgentName.MatchString(s.Name) {
-			return fmt.Errorf("named_session[%d]: name %q must match [a-zA-Z0-9][a-zA-Z0-9_-]*", i, s.Name)
+			return nil, fmt.Errorf("named_session[%d]: name %q must match [a-zA-Z0-9][a-zA-Z0-9_-]*", i, s.Name)
 		}
 		switch s.Scope {
 		case "", "city", "rig":
 			// valid
 		default:
-			return fmt.Errorf("named_session %q: scope must be \"city\", \"rig\", or empty, got %q", s.QualifiedName(), s.Scope)
+			return nil, fmt.Errorf("named_session %q: scope must be \"city\", \"rig\", or empty, got %q", s.QualifiedName(), s.Scope)
 		}
 		switch s.ModeOrDefault() {
 		case "on_demand", "always":
 			// valid
 		default:
-			return fmt.Errorf("named_session %q: mode must be \"on_demand\", \"always\", or empty, got %q", s.QualifiedName(), s.Mode)
+			return nil, fmt.Errorf("named_session %q: mode must be \"on_demand\", \"always\", or empty, got %q", s.QualifiedName(), s.Mode)
 		}
 		key := sessionKey{dir: s.Dir, identity: s.IdentityName()}
 		if seen[key] {
-			return fmt.Errorf("named_session %q: duplicate identity", s.QualifiedName())
+			return nil, fmt.Errorf("named_session %q: duplicate identity", s.QualifiedName())
 		}
 		seen[key] = true
 		agent := FindAgent(cfg, s.TemplateQualifiedName())
-		if agent == nil {
-			if requireBackingTemplate {
-				return fmt.Errorf("named_session %q: referenced template not found after pack expansion", s.QualifiedName())
-			}
+		if agent == nil && requireBackingTemplate {
+			// Non-fatal: a named session whose backing template did not
+			// resolve is skipped, not a hard error. Skipping here also
+			// keeps it out of the name-reservation and always-mode capacity
+			// bookkeeping below, since a disabled session holds no slot.
+			warnings = append(warnings, disabledNamedSessionWarning(s))
+			continue
 		}
 		identity := s.QualifiedName()
 		sessionName := NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
 		if other, ok := reservedAliases[sessionName]; ok && other != identity {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"named_session %q: reserved alias collides with deterministic session_name for %q (%q)",
 				identity, other, sessionName,
 			)
 		}
 		if other, ok := reservedSessionNames[identity]; ok && other != identity {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"named_session %q: reserved alias collides with deterministic session_name for %q (%q)",
 				identity, other, identity,
 			)
 		}
 		if other, ok := reservedSessionNames[sessionName]; ok && other != identity {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"named_session %q: deterministic session_name %q collides with configured named session %q",
 				identity, sessionName, other,
 			)
@@ -3785,21 +3930,44 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
 		if s.ModeOrDefault() == "always" && agent != nil {
 			alwaysByTemplate[agent.QualifiedName()]++
 			if maxActive := agent.EffectiveMaxActiveSessions(); maxActive != nil && *maxActive < alwaysByTemplate[agent.QualifiedName()] {
-				return fmt.Errorf(
+				return nil, fmt.Errorf(
 					"named_session %q: mode %q exceeds max_active_sessions capacity %d on template %q",
 					s.QualifiedName(), s.ModeOrDefault(), *maxActive, agent.QualifiedName(),
 				)
 			}
 			policy := ResolveSessionSleepPolicy(cfg, agent)
 			if normalized := NormalizeSleepAfterIdle(policy.Value); normalized != "" && normalized != SessionSleepOff {
-				return fmt.Errorf(
+				return nil, fmt.Errorf(
 					"named_session %q: mode %q is incompatible with sleep_after_idle=%q on template %q",
 					s.QualifiedName(), s.ModeOrDefault(), normalized, agent.QualifiedName(),
 				)
 			}
 		}
 	}
-	return nil
+	return warnings, nil
+}
+
+// disabledNamedSessionMarker is a stable suffix on the warning emitted when a
+// named session is skipped because its backing template did not resolve after
+// pack expansion. CLI warning classification keys off this marker, so keep it
+// in sync with IsDisabledNamedSessionWarning.
+const disabledNamedSessionMarker = "; named session disabled until its template resolves"
+
+// disabledNamedSessionWarning formats the non-fatal warning for a named session
+// whose backing template could not be resolved.
+func disabledNamedSessionWarning(s *NamedSession) string {
+	return fmt.Sprintf(
+		"named_session %q: backing template %q not found after pack expansion%s",
+		s.QualifiedName(), s.TemplateQualifiedName(), disabledNamedSessionMarker,
+	)
+}
+
+// IsDisabledNamedSessionWarning reports whether a load warning is the non-fatal
+// notice that a named session was skipped because its backing template did not
+// resolve. CLI warning filters use this to print the notice and keep it
+// non-fatal in strict mode.
+func IsDisabledNamedSessionWarning(warning string) bool {
+	return strings.HasSuffix(warning, disabledNamedSessionMarker)
 }
 
 // validateDependsOn checks that all depends_on references are valid agent
@@ -4032,7 +4200,7 @@ func Load(fs fsys.FS, path string) (*City, error) {
 	// Load intentionally skips include and pack expansion, so validate the
 	// direct named-session declarations without requiring pack-provided
 	// backing templates to be present yet.
-	if err := validateNamedSessions(cfg, false); err != nil {
+	if _, err := validateNamedSessions(cfg, false); err != nil {
 		return nil, err
 	}
 	if err := ValidateGitHubPRMonitors(cfg); err != nil {

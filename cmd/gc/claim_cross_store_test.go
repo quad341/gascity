@@ -60,11 +60,11 @@ func TestRunBDForBeadRedirectsCrossStoreWrite(t *testing.T) {
 	var inStoreArgs []string
 	var fellBack bool
 	exec := agentScriptExecutor{
-		runCommand: func(name string, args ...string) error {
+		runCommand: func(_ string, _ ...string) error {
 			fellBack = true
 			return nil
 		},
-		runCommandInStore: func(dir string, env []string, name string, args ...string) error {
+		runCommandInStore: func(dir string, _ []string, name string, args ...string) error {
 			inStoreDir = dir
 			inStoreArgs = append([]string{name}, args...)
 			return nil

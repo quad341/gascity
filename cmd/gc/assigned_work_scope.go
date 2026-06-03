@@ -19,7 +19,7 @@ func assignedWorkStoreRefForAgent(cityPath string, cfg *config.City, agentCfg *c
 // in ANY store, not just its configured rig. City-scoped agents are cross-store
 // eligible: a city-wide singleton legitimately serves per-rig routed work
 // (vp-kvp — "scope determines discovery breadth"). Rig-scoped agents stay
-// single-store, so their reachability and all existing behaviour are unchanged.
+// single-store, so their reachability and all existing behavior are unchanged.
 func agentIsCrossStoreEligible(agentCfg *config.Agent) bool {
 	return agentutil.AgentIsCrossStoreEligible(agentCfg)
 }

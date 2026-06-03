@@ -10,7 +10,7 @@ var errTestStoreTimeout = errors.New("store timed out")
 func TestFirstStoreWithWorkReturnsFirstStoreThatHasWork(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}, {dir: "rigb"}}
 	var calls []string
-	run := func(command, dir string, env []string) (string, error) {
+	run := func(_ string, dir string, _ []string) (string, error) {
 		calls = append(calls, dir)
 		if dir == "riga" {
 			return `[{"id":"va-1"}]`, nil
@@ -32,7 +32,7 @@ func TestFirstStoreWithWorkReturnsFirstStoreThatHasWork(t *testing.T) {
 
 func TestFirstStoreWithWorkReturnsLastWhenNoneHasWork(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(command, dir string, env []string) (string, error) { return `[]`, nil }
+	run := func(_ string, _ string, _ []string) (string, error) { return `[]`, nil }
 	out, err := firstStoreWithWork("q", stores, run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -47,7 +47,7 @@ func TestFirstStoreWithWorkSurfacesOwnStoreErrorWhenNoWork(t *testing.T) {
 	// federated rig store returns no work — otherwise emitCityWorkQueryFailure
 	// never fires and a transient timeout is silently downgraded to "no work".
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(command, dir string, env []string) (string, error) {
+	run := func(_ string, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return "", errTestStoreTimeout
 		}
@@ -62,7 +62,7 @@ func TestFirstStoreWithWorkIgnoresRigStoreErrorWhenOwnStoreHasNoWork(t *testing.
 	// A flaky federated rig store must not wedge the hook: when the agent's own
 	// store is healthy (no work), a rig-store error is best-effort and dropped.
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(command, dir string, env []string) (string, error) {
+	run := func(_ string, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return `[]`, nil
 		}
@@ -80,7 +80,7 @@ func TestFirstStoreWithWorkIgnoresRigStoreErrorWhenOwnStoreHasNoWork(t *testing.
 func TestFirstStoreWithWorkSkipsStoreWithOnlyUnreadyRows(t *testing.T) {
 	// A store whose only row is dep-blocked is NOT a hit; federation moves on.
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(command, dir string, env []string) (string, error) {
+	run := func(_ string, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return `[{"id":"x","blocked_by":[{"status":"open"}]}]`, nil
 		}

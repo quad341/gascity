@@ -66,7 +66,7 @@ func TestCrossStorePipeline_ReadThenClaim(t *testing.T) {
 }
 
 // TestCrossStorePipeline_CityBeadNoRedirect confirms that city-owned work
-// (HQ store bead, unrecognised prefix) does not get redirected — the claim
+// (HQ store bead, unrecognized prefix) does not get redirected — the claim
 // stays in the agent's own store.
 func TestCrossStorePipeline_CityBeadNoRedirect(t *testing.T) {
 	cfg := &config.City{

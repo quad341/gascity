@@ -34,6 +34,7 @@ var (
 	ensureSupervisorRunningHook              = ensureSupervisorRunning
 	reloadSupervisorHook                     = reloadSupervisor
 	supervisorAliveHook                      = supervisorAlive
+	supervisorExecutableHook                 = os.Executable
 	supervisorReadyTimeout                   = 15 * time.Second
 	supervisorReadyPollInterval              = 100 * time.Millisecond
 	supervisorSystemdWarmRefreshStopTimeout  = 5 * time.Second
@@ -482,6 +483,28 @@ func ensureSupervisorRunning(stdout, stderr io.Writer) int {
 	return waitForSupervisorReady(stderr)
 }
 
+// supervisorTransientBinaryError returns a message and true when the resolved
+// gc binary path is under the system temp directory. Installing from a
+// transient path (e.g. a /tmp deploy build) bakes a soon-to-be-deleted binary
+// into the platform service unit, causing the supervisor to crash when the
+// temp directory is cleaned up.
+func supervisorTransientBinaryError(gcPath string) (string, bool) {
+	if gcPath == "" {
+		return "", false
+	}
+	cleaned := filepath.Clean(gcPath)
+	tmpDir := os.TempDir()
+	if strings.HasPrefix(cleaned, tmpDir+string(filepath.Separator)) || cleaned == tmpDir {
+		return fmt.Sprintf(
+			"gc binary %q is under the system temp directory %q; "+
+				"installing from a transient build would bake a soon-to-be-deleted path into the service unit. "+
+				"Install gc to a stable location first (e.g. 'make install' or 'go install ./cmd/gc'), then rerun 'gc supervisor install'",
+			gcPath, tmpDir,
+		), true
+	}
+	return "", false
+}
+
 func platformSupervisorHomeOverrideError() (string, bool) {
 	switch goruntime.GOOS {
 	case "darwin", "linux":
@@ -617,6 +640,10 @@ func doSupervisorInstall(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if msg, blocked := supervisorTransientBinaryError(data.GCPath); blocked {
+		fmt.Fprintf(stderr, "gc supervisor install: %s\n", msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	switch goruntime.GOOS {
 	case "darwin":
@@ -695,7 +722,7 @@ type supervisorServiceEnvVar struct {
 }
 
 func buildSupervisorServiceData() (*supervisorServiceData, error) {
-	gcExe, err := os.Executable()
+	gcExe, err := supervisorExecutableHook()
 	if err != nil {
 		return nil, fmt.Errorf("finding executable: %w", err)
 	}

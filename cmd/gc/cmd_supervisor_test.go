@@ -3792,6 +3792,37 @@ func TestDoSupervisorInstallRejectsHomeOverride(t *testing.T) {
 	}
 }
 
+func TestDoSupervisorInstallRejectsTransientBinary(t *testing.T) {
+	if goruntime.GOOS != "linux" && goruntime.GOOS != "darwin" {
+		t.Skip("transient binary guard only applies on linux/darwin")
+	}
+	lookup, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || strings.TrimSpace(lookup.HomeDir) == "" {
+		t.Skip("user lookup home unavailable")
+	}
+	// Align HOME with the real user home so the home-override guard passes
+	// and the transient-binary guard can fire.
+	t.Setenv("HOME", lookup.HomeDir)
+
+	old := supervisorExecutableHook
+	supervisorExecutableHook = func() (string, error) {
+		return filepath.Join(os.TempDir(), "gascity-deploy-test", "gc"), nil
+	}
+	t.Cleanup(func() { supervisorExecutableHook = old })
+
+	var stdout, stderr bytes.Buffer
+	if code := doSupervisorInstall(&stdout, &stderr); code != 1 {
+		t.Fatalf("doSupervisorInstall code = %d, want 1", code)
+	}
+	got := stderr.String()
+	if !strings.Contains(got, os.TempDir()) {
+		t.Fatalf("stderr = %q, want temp dir path in error", got)
+	}
+	if !strings.Contains(got, "transient") {
+		t.Fatalf("stderr = %q, want 'transient' in error", got)
+	}
+}
+
 func TestEnsureSupervisorRunningRejectsHomeOverride(t *testing.T) {
 	if goruntime.GOOS != "linux" && goruntime.GOOS != "darwin" {
 		t.Skip("platform supervisor home override guard only applies on linux/darwin")

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	bdpack "github.com/gastownhall/gascity/examples/bd"
+	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
 
 func TestDoltServerEnv_DoesNotInjectGCSchedulerDefault(t *testing.T) {
@@ -175,8 +176,7 @@ func TestGCBeadsBDScript_InitForcesReinitOverPreSeededMetadata(t *testing.T) {
 	}
 	script := string(data)
 
-	guard := `if [ -f "$dir/.beads/metadata.json" ]; then
-        if ensure_database_registered "$dolt_database"; then`
+	guard := `if [ -f "$dir/.beads/metadata.json" ]; then`
 	if !strings.Contains(script, guard) {
 		t.Fatalf("gc-beads-bd.sh op_init must gate the already-initialized branch on the metadata.json file, not on project_id; " +
 			"gating on project_id leaves --force unset for gc-pre-seeded metadata and bd init aborts")
@@ -986,6 +986,7 @@ func TestTerminateManagedDoltTestPIDKillsProcessGroup(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX process-group signal semantics required")
 	}
+	processgrouptest.RequireRealProcessSignals(t)
 	dir := t.TempDir()
 	childFile := filepath.Join(dir, "child.pid")
 	// Shell becomes the new process group leader (Setpgid:true). It forks

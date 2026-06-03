@@ -162,6 +162,8 @@ esac
 PACK_DIR="${GC_PACK_DIR:-$(unset CDPATH; cd -- "$(dirname "$0")/.." && pwd)}"
 # shellcheck disable=SC1091
 . "$PACK_DIR/assets/scripts/runtime.sh"
+# shellcheck disable=SC1091
+. "$PACK_DIR/assets/scripts/compact-gain-drift-proof.sh"
 
 if [ "${GC_DOLT_MANAGED_LOCAL:-}" = "1" ]; then
   managed_port=$(managed_runtime_port "$DOLT_STATE_FILE" "$DOLT_DATA_DIR" || true)
@@ -474,6 +476,14 @@ discover_database_names() {
       emit_database_name "$db"
     done
   fi
+
+  if [ -n "$only_dbs" ]; then
+    printf '%s\n' "$only_dbs" | tr ',' '\n' | while IFS= read -r db; do
+      db=$(printf '%s' "$db" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      [ -n "$db" ] || continue
+      emit_database_name "$db"
+    done
+  fi
 }
 
 # dolt_query — wrapper that runs a single SQL statement against the
@@ -778,6 +788,7 @@ verify_counts() {
   fail=0
   verify_counts_saw_gain=0
   verify_counts_saw_gain_hash_drift=0
+  verify_counts_gain_drift_tables=""
   verify_counts_saw_row_decrease=0
   verify_counts_saw_same_count_hash_drift=0
   verify_counts_saw_table_list_change=0
@@ -855,6 +866,7 @@ verify_counts() {
     if [ "$actual_hash" != "$expected_hash" ]; then
       if [ "$table_gained_rows" = "1" ]; then
         verify_counts_saw_gain_hash_drift=1
+        verify_counts_gain_drift_tables="$verify_counts_gain_drift_tables $t"
         printf 'compact: db=%s table=%s value hash changed with row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
           "$db" "$t" "$expected_hash" "$actual_hash" >&2
         if [ "$fail" -ne 1 ]; then
@@ -1115,6 +1127,72 @@ ensure_remote_push_retry_fresh() {
       "$db" "$marker_label" "$age_secs" "$pending_push_max_age_secs" >&2
     return 1
   fi
+  return 0
+}
+
+recover_legacy_pending_push_contract() {
+  db="$1"
+
+  legacy_remote=$(select_remote "$db") || return 1
+  if [ -z "$legacy_remote" ]; then
+    printf 'compact: db=%s legacy pending_push marker recovery found no remote — manual intervention required\n' \
+      "$db" >&2
+    return 1
+  fi
+  valid_remote_name "$legacy_remote" || {
+    printf 'compact: db=%s legacy pending_push marker recovery found invalid remote=%s — manual intervention required\n' \
+      "$db" "$legacy_remote" >&2
+    return 1
+  }
+
+  legacy_active=$(query_single_cell "$db" "active branch probe failed" "SELECT active_branch()" 2>/dev/null || true)
+  if [ -z "$legacy_active" ] || ! valid_branch_name "$legacy_active"; then
+    printf 'compact: db=%s legacy pending_push marker recovery requires resolved active branch — manual intervention required\n' \
+      "$db" >&2
+    return 1
+  fi
+
+  legacy_override=$(refspec_env_value "$db") || return 1
+  if [ -n "$legacy_override" ]; then
+    legacy_parts=$(refspec_parts "$legacy_override") || {
+      printf 'compact: db=%s legacy pending_push marker recovery found invalid refspec override=%s — manual intervention required\n' \
+        "$db" "$legacy_override" >&2
+      return 1
+    }
+    legacy_local_branch=$(printf '%s\n' "$legacy_parts" | sed -n '1p')
+    legacy_remote_branch=$(printf '%s\n' "$legacy_parts" | sed -n '2p')
+    if [ "$legacy_local_branch" != "$legacy_active" ]; then
+      printf 'compact: db=%s legacy pending_push marker recovery local branch=%s does not match active branch=%s — manual intervention required\n' \
+        "$db" "$legacy_local_branch" "$legacy_active" >&2
+      return 1
+    fi
+  else
+    legacy_local_branch="$legacy_active"
+    legacy_remote_branch="$legacy_active"
+  fi
+
+  legacy_remote_head=$(remote_branch_head "$db" "$legacy_remote" "$legacy_remote_branch") || return 1
+  if [ -z "$legacy_remote_head" ]; then
+    printf 'compact: db=%s legacy pending_push marker recovery requires non-empty remote HEAD — manual intervention required\n' \
+      "$db" >&2
+    return 1
+  fi
+  case "$legacy_remote_head" in
+    *[!A-Za-z0-9]*)
+      printf 'compact: db=%s legacy pending_push marker recovery found invalid remote HEAD=%s — manual intervention required\n' \
+        "$db" "$legacy_remote_head" >&2
+      return 1
+      ;;
+  esac
+
+  legacy_in_local=$(commit_exists_in_local_log "$db" "$legacy_remote_head") || return 1
+  if [ "$legacy_in_local" != "1" ]; then
+    printf 'compact: db=%s legacy pending_push marker recovery requires remote HEAD=%s in local history; got=%s — manual intervention required\n' \
+      "$db" "$legacy_remote_head" "${legacy_in_local:-<empty>}" >&2
+    return 1
+  fi
+
+  printf '%s\n%s\n%s\n%s\n' "$legacy_remote" "$legacy_local_branch" "$legacy_remote_branch" "$legacy_remote_head"
   return 0
 }
 
@@ -1389,6 +1467,7 @@ flatten_database() {
   db="$1"
   verify_counts_saw_gain=0
   verify_counts_saw_gain_hash_drift=0
+  verify_counts_gain_drift_tables=""
   verify_counts_saw_row_decrease=0
   verify_counts_saw_same_count_hash_drift=0
   verify_counts_saw_table_list_change=0
@@ -1490,10 +1569,7 @@ flatten_database() {
   fi
 
   if has_compact_marker "$pending_push_dir" "$db"; then
-    if [ -n "$dry_run" ]; then
-      printf 'compact: db=%s pending_push=present — dry-run (would retry remote push)\n' "$db"
-      return 0
-    fi
+    legacy_pending_push_recovered=0
     pending_remote=$(compact_marker_value "$pending_push_dir" "$db" remote || true)
     pending_expected_remote_head=$(compact_marker_value "$pending_push_dir" "$db" expected_remote_head || true)
     pending_expected_remote_head_verified=$(compact_marker_value "$pending_push_dir" "$db" expected_remote_head_verified || true)
@@ -1503,9 +1579,16 @@ flatten_database() {
     [ -n "$pending_local_branch" ] || pending_local_branch="main"
     [ -n "$pending_remote_branch" ] || pending_remote_branch="$pending_local_branch"
     if [ -z "$pending_remote" ]; then
-      printf 'compact: db=%s pending_push marker is missing remote — manual intervention required\n' \
-        "$db" >&2
-      return 1
+      legacy_contract=$(recover_legacy_pending_push_contract "$db") || return 1
+      pending_remote=$(printf '%s\n' "$legacy_contract" | sed -n '1p')
+      pending_local_branch=$(printf '%s\n' "$legacy_contract" | sed -n '2p')
+      pending_remote_branch=$(printf '%s\n' "$legacy_contract" | sed -n '3p')
+      pending_expected_remote_head=$(printf '%s\n' "$legacy_contract" | sed -n '4p')
+      pending_expected_remote_head_verified=1
+      pending_compacted_from_head=""
+      legacy_pending_push_recovered=1
+      printf 'compact: db=%s legacy pending_push marker recovered remote=%s local_branch=%s remote_branch=%s expected_remote_head=%s — retrying with live remote verification\n' \
+        "$db" "$pending_remote" "$pending_local_branch" "$pending_remote_branch" "$pending_expected_remote_head"
     fi
     if ! valid_branch_name "$pending_local_branch"; then
       printf 'compact: db=%s pending_push marker has invalid local_branch=%s — manual intervention required\n' \
@@ -1549,7 +1632,13 @@ flatten_database() {
           ;;
       esac
     fi
-    ensure_remote_push_retry_fresh "$pending_push_dir" "$db" "pending_push" || return 1
+    if [ "$legacy_pending_push_recovered" != "1" ]; then
+      ensure_remote_push_retry_fresh "$pending_push_dir" "$db" "pending_push" || return 1
+    fi
+    if [ -n "$dry_run" ]; then
+      printf 'compact: db=%s pending_push=present — dry-run (would retry remote push)\n' "$db"
+      return 0
+    fi
     printf 'compact: db=%s pending_push=present — retrying remote push before threshold check\n' "$db"
     push_remote_after_compaction "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "retry" "$pending_compacted_from_head" "$pending_local_branch" "$pending_remote_branch"
     return $?
@@ -1845,6 +1934,33 @@ flatten_database() {
       rm -f "$preflight_tmp"
       return 0
     fi
+    # Option A (#2846): HEAD movement is only a proxy for "pre-flight rows
+    # remain reachable". When gain+drift is the only failure category but no
+    # concurrent writer was HEAD-proven — the absorbed-writer race, where the
+    # writer's commit was folded into the flatten and left no HEAD fingerprint
+    # — prove preservation directly by diffing the pre-flight snapshot HEAD
+    # against the flatten commit for each gained+drifted table. Purely additive
+    # (no removed/modified rows) proves every pre-flight row survived; defer
+    # exactly as the HEAD-proven path above does. Any removed/modified row, or
+    # a diff-probe failure, fails closed and falls through to the quarantine.
+    if [ "${verify_counts_saw_gain:-0}" = "1" ] && \
+       [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] && \
+       [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
+       [ "${verify_counts_saw_same_count_hash_drift:-0}" != "1" ] && \
+       [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
+       [ "${verify_counts_saw_probe_failure:-0}" != "1" ] && \
+       gain_drift_is_additive_only "$db" "$head" "$flatten_head" "$verify_counts_gain_drift_tables"; then
+      printf 'compact: db=%s gain+drift proven additive-only via DOLT_DIFF(%s..%s) for tables [%s] — pre-flight rows preserved (absorbed-writer race), not corruption; deferring, will retry next run\n' \
+        "$db" "$head" "$flatten_head" "${verify_counts_gain_drift_tables# }" >&2
+      if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
+        "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
+        "${compacted_from_head:-}" "$local_branch" "$remote_branch"; then
+        rm -f "$preflight_tmp"
+        return 1
+      fi
+      rm -f "$preflight_tmp"
+      return 0
+    fi
     if [ "$writer_race_detected" = "1" ] && \
        [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ]; then
       printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s), but additional integrity failure category prevents defer; quarantine unchanged\n' \
@@ -1937,6 +2053,14 @@ flatten_database() {
         rm -f "$preflight_tmp"
         return 0
       fi
+      # Option A's per-table DOLT_DIFF preservation proof is intentionally NOT
+      # extended to this whole-database value-hash path. It is reachable only
+      # when per-table verify already PASSED (verify_counts_rc==0) yet the
+      # aggregate DB hash drifted with a row gain and no writer was HEAD-proven
+      # — a near-unreachable combination for real appends, since a genuine
+      # per-table row gain would have tripped the per-table gain+drift signal
+      # (proven additive-only and deferred above). Quarantine is the safe
+      # default here; revisit only if a real incident shows this path reachable.
       printf 'compact: db=%s value hash changed with row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
         "$db" "$preflight_hash" "$postflight_hash" >&2
       write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed with row-count increase" || {

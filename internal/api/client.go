@@ -1384,6 +1384,70 @@ func workspaceStatusFromGen(g genclient.Status) workspacesvc.Status {
 	}
 }
 
+// ExtmsgOutboundRequest holds parameters for a POST /extmsg/outbound call.
+type ExtmsgOutboundRequest struct {
+	SessionID      string
+	Provider       string
+	AccountID      string
+	ConversationID string
+	ScopeID        string
+	Kind           string
+	Text           string
+}
+
+// ExtmsgOutboundResult holds the outcome of a successful POST /extmsg/outbound call.
+type ExtmsgOutboundResult struct {
+	Delivered      bool
+	FailureKind    string
+	Provider       string
+	AccountID      string
+	ConversationID string
+	Sequence       int64
+}
+
+// PostExtmsgOutbound sends a reply to an external conversation via
+// POST /v0/city/{cityName}/extmsg/outbound.
+func (c *Client) PostExtmsgOutbound(req ExtmsgOutboundRequest) (ExtmsgOutboundResult, error) {
+	if err := c.requireCityScope(); err != nil {
+		return ExtmsgOutboundResult{}, err
+	}
+	kind := genclient.ConversationKind(req.Kind)
+	body := genclient.ExtMsgOutboundInputBody{
+		SessionId: req.SessionID,
+		Conversation: &genclient.ConversationRef{
+			Provider:       req.Provider,
+			AccountId:      req.AccountID,
+			ConversationId: req.ConversationID,
+			ScopeId:        req.ScopeID,
+			Kind:           kind,
+		},
+		Text: &req.Text,
+	}
+	params := &genclient.PostV0CityByCityNameExtmsgOutboundParams{XGCRequest: "true"}
+	resp, err := c.cw.PostV0CityByCityNameExtmsgOutboundWithResponse(context.Background(), c.cityName, params, body)
+	if err != nil {
+		return ExtmsgOutboundResult{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return ExtmsgOutboundResult{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return ExtmsgOutboundResult{}, err
+	}
+	if resp.JSON200 == nil {
+		return ExtmsgOutboundResult{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	r := resp.JSON200.Receipt
+	return ExtmsgOutboundResult{
+		Delivered:      r.Delivered,
+		FailureKind:    r.FailureKind,
+		Provider:       r.Conversation.Provider,
+		AccountID:      r.Conversation.AccountId,
+		ConversationID: r.Conversation.ConversationId,
+		Sequence:       resp.JSON200.TranscriptEntry.Sequence,
+	}, nil
+}
+
 func derefStr(p *string) string {
 	if p == nil {
 		return ""

@@ -84,6 +84,7 @@ const (
 	ExecutionRigContextMetadataKey       = "gc.execution_rig_context"
 	ExecutionRoutedToMetadataKey         = "gc.execution_routed_to"
 	ExitCodeMetadataKey                  = "gc.exit_code"
+	ExtMsgOriginMetadataKey              = "gc.extmsg.origin"
 	FailedAttemptMetadataKey             = "gc.failed_attempt"
 	FailureClassMetadataKey              = "gc.failure_class"
 	FailureOwnerMetadataKey              = "gc.failure_owner"
@@ -243,6 +244,7 @@ var KnownMetadataKeys = []string{
 	ExecutionRigContextMetadataKey,
 	ExecutionRoutedToMetadataKey,
 	ExitCodeMetadataKey,
+	ExtMsgOriginMetadataKey,
 	FailedAttemptMetadataKey,
 	FailureClassMetadataKey,
 	FailureOwnerMetadataKey,

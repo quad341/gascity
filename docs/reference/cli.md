@@ -39,6 +39,7 @@ gc [flags]
 | [gc dolt-cleanup](#gc-dolt-cleanup) | Find and remove orphaned Dolt databases (Go-side core) |
 | [gc event](#gc-event) | Event operations |
 | [gc events](#gc-events) | Show events from the GC API |
+| [gc extmsg](#gc-extmsg) | External messaging operations |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
 | [gc github](#gc-github) | GitHub integration commands |
 | [gc graph](#gc-graph) | Show dependency graph for beads |
@@ -1326,6 +1327,40 @@ gc --city /path/to/city events rotate --api http://127.0.0.1:8080
 |------|------|---------|-------------|
 | `--api` | string |  | GC API server URL override (auto-discovered by default) |
 | `--wait` | bool |  | Wait for archive compression to complete before returning |
+
+## gc extmsg
+
+External messaging operations
+
+```
+gc extmsg
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc extmsg reply](#gc-extmsg-reply) | Reply to an external conversation |
+
+## gc extmsg reply
+
+Send a reply to an external conversation identified by --ref.
+
+Text is read from the first positional argument, or from stdin when no
+argument is provided. Exit codes:
+
+  0  delivered
+  1  not delivered (subscriber rejected)
+  2  no external-origin context available; use --ref
+  3  session not found or not running
+
+```
+gc extmsg reply [text] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | print the resolved request without sending |
+| `--ref` | string |  | conversation ref JSON (overrides active-bead context) |
+| `--session` | string |  | session ID to send from (default: $GC_SESSION_NAME) |
 
 ## gc formula
 

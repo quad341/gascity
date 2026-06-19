@@ -192,6 +192,8 @@ const (
 	PublishFailureAuth PublishFailureKind = "auth"
 	// PublishFailureNotFound means the target conversation was not found.
 	PublishFailureNotFound PublishFailureKind = "not_found"
+	// PublishFailureNoSubscriber means no connected-client subscriber is active.
+	PublishFailureNoSubscriber PublishFailureKind = "no_subscriber"
 )
 
 // PublishReceipt is the result of a publish attempt.

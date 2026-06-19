@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 )
@@ -107,6 +108,13 @@ func (s *Server) humaHandleExtMsgOutbound(ctx context.Context, input *ExtMsgOutb
 		Services:  *svc,
 		Registry:  reg,
 		EmitEvent: s.extmsgEmitEvent(),
+		// PostTranscript notifies connected-client subscribers after the transcript
+		// entry is committed, ensuring subscribers always find the entry on the next read.
+		PostTranscript: func(conversation extmsg.ConversationRef, _ int64) {
+			if svc.ConnectedClients != nil {
+				svc.ConnectedClients.Notify(conversation.AccountID, conversation.ConversationID)
+			}
+		},
 	}
 
 	result, err := extmsg.HandleOutbound(ctx, deps, caller, extmsg.OutboundRequest{
@@ -478,4 +486,245 @@ func (s *Server) humaHandleExtMsgAdapterUnregister(_ context.Context, input *Ext
 	out := &OKResponse{}
 	out.Body.Status = "unregistered"
 	return out, nil
+}
+
+// --- Supervisor-level connected-client handlers ---
+
+// extmsgCityState returns the State of the first running city that has extmsg
+// services enabled. Returns nil when no such city is available.
+func (sm *SupervisorMux) extmsgCityState() State {
+	for _, c := range sm.resolver.ListCities() {
+		if !c.Running {
+			continue
+		}
+		st := sm.resolver.CityState(c.Name)
+		if st != nil && st.ExtMsgServices() != nil {
+			return st
+		}
+	}
+	return nil
+}
+
+// humaHandleExtMsgClientRegister is the Huma-typed handler for POST /v0/extmsg/clients.
+// It registers a connected client by credential and ensures the corresponding
+// adapter is registered in the city's adapter registry.
+func (sm *SupervisorMux) humaHandleExtMsgClientRegister(_ context.Context, input *ExtMsgClientRegisterInput) (*ExtMsgClientRegisterOutput, error) {
+	st := sm.extmsgCityState()
+	if st == nil {
+		return nil, huma.Error503ServiceUnavailable("external messaging not enabled")
+	}
+	svc := st.ExtMsgServices()
+	if svc.ConnectedClients == nil {
+		return nil, huma.Error503ServiceUnavailable("connected client service not available")
+	}
+	reg := st.AdapterRegistry()
+	if reg == nil {
+		return nil, huma.Error503ServiceUnavailable("adapter registry not available")
+	}
+
+	rec, created, err := svc.ConnectedClients.Register(input.Body.Credential)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+
+	// Register adapter for this client so HandleOutbound can deliver to it.
+	key := extmsg.AdapterKey{Provider: extmsg.ConnectedClientProvider, AccountID: rec.ClientID}
+	if reg.Lookup(key) == nil {
+		adapter := extmsg.NewConnectedClientAdapter(rec.ClientID, svc.ConnectedClients)
+		reg.Register(key, adapter)
+	}
+
+	out := &ExtMsgClientRegisterOutput{}
+	out.Body.ClientID = rec.ClientID
+	out.Body.Token = rec.Token
+	out.Body.Created = created
+	return out, nil
+}
+
+// humaHandleExtMsgGlobalInbound is the Huma-typed handler for POST /v0/extmsg/inbound
+// (supervisor-level). Connected clients post flat inbound messages here without a city prefix.
+func (sm *SupervisorMux) humaHandleExtMsgGlobalInbound(ctx context.Context, input *ExtMsgGlobalInboundInput) (*ExtMsgInboundOutput, error) {
+	st := sm.extmsgCityState()
+	if st == nil {
+		return nil, huma.Error503ServiceUnavailable("external messaging not enabled")
+	}
+	svc := st.ExtMsgServices()
+	reg := st.AdapterRegistry()
+	if reg == nil {
+		return nil, huma.Error503ServiceUnavailable("adapter registry not available")
+	}
+
+	msg := extmsg.ExternalInboundMessage{
+		Conversation: extmsg.ConversationRef{
+			Provider:       input.Body.Provider,
+			AccountID:      input.Body.AccountID,
+			ConversationID: input.Body.ConversationID,
+			Kind:           extmsg.ConversationKind(input.Body.Kind),
+		},
+		Actor:      input.Body.Actor,
+		Text:       input.Body.Text,
+		ReceivedAt: time.Now(),
+	}
+
+	deps := extmsg.InboundDeps{
+		Services:  *svc,
+		Registry:  reg,
+		EmitEvent: nil,
+	}
+
+	result, handleErr := extmsg.HandleInboundNormalized(ctx, deps, msg)
+	if handleErr != nil {
+		return nil, huma.Error422UnprocessableEntity(handleErr.Error())
+	}
+	out := &ExtMsgInboundOutput{}
+	if result != nil {
+		out.Body = *result
+	}
+	return out, nil
+}
+
+// precheckConnectedClientSubscribe validates the token and conversation before
+// the SSE stream is committed to the wire.
+func (sm *SupervisorMux) precheckConnectedClientSubscribe(_ context.Context, input *ExtMsgClientSubscribeInput) error {
+	st := sm.extmsgCityState()
+	if st == nil {
+		return huma.Error503ServiceUnavailable("external messaging not enabled")
+	}
+	svc := st.ExtMsgServices()
+	if svc == nil || svc.ConnectedClients == nil {
+		return huma.Error503ServiceUnavailable("connected client service not available")
+	}
+	if input.GCClientToken == "" {
+		return huma.Error401Unauthorized("X-GC-Client-Token header required")
+	}
+	clientID := svc.ConnectedClients.LookupByToken(input.GCClientToken)
+	if clientID == "" {
+		return huma.Error401Unauthorized("invalid or unknown client token")
+	}
+	if clientID != input.AccountID {
+		return huma.Error403Forbidden("token does not match account_id")
+	}
+	return nil
+}
+
+// streamConnectedClientSubscribe is the SSE stream handler for
+// GET /v0/extmsg/clients/{account_id}/conversations/{conversation_id}/subscribe.
+// It replays missed entries from transcript when Last-Event-ID is set, then
+// blocks waiting for live message notifications from the adapter.
+//
+// Frames are written manually using FormatConnectedClientSSEMessage so that the
+// wire includes an explicit "event: message" line — the Huma SSE framework omits
+// it per W3C convention (message is the default), but clients that parse event:
+// lines directly need it present.
+func (sm *SupervisorMux) streamConnectedClientSubscribe(hctx huma.Context, input *ExtMsgClientSubscribeInput, _ sse.Sender) {
+	st := sm.extmsgCityState()
+	if st == nil {
+		return
+	}
+	svc := st.ExtMsgServices()
+	if svc == nil || svc.ConnectedClients == nil {
+		return
+	}
+
+	w := hctx.BodyWriter()
+	flusher := findFlusher(w)
+
+	writeMsg := func(entry extmsg.ConversationTranscriptRecord, ref extmsg.ConversationRef) bool {
+		event := extmsg.SSEMessageEvent{
+			Version:      "1",
+			Event:        "message",
+			Text:         entry.Text,
+			SessionID:    entry.SourceSessionID,
+			Conversation: ref,
+			Sequence:     entry.Sequence,
+			CreatedAt:    entry.CreatedAt,
+		}
+		data, err := extmsg.FormatConnectedClientSSEMessage(event)
+		if err != nil {
+			return true // non-fatal; skip this frame
+		}
+		if _, err := w.Write(data); err != nil {
+			return false
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return true
+	}
+
+	// Register subscriber before replay to avoid a race where a message arrives
+	// between replay completion and subscriber registration.
+	ch := svc.ConnectedClients.Subscribe(input.AccountID, input.ConversationID)
+	defer svc.ConnectedClients.Unsubscribe(input.AccountID, input.ConversationID)
+
+	// Flush headers immediately so the client knows the stream is open.
+	flushSSEHeaders(hctx)
+
+	ref := extmsg.ConversationRef{
+		Provider:       extmsg.ConnectedClientProvider,
+		AccountID:      input.AccountID,
+		ConversationID: input.ConversationID,
+		Kind:           extmsg.ConversationDM,
+	}
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api-subscribe"}
+
+	// Replay transcript entries after Last-Event-ID if provided.
+	// Only outbound entries (replies from the session) are sent to the subscriber.
+	var lastSeq int64
+	afterSeq, hasLastEventID := extmsg.ParseConnectedClientLastEventID(input.LastEventID)
+	if hasLastEventID {
+		entries, err := svc.Transcript.List(hctx.Context(), extmsg.ListTranscriptInput{
+			Caller:        caller,
+			Conversation:  ref,
+			AfterSequence: afterSeq,
+			Limit:         500,
+			Order:         extmsg.TranscriptOrderAsc,
+		})
+		if err == nil {
+			for _, entry := range entries {
+				if entry.Sequence > lastSeq {
+					lastSeq = entry.Sequence
+				}
+				if entry.Kind != extmsg.TranscriptMessageOutbound {
+					continue
+				}
+				if !writeMsg(entry, ref) {
+					return
+				}
+			}
+		}
+	}
+
+	// Stream live messages: wait for notifications then read new transcript entries.
+	// Notifications arrive via OutboundDeps.PostTranscript, which fires after the
+	// outbound entry is committed — so entries are always present when we read.
+	ctx := hctx.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ch:
+			entries, err := svc.Transcript.List(ctx, extmsg.ListTranscriptInput{
+				Caller:        caller,
+				Conversation:  ref,
+				AfterSequence: lastSeq,
+				Limit:         100,
+				Order:         extmsg.TranscriptOrderAsc,
+			})
+			if err != nil {
+				continue
+			}
+			for _, entry := range entries {
+				if entry.Sequence > lastSeq {
+					lastSeq = entry.Sequence
+				}
+				if entry.Kind != extmsg.TranscriptMessageOutbound {
+					continue
+				}
+				if !writeMsg(entry, ref) {
+					return
+				}
+			}
+		}
+	}
 }

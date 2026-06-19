@@ -40,6 +40,10 @@ type OutboundDeps struct {
 	Services  Services
 	Registry  *AdapterRegistry
 	EmitEvent func(eventType, subject string, payload events.Payload)
+	// PostTranscript is called after the outbound transcript entry is appended (if non-nil).
+	// Use it to notify subscribers that a new entry is available — the notification happens
+	// after the write so subscribers always find the entry when they read the transcript.
+	PostTranscript func(conversation ConversationRef, sequence int64)
 }
 
 // HandleOutbound publishes a message from a session to an external conversation.
@@ -145,9 +149,25 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 	}
 
 	result := &OutboundResult{Receipt: *receipt}
+	now := time.Now()
 
-	// If the publish was not delivered, return the receipt without recording.
+	// If the publish was not delivered, append transcript for replay and return.
+	// Connected-client subscribers that are offline at publish time reconnect with
+	// Last-Event-ID and replay from the transcript, so we must always record.
 	if !receipt.Delivered {
+		entry, transcriptErr := deps.Services.Transcript.Append(ctx, AppendTranscriptInput{
+			Caller:          caller,
+			Conversation:    req.Conversation,
+			Kind:            TranscriptMessageOutbound,
+			Provenance:      TranscriptProvenanceLive,
+			Text:            req.Text,
+			SourceSessionID: req.SessionID,
+			CreatedAt:       now,
+			Metadata:        req.Metadata,
+		})
+		if transcriptErr == nil {
+			result.TranscriptEntry = &entry
+		}
 		return result, nil
 	}
 
@@ -158,7 +178,6 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 	// applies on the group fallback path. Recording is intentionally
 	// skipped there; transcript append below still runs and remains the
 	// authoritative outbound record for group flows.
-	now := time.Now()
 	if binding != nil {
 		dc := DeliveryContextRecord{
 			SessionID:         publishingSession,
@@ -194,6 +213,11 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 	// the message was already published. If it failed, the entry was not written.
 	if err == nil {
 		result.TranscriptEntry = &entry
+		// Post-transcript notification: fires after the entry is committed so
+		// subscribers that wake up are guaranteed to find it on the next List.
+		if deps.PostTranscript != nil {
+			deps.PostTranscript(req.Conversation, entry.Sequence)
+		}
 	}
 
 	// Step 7: Emit event.

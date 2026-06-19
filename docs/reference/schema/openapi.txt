@@ -2503,6 +2503,81 @@
         ],
         "type": "object"
       },
+      "ExtMsgClientRegisterInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "credential": {
+            "description": "Opaque client credential.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "credential"
+        ],
+        "type": "object"
+      },
+      "ExtMsgClientRegisterOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "client_id": {
+            "description": "Stable client identifier derived from the credential.",
+            "type": "string"
+          },
+          "created": {
+            "description": "True when a new client record was created; false when an existing record was returned.",
+            "type": "boolean"
+          },
+          "token": {
+            "description": "Auth token for the subscribe endpoint.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_id",
+          "token",
+          "created"
+        ],
+        "type": "object"
+      },
+      "ExtMsgGlobalInboundInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "description": "Account ID.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "actor": {
+            "$ref": "#/components/schemas/ExternalActor",
+            "description": "Message actor."
+          },
+          "conversation_id": {
+            "description": "Conversation ID.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "description": "Conversation kind (dm, room, thread).",
+            "type": "string"
+          },
+          "provider": {
+            "description": "Provider name.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "text": {
+            "description": "Message text.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "account_id",
+          "conversation_id"
+        ],
+        "type": "object"
+      },
       "ExtMsgGroupEnsureInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -6125,6 +6200,97 @@
           "prior_archive",
           "prior_first_seq",
           "prior_last_seq"
+        ],
+        "type": "object"
+      },
+      "SSEErrorEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "event": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "retry_after_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "event",
+          "code",
+          "message",
+          "retryable"
+        ],
+        "type": "object"
+      },
+      "SSEHeartbeatEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "event": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "event",
+          "ts"
+        ],
+        "type": "object"
+      },
+      "SSEMessageEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "conversation": {
+            "$ref": "#/components/schemas/ConversationRef"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "event": {
+            "type": "string"
+          },
+          "sequence": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "event",
+          "text",
+          "session_id",
+          "conversation",
+          "sequence",
+          "created_at"
         ],
         "type": "object"
       },
@@ -27331,6 +27497,292 @@
           }
         },
         "summary": "Stream tagged events from all running cities."
+      }
+    },
+    "/v0/extmsg/clients": {
+      "post": {
+        "operationId": "post-v0-extmsg-clients",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtMsgClientRegisterInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtMsgClientRegisterOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Post v0 extmsg clients"
+      }
+    },
+    "/v0/extmsg/clients/{account_id}/conversations/{conversation_id}/subscribe": {
+      "get": {
+        "description": "Server-Sent Events stream of outbound messages for the given connected-client conversation. Authenticate with X-GC-Client-Token. Reconnect with Last-Event-ID to replay missed replies.",
+        "operationId": "stream-connected-client-conversation",
+        "parameters": [
+          {
+            "description": "Client account ID (client_id from registration).",
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "description": "Client account ID (client_id from registration).",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Conversation ID to subscribe to.",
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "description": "Conversation ID to subscribe to.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Client auth token from registration.",
+            "in": "header",
+            "name": "X-GC-Client-Token",
+            "schema": {
+              "description": "Client auth token from registration.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Last received event sequence for reconnect replay.",
+            "in": "header",
+            "name": "Last-Event-ID",
+            "schema": {
+              "description": "Last received event sequence for reconnect replay.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "description": "Each oneOf object represents one possible SSE message.",
+                  "items": {
+                    "oneOf": [
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/SSEErrorEvent"
+                          },
+                          "event": {
+                            "const": "error",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event ID.",
+                            "type": "integer"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event error",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/SSEHeartbeatEvent"
+                          },
+                          "event": {
+                            "const": "heartbeat",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event ID.",
+                            "type": "integer"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event heartbeat",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/SSEMessageEvent"
+                          },
+                          "event": {
+                            "const": "message",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event ID.",
+                            "type": "integer"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data"
+                        ],
+                        "title": "Event message",
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "title": "Server Sent Events",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Subscribe to replies for a connected-client conversation."
+      }
+    },
+    "/v0/extmsg/inbound": {
+      "post": {
+        "operationId": "post-v0-extmsg-inbound",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtMsgGlobalInboundInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboundResult"
+                }
+              }
+            },
+            "description": "Accepted",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Post v0 extmsg inbound"
       }
     },
     "/v0/provider-readiness": {

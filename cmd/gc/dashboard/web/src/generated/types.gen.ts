@@ -938,6 +938,55 @@ export type ExtMsgBindInputBody = {
     session_id: string;
 };
 
+export type ExtMsgClientRegisterInputBody = {
+    /**
+     * Opaque client credential.
+     */
+    credential: string;
+};
+
+export type ExtMsgClientRegisterOutputBody = {
+    /**
+     * Stable client identifier derived from the credential.
+     */
+    client_id: string;
+    /**
+     * True when a new client record was created; false when an existing record was returned.
+     */
+    created: boolean;
+    /**
+     * Auth token for the subscribe endpoint.
+     */
+    token: string;
+};
+
+export type ExtMsgGlobalInboundInputBody = {
+    /**
+     * Account ID.
+     */
+    account_id: string;
+    /**
+     * Message actor.
+     */
+    actor?: ExternalActor;
+    /**
+     * Conversation ID.
+     */
+    conversation_id: string;
+    /**
+     * Conversation kind (dm, room, thread).
+     */
+    kind?: string;
+    /**
+     * Provider name.
+     */
+    provider: string;
+    /**
+     * Message text.
+     */
+    text?: string;
+};
+
 export type ExtMsgGroupEnsureInputBody = {
     /**
      * Default handle for the group.
@@ -2503,6 +2552,31 @@ export type RotatedPayload = {
     prior_archive: string;
     prior_first_seq: number;
     prior_last_seq: number;
+};
+
+export type SseErrorEvent = {
+    code: string;
+    event: string;
+    message: string;
+    retry_after_ms?: number;
+    retryable: boolean;
+    version: string;
+};
+
+export type SseHeartbeatEvent = {
+    event: string;
+    ts: string;
+    version: string;
+};
+
+export type SseMessageEvent = {
+    conversation: ConversationRef;
+    created_at: string;
+    event: string;
+    sequence: number;
+    session_id: string;
+    text: string;
+    version: string;
 };
 
 export type ScopeGroup = {
@@ -11831,6 +11905,156 @@ export type StreamSupervisorEventsResponses = {
 };
 
 export type StreamSupervisorEventsResponse = StreamSupervisorEventsResponses[keyof StreamSupervisorEventsResponses];
+
+export type PostV0ExtmsgClientsData = {
+    body: ExtMsgClientRegisterInputBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v0/extmsg/clients';
+};
+
+export type PostV0ExtmsgClientsErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type PostV0ExtmsgClientsError = PostV0ExtmsgClientsErrors[keyof PostV0ExtmsgClientsErrors];
+
+export type PostV0ExtmsgClientsResponses = {
+    /**
+     * OK
+     */
+    200: ExtMsgClientRegisterOutputBody;
+};
+
+export type PostV0ExtmsgClientsResponse = PostV0ExtmsgClientsResponses[keyof PostV0ExtmsgClientsResponses];
+
+export type StreamConnectedClientConversationData = {
+    body?: never;
+    headers?: {
+        /**
+         * Client auth token from registration.
+         */
+        'X-GC-Client-Token'?: string;
+        /**
+         * Last received event sequence for reconnect replay.
+         */
+        'Last-Event-ID'?: string;
+    };
+    path: {
+        /**
+         * Client account ID (client_id from registration).
+         */
+        account_id: string;
+        /**
+         * Conversation ID to subscribe to.
+         */
+        conversation_id: string;
+    };
+    query?: never;
+    url: '/v0/extmsg/clients/{account_id}/conversations/{conversation_id}/subscribe';
+};
+
+export type StreamConnectedClientConversationErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type StreamConnectedClientConversationError = StreamConnectedClientConversationErrors[keyof StreamConnectedClientConversationErrors];
+
+export type StreamConnectedClientConversationResponses = {
+    /**
+     * Server Sent Events
+     *
+     * Each oneOf object represents one possible SSE message.
+     */
+    200: Array<{
+        data: SseErrorEvent;
+        /**
+         * The event name.
+         */
+        event: 'error';
+        /**
+         * The event ID.
+         */
+        id?: number;
+        /**
+         * The retry time in milliseconds.
+         */
+        retry?: number;
+    } | {
+        data: SseHeartbeatEvent;
+        /**
+         * The event name.
+         */
+        event: 'heartbeat';
+        /**
+         * The event ID.
+         */
+        id?: number;
+        /**
+         * The retry time in milliseconds.
+         */
+        retry?: number;
+    } | {
+        data: SseMessageEvent;
+        /**
+         * The event name.
+         */
+        event?: 'message';
+        /**
+         * The event ID.
+         */
+        id?: number;
+        /**
+         * The retry time in milliseconds.
+         */
+        retry?: number;
+    }>;
+};
+
+export type StreamConnectedClientConversationResponse = StreamConnectedClientConversationResponses[keyof StreamConnectedClientConversationResponses];
+
+export type PostV0ExtmsgInboundData = {
+    body: ExtMsgGlobalInboundInputBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v0/extmsg/inbound';
+};
+
+export type PostV0ExtmsgInboundErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type PostV0ExtmsgInboundError = PostV0ExtmsgInboundErrors[keyof PostV0ExtmsgInboundErrors];
+
+export type PostV0ExtmsgInboundResponses = {
+    /**
+     * Accepted
+     */
+    202: InboundResult;
+};
+
+export type PostV0ExtmsgInboundResponse = PostV0ExtmsgInboundResponses[keyof PostV0ExtmsgInboundResponses];
 
 export type GetV0ProviderReadinessData = {
     body?: never;

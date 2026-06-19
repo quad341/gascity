@@ -1980,6 +1980,60 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v0/extmsg/clients": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Post v0 extmsg clients */
+        post: operations["post-v0-extmsg-clients"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v0/extmsg/clients/{account_id}/conversations/{conversation_id}/subscribe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Subscribe to replies for a connected-client conversation.
+         * @description Server-Sent Events stream of outbound messages for the given connected-client conversation. Authenticate with X-GC-Client-Token. Reconnect with Last-Event-ID to replay missed replies.
+         */
+        get: operations["stream-connected-client-conversation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v0/extmsg/inbound": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Post v0 extmsg inbound */
+        post: operations["post-v0-extmsg-inbound"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v0/provider-readiness": {
         parameters: {
             query?: never;
@@ -2761,6 +2815,32 @@ export interface components {
             };
             /** @description Session ID to bind. */
             session_id: string;
+        };
+        ExtMsgClientRegisterInputBody: {
+            /** @description Opaque client credential. */
+            credential: string;
+        };
+        ExtMsgClientRegisterOutputBody: {
+            /** @description Stable client identifier derived from the credential. */
+            client_id: string;
+            /** @description True when a new client record was created; false when an existing record was returned. */
+            created: boolean;
+            /** @description Auth token for the subscribe endpoint. */
+            token: string;
+        };
+        ExtMsgGlobalInboundInputBody: {
+            /** @description Account ID. */
+            account_id: string;
+            /** @description Message actor. */
+            actor?: components["schemas"]["ExternalActor"];
+            /** @description Conversation ID. */
+            conversation_id: string;
+            /** @description Conversation kind (dm, room, thread). */
+            kind?: string;
+            /** @description Provider name. */
+            provider: string;
+            /** @description Message text. */
+            text?: string;
         };
         ExtMsgGroupEnsureInputBody: {
             /** @description Default handle for the group. */
@@ -3903,6 +3983,32 @@ export interface components {
             prior_first_seq: number;
             /** Format: int64 */
             prior_last_seq: number;
+        };
+        SSEErrorEvent: {
+            code: string;
+            event: string;
+            message: string;
+            /** Format: int64 */
+            retry_after_ms?: number;
+            retryable: boolean;
+            version: string;
+        };
+        SSEHeartbeatEvent: {
+            event: string;
+            /** Format: date-time */
+            ts: string;
+            version: string;
+        };
+        SSEMessageEvent: {
+            conversation: components["schemas"]["ConversationRef"];
+            /** Format: date-time */
+            created_at: string;
+            event: string;
+            /** Format: int64 */
+            sequence: number;
+            session_id: string;
+            text: string;
+            version: string;
         };
         ScopeGroup: Record<string, never>;
         ServiceRestartOutputBody: {
@@ -13305,6 +13411,156 @@ export interface operations {
                         /** @description The retry time in milliseconds. */
                         retry?: number;
                     })[];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "post-v0-extmsg-clients": {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks. */
+                "X-GC-Request": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExtMsgClientRegisterInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExtMsgClientRegisterOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "stream-connected-client-conversation": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client auth token from registration. */
+                "X-GC-Client-Token"?: string;
+                /** @description Last received event sequence for reconnect replay. */
+                "Last-Event-ID"?: string;
+            };
+            path: {
+                /** @description Client account ID (client_id from registration). */
+                account_id: string;
+                /** @description Conversation ID to subscribe to. */
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": ({
+                        data: components["schemas"]["SSEErrorEvent"];
+                        /**
+                         * @description The event name.
+                         * @constant
+                         */
+                        event: "error";
+                        /** @description The event ID. */
+                        id?: number;
+                        /** @description The retry time in milliseconds. */
+                        retry?: number;
+                    } | {
+                        data: components["schemas"]["SSEHeartbeatEvent"];
+                        /**
+                         * @description The event name.
+                         * @constant
+                         */
+                        event: "heartbeat";
+                        /** @description The event ID. */
+                        id?: number;
+                        /** @description The retry time in milliseconds. */
+                        retry?: number;
+                    } | {
+                        data: components["schemas"]["SSEMessageEvent"];
+                        /**
+                         * @description The event name.
+                         * @constant
+                         */
+                        event?: "message";
+                        /** @description The event ID. */
+                        id?: number;
+                        /** @description The retry time in milliseconds. */
+                        retry?: number;
+                    })[];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "post-v0-extmsg-inbound": {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks. */
+                "X-GC-Request": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExtMsgGlobalInboundInputBody"];
+            };
+        };
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InboundResult"];
                 };
             };
             /** @description Error */

@@ -205,3 +205,43 @@ type ExtMsgAdapterUnregisterInput struct {
 		AccountID string `json:"account_id" minLength:"1" doc:"Account ID."`
 	}
 }
+
+// --- Connected-client types ---
+
+// ExtMsgClientRegisterInput is the Huma input for POST /v0/extmsg/clients.
+type ExtMsgClientRegisterInput struct {
+	Body struct {
+		Credential string `json:"credential" minLength:"1" doc:"Opaque client credential."`
+	}
+}
+
+// ExtMsgClientRegisterOutput is the Huma output for POST /v0/extmsg/clients.
+type ExtMsgClientRegisterOutput struct {
+	Body struct {
+		ClientID string `json:"client_id" doc:"Stable client identifier derived from the credential."`
+		Token    string `json:"token" doc:"Auth token for the subscribe endpoint."`
+		Created  bool   `json:"created" doc:"True when a new client record was created; false when an existing record was returned."`
+	}
+}
+
+// ExtMsgGlobalInboundInput is the Huma input for POST /v0/extmsg/inbound (supervisor-level).
+// Connected clients post flat inbound messages here without a city prefix.
+type ExtMsgGlobalInboundInput struct {
+	Body struct {
+		Provider       string               `json:"provider" minLength:"1" doc:"Provider name."`
+		AccountID      string               `json:"account_id" minLength:"1" doc:"Account ID."`
+		ConversationID string               `json:"conversation_id" minLength:"1" doc:"Conversation ID."`
+		Kind           string               `json:"kind,omitempty" doc:"Conversation kind (dm, room, thread)."`
+		Actor          extmsg.ExternalActor `json:"actor,omitempty" doc:"Message actor."`
+		Text           string               `json:"text,omitempty" doc:"Message text."`
+	}
+}
+
+// ExtMsgClientSubscribeInput is the Huma input for
+// GET /v0/extmsg/clients/{account_id}/conversations/{conversation_id}/subscribe.
+type ExtMsgClientSubscribeInput struct {
+	AccountID      string `path:"account_id" minLength:"1" doc:"Client account ID (client_id from registration)."`
+	ConversationID string `path:"conversation_id" minLength:"1" doc:"Conversation ID to subscribe to."`
+	GCClientToken  string `header:"X-GC-Client-Token" required:"false" doc:"Client auth token from registration."`
+	LastEventID    string `header:"Last-Event-ID" required:"false" doc:"Last received event sequence for reconnect replay."`
+}

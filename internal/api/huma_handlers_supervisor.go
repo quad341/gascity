@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/cityinit"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/packman"
 )
 
@@ -234,6 +235,23 @@ func (sm *SupervisorMux) registerSupervisorRoutes() {
 		},
 		"heartbeat": HeartbeatEvent{},
 	}, sm.precheckGlobalEventStream, sm.streamGlobalEvents)
+
+	// Connected-client endpoints (supervisor-level, no city scope).
+	huma.Post(sm.humaAPI, "/v0/extmsg/clients", sm.humaHandleExtMsgClientRegister, addMutationCSRFParam)
+	huma.Post(sm.humaAPI, "/v0/extmsg/inbound", sm.humaHandleExtMsgGlobalInbound, addMutationCSRFParam, func(op *huma.Operation) {
+		op.DefaultStatus = http.StatusAccepted
+	})
+	registerSSE(sm.humaAPI, huma.Operation{
+		OperationID: "stream-connected-client-conversation",
+		Method:      http.MethodGet,
+		Path:        "/v0/extmsg/clients/{account_id}/conversations/{conversation_id}/subscribe",
+		Summary:     "Subscribe to replies for a connected-client conversation.",
+		Description: "Server-Sent Events stream of outbound messages for the given connected-client conversation. Authenticate with X-GC-Client-Token. Reconnect with Last-Event-ID to replay missed replies.",
+	}, map[string]any{
+		"message":   extmsg.SSEMessageEvent{},
+		"heartbeat": extmsg.SSEHeartbeatEvent{},
+		"error":     extmsg.SSEErrorEvent{},
+	}, sm.precheckConnectedClientSubscribe, sm.streamConnectedClientSubscribe)
 }
 
 // --- Supervisor Huma handlers ---

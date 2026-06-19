@@ -1179,6 +1179,43 @@ type ExtMsgBindInputBody struct {
 	SessionId string `json:"session_id"`
 }
 
+// ExtMsgClientRegisterInputBody defines model for ExtMsgClientRegisterInputBody.
+type ExtMsgClientRegisterInputBody struct {
+	// Credential Opaque client credential.
+	Credential string `json:"credential"`
+}
+
+// ExtMsgClientRegisterOutputBody defines model for ExtMsgClientRegisterOutputBody.
+type ExtMsgClientRegisterOutputBody struct {
+	// ClientId Stable client identifier derived from the credential.
+	ClientId string `json:"client_id"`
+
+	// Created True when a new client record was created; false when an existing record was returned.
+	Created bool `json:"created"`
+
+	// Token Auth token for the subscribe endpoint.
+	Token string `json:"token"`
+}
+
+// ExtMsgGlobalInboundInputBody defines model for ExtMsgGlobalInboundInputBody.
+type ExtMsgGlobalInboundInputBody struct {
+	// AccountId Account ID.
+	AccountId string         `json:"account_id"`
+	Actor     *ExternalActor `json:"actor,omitempty"`
+
+	// ConversationId Conversation ID.
+	ConversationId string `json:"conversation_id"`
+
+	// Kind Conversation kind (dm, room, thread).
+	Kind *string `json:"kind,omitempty"`
+
+	// Provider Provider name.
+	Provider string `json:"provider"`
+
+	// Text Message text.
+	Text *string `json:"text,omitempty"`
+}
+
 // ExtMsgGroupEnsureInputBody defines model for ExtMsgGroupEnsureInputBody.
 type ExtMsgGroupEnsureInputBody struct {
 	// DefaultHandle Default handle for the group.
@@ -2523,6 +2560,34 @@ type RotatedPayload struct {
 	PriorArchive  string `json:"prior_archive"`
 	PriorFirstSeq int64  `json:"prior_first_seq"`
 	PriorLastSeq  int64  `json:"prior_last_seq"`
+}
+
+// SSEErrorEvent defines model for SSEErrorEvent.
+type SSEErrorEvent struct {
+	Code         string `json:"code"`
+	Event        string `json:"event"`
+	Message      string `json:"message"`
+	RetryAfterMs *int64 `json:"retry_after_ms,omitempty"`
+	Retryable    bool   `json:"retryable"`
+	Version      string `json:"version"`
+}
+
+// SSEHeartbeatEvent defines model for SSEHeartbeatEvent.
+type SSEHeartbeatEvent struct {
+	Event   string    `json:"event"`
+	Ts      time.Time `json:"ts"`
+	Version string    `json:"version"`
+}
+
+// SSEMessageEvent defines model for SSEMessageEvent.
+type SSEMessageEvent struct {
+	Conversation ConversationRef `json:"conversation"`
+	CreatedAt    time.Time       `json:"created_at"`
+	Event        string          `json:"event"`
+	Sequence     int64           `json:"sequence"`
+	SessionId    string          `json:"session_id"`
+	Text         string          `json:"text"`
+	Version      string          `json:"version"`
 }
 
 // ScopeGroup defines model for ScopeGroup.
@@ -6126,6 +6191,27 @@ type StreamSupervisorEventsParams struct {
 	LastEventID *string `json:"Last-Event-ID,omitempty"`
 }
 
+// PostV0ExtmsgClientsParams defines parameters for PostV0ExtmsgClients.
+type PostV0ExtmsgClientsParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// StreamConnectedClientConversationParams defines parameters for StreamConnectedClientConversation.
+type StreamConnectedClientConversationParams struct {
+	// XGCClientToken Client auth token from registration.
+	XGCClientToken *string `json:"X-GC-Client-Token,omitempty"`
+
+	// LastEventID Last received event sequence for reconnect replay.
+	LastEventID *string `json:"Last-Event-ID,omitempty"`
+}
+
+// PostV0ExtmsgInboundParams defines parameters for PostV0ExtmsgInbound.
+type PostV0ExtmsgInboundParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0ProviderReadinessParams defines parameters for GetV0ProviderReadiness.
 type GetV0ProviderReadinessParams struct {
 	// Providers Comma-separated list of providers to probe.
@@ -6266,6 +6352,12 @@ type CreateSessionJSONRequestBody = SessionCreateBody
 
 // PostV0CityByCityNameSlingJSONRequestBody defines body for PostV0CityByCityNameSling for application/json ContentType.
 type PostV0CityByCityNameSlingJSONRequestBody = SlingInputBody
+
+// PostV0ExtmsgClientsJSONRequestBody defines body for PostV0ExtmsgClients for application/json ContentType.
+type PostV0ExtmsgClientsJSONRequestBody = ExtMsgClientRegisterInputBody
+
+// PostV0ExtmsgInboundJSONRequestBody defines body for PostV0ExtmsgInbound for application/json ContentType.
+type PostV0ExtmsgInboundJSONRequestBody = ExtMsgGlobalInboundInputBody
 
 // AsAdapterEventPayload returns the union data inside the EventPayload as a AdapterEventPayload
 func (t EventPayload) AsAdapterEventPayload() (AdapterEventPayload, error) {
@@ -12095,6 +12187,19 @@ type ClientInterface interface {
 	// StreamSupervisorEvents request
 	StreamSupervisorEvents(ctx context.Context, params *StreamSupervisorEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// PostV0ExtmsgClientsWithBody request with any body
+	PostV0ExtmsgClientsWithBody(ctx context.Context, params *PostV0ExtmsgClientsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostV0ExtmsgClients(ctx context.Context, params *PostV0ExtmsgClientsParams, body PostV0ExtmsgClientsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// StreamConnectedClientConversation request
+	StreamConnectedClientConversation(ctx context.Context, accountId string, conversationId string, params *StreamConnectedClientConversationParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostV0ExtmsgInboundWithBody request with any body
+	PostV0ExtmsgInboundWithBody(ctx context.Context, params *PostV0ExtmsgInboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostV0ExtmsgInbound(ctx context.Context, params *PostV0ExtmsgInboundParams, body PostV0ExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0ProviderReadiness request
 	GetV0ProviderReadiness(ctx context.Context, params *GetV0ProviderReadinessParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -14348,6 +14453,66 @@ func (c *Client) GetV0Events(ctx context.Context, params *GetV0EventsParams, req
 
 func (c *Client) StreamSupervisorEvents(ctx context.Context, params *StreamSupervisorEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewStreamSupervisorEventsRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0ExtmsgClientsWithBody(ctx context.Context, params *PostV0ExtmsgClientsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0ExtmsgClientsRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0ExtmsgClients(ctx context.Context, params *PostV0ExtmsgClientsParams, body PostV0ExtmsgClientsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0ExtmsgClientsRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) StreamConnectedClientConversation(ctx context.Context, accountId string, conversationId string, params *StreamConnectedClientConversationParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewStreamConnectedClientConversationRequest(c.Server, accountId, conversationId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0ExtmsgInboundWithBody(ctx context.Context, params *PostV0ExtmsgInboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0ExtmsgInboundRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0ExtmsgInbound(ctx context.Context, params *PostV0ExtmsgInboundParams, body PostV0ExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0ExtmsgInboundRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -23735,6 +23900,179 @@ func NewStreamSupervisorEventsRequest(server string, params *StreamSupervisorEve
 	return req, nil
 }
 
+// NewPostV0ExtmsgClientsRequest calls the generic PostV0ExtmsgClients builder with application/json body
+func NewPostV0ExtmsgClientsRequest(server string, params *PostV0ExtmsgClientsParams, body PostV0ExtmsgClientsJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostV0ExtmsgClientsRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewPostV0ExtmsgClientsRequestWithBody generates requests for PostV0ExtmsgClients with any type of body
+func NewPostV0ExtmsgClientsRequestWithBody(server string, params *PostV0ExtmsgClientsParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/extmsg/clients")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewStreamConnectedClientConversationRequest generates requests for StreamConnectedClientConversation
+func NewStreamConnectedClientConversationRequest(server string, accountId string, conversationId string, params *StreamConnectedClientConversationParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account_id", accountId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "conversation_id", conversationId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/extmsg/clients/%s/conversations/%s/subscribe", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.XGCClientToken != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Client-Token", *params.XGCClientToken, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-GC-Client-Token", headerParam0)
+		}
+
+		if params.LastEventID != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Last-Event-ID", *params.LastEventID, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Last-Event-ID", headerParam1)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPostV0ExtmsgInboundRequest calls the generic PostV0ExtmsgInbound builder with application/json body
+func NewPostV0ExtmsgInboundRequest(server string, params *PostV0ExtmsgInboundParams, body PostV0ExtmsgInboundJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostV0ExtmsgInboundRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewPostV0ExtmsgInboundRequestWithBody generates requests for PostV0ExtmsgInbound with any type of body
+func NewPostV0ExtmsgInboundRequestWithBody(server string, params *PostV0ExtmsgInboundParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/extmsg/inbound")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
 // NewGetV0ProviderReadinessRequest generates requests for GetV0ProviderReadiness
 func NewGetV0ProviderReadinessRequest(server string, params *GetV0ProviderReadinessParams) (*http.Request, error) {
 	var err error
@@ -24430,6 +24768,19 @@ type ClientWithResponsesInterface interface {
 
 	// StreamSupervisorEventsWithResponse request
 	StreamSupervisorEventsWithResponse(ctx context.Context, params *StreamSupervisorEventsParams, reqEditors ...RequestEditorFn) (*StreamSupervisorEventsResponse, error)
+
+	// PostV0ExtmsgClientsWithBodyWithResponse request with any body
+	PostV0ExtmsgClientsWithBodyWithResponse(ctx context.Context, params *PostV0ExtmsgClientsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0ExtmsgClientsResponse, error)
+
+	PostV0ExtmsgClientsWithResponse(ctx context.Context, params *PostV0ExtmsgClientsParams, body PostV0ExtmsgClientsJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0ExtmsgClientsResponse, error)
+
+	// StreamConnectedClientConversationWithResponse request
+	StreamConnectedClientConversationWithResponse(ctx context.Context, accountId string, conversationId string, params *StreamConnectedClientConversationParams, reqEditors ...RequestEditorFn) (*StreamConnectedClientConversationResponse, error)
+
+	// PostV0ExtmsgInboundWithBodyWithResponse request with any body
+	PostV0ExtmsgInboundWithBodyWithResponse(ctx context.Context, params *PostV0ExtmsgInboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0ExtmsgInboundResponse, error)
+
+	PostV0ExtmsgInboundWithResponse(ctx context.Context, params *PostV0ExtmsgInboundParams, body PostV0ExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0ExtmsgInboundResponse, error)
 
 	// GetV0ProviderReadinessWithResponse request
 	GetV0ProviderReadinessWithResponse(ctx context.Context, params *GetV0ProviderReadinessParams, reqEditors ...RequestEditorFn) (*GetV0ProviderReadinessResponse, error)
@@ -27814,6 +28165,74 @@ func (r StreamSupervisorEventsResponse) StatusCode() int {
 	return 0
 }
 
+type PostV0ExtmsgClientsResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *ExtMsgClientRegisterOutputBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0ExtmsgClientsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0ExtmsgClientsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type StreamConnectedClientConversationResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r StreamConnectedClientConversationResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r StreamConnectedClientConversationResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV0ExtmsgInboundResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON202                       *InboundResult
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0ExtmsgInboundResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0ExtmsgInboundResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type GetV0ProviderReadinessResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
@@ -29509,6 +29928,49 @@ func (c *ClientWithResponses) StreamSupervisorEventsWithResponse(ctx context.Con
 		return nil, err
 	}
 	return ParseStreamSupervisorEventsResponse(rsp)
+}
+
+// PostV0ExtmsgClientsWithBodyWithResponse request with arbitrary body returning *PostV0ExtmsgClientsResponse
+func (c *ClientWithResponses) PostV0ExtmsgClientsWithBodyWithResponse(ctx context.Context, params *PostV0ExtmsgClientsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0ExtmsgClientsResponse, error) {
+	rsp, err := c.PostV0ExtmsgClientsWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0ExtmsgClientsResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostV0ExtmsgClientsWithResponse(ctx context.Context, params *PostV0ExtmsgClientsParams, body PostV0ExtmsgClientsJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0ExtmsgClientsResponse, error) {
+	rsp, err := c.PostV0ExtmsgClients(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0ExtmsgClientsResponse(rsp)
+}
+
+// StreamConnectedClientConversationWithResponse request returning *StreamConnectedClientConversationResponse
+func (c *ClientWithResponses) StreamConnectedClientConversationWithResponse(ctx context.Context, accountId string, conversationId string, params *StreamConnectedClientConversationParams, reqEditors ...RequestEditorFn) (*StreamConnectedClientConversationResponse, error) {
+	rsp, err := c.StreamConnectedClientConversation(ctx, accountId, conversationId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseStreamConnectedClientConversationResponse(rsp)
+}
+
+// PostV0ExtmsgInboundWithBodyWithResponse request with arbitrary body returning *PostV0ExtmsgInboundResponse
+func (c *ClientWithResponses) PostV0ExtmsgInboundWithBodyWithResponse(ctx context.Context, params *PostV0ExtmsgInboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0ExtmsgInboundResponse, error) {
+	rsp, err := c.PostV0ExtmsgInboundWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0ExtmsgInboundResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostV0ExtmsgInboundWithResponse(ctx context.Context, params *PostV0ExtmsgInboundParams, body PostV0ExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0ExtmsgInboundResponse, error) {
+	rsp, err := c.PostV0ExtmsgInbound(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0ExtmsgInboundResponse(rsp)
 }
 
 // GetV0ProviderReadinessWithResponse request returning *GetV0ProviderReadinessResponse
@@ -34333,6 +34795,98 @@ func ParseStreamSupervisorEventsResponse(rsp *http.Response) (*StreamSupervisorE
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0ExtmsgClientsResponse parses an HTTP response from a PostV0ExtmsgClientsWithResponse call
+func ParsePostV0ExtmsgClientsResponse(rsp *http.Response) (*PostV0ExtmsgClientsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0ExtmsgClientsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ExtMsgClientRegisterOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseStreamConnectedClientConversationResponse parses an HTTP response from a StreamConnectedClientConversationWithResponse call
+func ParseStreamConnectedClientConversationResponse(rsp *http.Response) (*StreamConnectedClientConversationResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &StreamConnectedClientConversationResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0ExtmsgInboundResponse parses an HTTP response from a PostV0ExtmsgInboundWithResponse call
+func ParsePostV0ExtmsgInboundResponse(rsp *http.Response) (*PostV0ExtmsgInboundResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0ExtmsgInboundResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest InboundResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest ErrorModel
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

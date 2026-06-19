@@ -23,12 +23,16 @@ func hasLabel(b beads.Bead, label string) bool {
 }
 
 func normalizeConversationRef(ref ConversationRef) ConversationRef {
-	ref.ScopeID = strings.TrimSpace(ref.ScopeID)
 	ref.Provider = strings.ToLower(strings.TrimSpace(ref.Provider))
 	ref.AccountID = strings.TrimSpace(ref.AccountID)
 	ref.ConversationID = strings.TrimSpace(ref.ConversationID)
 	ref.ParentConversationID = strings.TrimSpace(ref.ParentConversationID)
 	ref.Kind = ConversationKind(strings.ToLower(strings.TrimSpace(string(ref.Kind))))
+	// Default scope to the account when not explicitly provided.
+	ref.ScopeID = strings.TrimSpace(ref.ScopeID)
+	if ref.ScopeID == "" {
+		ref.ScopeID = ref.AccountID
+	}
 	return ref
 }
 

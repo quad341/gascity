@@ -49,7 +49,7 @@ ROOT_ID=$(printf '%s\n' "$BEAD_JSON" | jq -r 'if type == "array" then (.[0].meta
 [ -n "$ATTEMPT" ] && [ -n "$ROOT_ID" ] || exit 1
 
 VERDICT=$(
-  gc bd list --all --json --limit=0 2>/dev/null |
+  gc bd list --all --json --limit=0 --metadata-field "gc.root_bead_id=$ROOT_ID" 2>/dev/null |
     jq -r --arg attempt "$ATTEMPT" --arg root "$ROOT_ID" '
       [
         .[]
@@ -83,7 +83,7 @@ ROOT_ID=$(printf '%s\n' "$BEAD_JSON" | jq -r 'if type == "array" then (.[0].meta
 [ -n "$ATTEMPT" ] && [ -n "$ROOT_ID" ] || exit 1
 
 VERDICT=$(
-  gc bd list --all --json --limit=0 2>/dev/null |
+  gc bd list --all --json --limit=0 --metadata-field "gc.root_bead_id=$ROOT_ID" 2>/dev/null |
     jq -r --arg attempt "$ATTEMPT" --arg root "$ROOT_ID" '
       [
         .[]
@@ -117,7 +117,7 @@ ROOT_ID=$(printf '%s\n' "$BEAD_JSON" | jq -r 'if type == "array" then (.[0].meta
 [ -n "$ATTEMPT" ] && [ -n "$ROOT_ID" ] || exit 1
 
 VERDICT=$(
-  gc bd list --all --json --limit=0 2>/dev/null |
+  gc bd list --all --json --limit=0 --metadata-field "gc.root_bead_id=$ROOT_ID" 2>/dev/null |
     jq -r --arg attempt "$ATTEMPT" --arg root "$ROOT_ID" '
       [
         .[]
@@ -365,6 +365,9 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 	}
 	cityDir := filepath.Join(t.TempDir(), cityName)
 
+	controlDispatcherTraceFile := filepath.Join(cityDir, "control-dispatcher-trace.log")
+	env = append(env, "GC_WORKFLOW_TRACE="+controlDispatcherTraceFile)
+
 	startCommand := workflowAgentStartCommand(mode, extraEnv)
 	polecatScaleCheck := `ready_json=$(bd ready --include-ephemeral --metadata-field gc.routed_to=polecat --unassigned --exclude-type=epic --json --limit=0) && printf '%s\n' "$ready_json" | jq 'length'`
 	cityToml := fmt.Sprintf(
@@ -569,6 +572,10 @@ func dumpReviewFormulaCityState(t *testing.T, cityDir string) {
 	if traceFile := filepath.Join(cityDir, "graph-workflow-trace.log"); fileExists(traceFile) {
 		data, _ := os.ReadFile(traceFile)
 		t.Logf("agent trace:\n%s", string(data))
+	}
+	if cdTrace := filepath.Join(cityDir, "control-dispatcher-trace.log"); fileExists(cdTrace) {
+		data, _ := os.ReadFile(cdTrace)
+		t.Logf("control-dispatcher trace:\n%s", string(data))
 	}
 }
 

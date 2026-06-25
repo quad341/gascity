@@ -913,6 +913,7 @@ func readConfigStateFromData(data []byte) ConfigState {
 }
 
 func readConfigStateFromRoot(root *yaml.Node) ConfigState {
+	doltMode, _ := nestedConfigStringValue(root, "dolt", "mode")
 	return ConfigState{
 		IssuePrefix:    configValue(root, "issue_prefix", "issue-prefix"),
 		EndpointOrigin: endpointOriginValue(configValue(root, "gc.endpoint_origin")),
@@ -920,8 +921,17 @@ func readConfigStateFromRoot(root *yaml.Node) ConfigState {
 		DoltHost:       configValue(root, "dolt.host"),
 		DoltPort:       configValue(root, "dolt.port"),
 		DoltUser:       configValue(root, "dolt.user"),
+		DoltMode:       doltMode,
 		Dolt:           readDoltConfigFromRoot(root),
 	}
+}
+
+func nestedConfigStringValue(root *yaml.Node, section string, keys ...string) (string, bool) {
+	sectionNode := findValue(root, section)
+	if sectionNode == nil || sectionNode.Kind != yaml.MappingNode {
+		return "", false
+	}
+	return configStringValue(sectionNode, keys...)
 }
 
 func readDoltConfigFromRoot(root *yaml.Node) DoltConfig {

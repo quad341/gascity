@@ -470,7 +470,7 @@ func TestEnsureCanonicalConfigWritesDoltModeWhenSupplied(t *testing.T) {
 	if !changed {
 		t.Fatal("EnsureCanonicalConfig() should report changes when adding dolt.mode")
 	}
-	if got := nestedConfigString(t, fs, path, "dolt", "mode"); got != "server" {
+	if got := doltModeFromConfig(t, path); got != "server" {
 		t.Fatalf("dolt.mode = %q, want %q", got, "server")
 	}
 
@@ -481,7 +481,7 @@ func TestEnsureCanonicalConfigWritesDoltModeWhenSupplied(t *testing.T) {
 	if changed {
 		t.Fatal("second EnsureCanonicalConfig() should be idempotent with existing dolt.mode")
 	}
-	if got := nestedConfigString(t, fs, path, "dolt", "mode"); got != "server" {
+	if got := doltModeFromConfig(t, path); got != "server" {
 		t.Fatalf("dolt.mode after idempotent run = %q, want %q", got, "server")
 	}
 }
@@ -495,6 +495,7 @@ func TestEnsureCanonicalConfigPreservesExistingDoltModeWhenStateOmitsIt(t *testi
 		"issue-prefix: gc",
 		"dolt.auto-start: false",
 		"export.auto: false",
+		"backup.enabled: false",
 		"dolt:",
 		"  disable-event-flush: true",
 		"  mode: server",
@@ -516,9 +517,10 @@ func TestEnsureCanonicalConfigPreservesExistingDoltModeWhenStateOmitsIt(t *testi
 		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
 	}
 	if changed {
-		t.Fatal("EnsureCanonicalConfig() should preserve existing dolt.mode when state omits it")
+		data, _ := fs.ReadFile(path)
+		t.Fatalf("EnsureCanonicalConfig() should preserve existing dolt.mode when state omits it:\n%s", data)
 	}
-	if got := nestedConfigString(t, fs, path, "dolt", "mode"); got != "server" {
+	if got := doltModeFromConfig(t, path); got != "server" {
 		t.Fatalf("dolt.mode = %q, want preserved %q", got, "server")
 	}
 }
@@ -1968,12 +1970,8 @@ func TestEnsureCanonicalConfigWritesDoltModeOnAbsentConfig(t *testing.T) {
 		t.Fatal("EnsureCanonicalConfig() changed = false, want true for new file with DoltMode")
 	}
 
-	data, err := fs.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "dolt.mode: server") {
-		t.Fatalf("config missing dolt.mode: server:\n%s", data)
+	if got := doltModeFromConfig(t, path); got != "server" {
+		t.Fatalf("dolt.mode = %q, want %q", got, "server")
 	}
 }
 
@@ -1999,10 +1997,10 @@ func TestEnsureCanonicalConfigDoltModeIdempotent(t *testing.T) {
 	}
 }
 
-// TestEnsureCanonicalConfigPreservesExistingDoltModeWhenStateOmitsIt verifies
-// that a pre-existing dolt.mode: server in config is not removed or changed
-// when ConfigState.DoltMode is empty ("caller doesn't know the mode").
-func TestEnsureCanonicalConfigPreservesExistingDoltModeWhenStateOmitsIt(t *testing.T) {
+// TestEnsureCanonicalConfigPreservesExistingDoltModeSimpleRoundTrip verifies
+// that a nested dolt.mode: server written by EnsureCanonicalConfig is preserved
+// when called again with DoltMode:"" (caller doesn't know the mode).
+func TestEnsureCanonicalConfigPreservesExistingDoltModeSimpleRoundTrip(t *testing.T) {
 	fs := fsys.OSFS{}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -2022,12 +2020,8 @@ func TestEnsureCanonicalConfigPreservesExistingDoltModeWhenStateOmitsIt(t *testi
 		t.Fatalf("EnsureCanonicalConfig(DoltMode empty) changed = true, want false:\n%s", data)
 	}
 
-	data, err := fs.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "dolt.mode: server") {
-		t.Fatalf("config should preserve existing dolt.mode: server when DoltMode is empty:\n%s", data)
+	if got := doltModeFromConfig(t, path); got != "server" {
+		t.Fatalf("dolt.mode = %q, want preserved %q", got, "server")
 	}
 }
 
@@ -2090,19 +2084,20 @@ func TestCrossBackendKeysToScrubUsesMetadataDoltModeKey(t *testing.T) {
 	}
 }
 
-func nestedConfigString(t *testing.T, fs fsys.FS, path, section, key string) string {
+func doltModeFromConfig(t *testing.T, path string) string {
 	t.Helper()
+	fs := fsys.OSFS{}
 	doc, err := readConfigDoc(fs, path)
 	if err != nil {
 		t.Fatalf("read config doc: %v", err)
 	}
-	value, ok := configStringValue(findValue(mappingRoot(doc), section), key)
+	value, ok := configStringValue(findValue(mappingRoot(doc), "dolt"), "mode")
 	if !ok {
 		data, readErr := fs.ReadFile(path)
 		if readErr != nil {
-			t.Fatalf("read config after missing %s.%s: %v", section, key, readErr)
+			t.Fatalf("read config after missing dolt.mode: %v", readErr)
 		}
-		t.Fatalf("config missing %s.%s:\n%s", section, key, data)
+		t.Fatalf("config missing dolt.mode:\n%s", data)
 	}
 	return value
 }

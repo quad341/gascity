@@ -522,7 +522,8 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 	}
 
 	if mode := strings.TrimSpace(state.DoltMode); mode != "" {
-		changed = setString(root, "dolt.mode", mode) || changed
+		changed = setNestedString(root, "dolt", "mode", mode) || changed
+		changed = deleteKeys(root, "dolt.mode") || changed
 	}
 
 	changed = deleteKeys(root, deprecatedConfigKeys...) || changed
@@ -1105,6 +1106,16 @@ func setNestedBool(root *yaml.Node, section, key string, value bool) bool {
 		changed = setMapping(root, section, sectionNode) || changed
 	}
 	return setBool(sectionNode, key, value) || changed
+}
+
+func setNestedString(root *yaml.Node, section, key, value string) bool {
+	sectionNode := findValue(root, section)
+	changed := false
+	if sectionNode == nil || sectionNode.Kind != yaml.MappingNode {
+		sectionNode = &yaml.Node{Kind: yaml.MappingNode}
+		changed = setMapping(root, section, sectionNode) || changed
+	}
+	return setString(sectionNode, key, value) || changed
 }
 
 func setMapping(root *yaml.Node, key string, value *yaml.Node) bool {

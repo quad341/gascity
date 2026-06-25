@@ -11847,3 +11847,189 @@ func publishRejectingManagedDoltRuntimeForTest(t *testing.T, cityPath string) fu
 		<-done
 	}
 }
+
+// ga-yqn5py.2.2: managed-Dolt server-mode write chain end-to-end tests.
+
+func TestDesiredCityDoltConfigStateSetsServerModeForManagedCity(t *testing.T) {
+	cityPath := t.TempDir()
+	state := desiredCityDoltConfigState(cityPath, config.DoltConfig{}, "hq")
+	if state.DoltMode != "server" {
+		t.Fatalf("DoltMode = %q, want server for managed city", state.DoltMode)
+	}
+}
+
+func TestDesiredCityDoltConfigStateSetsServerModeForExternalCity(t *testing.T) {
+	cityPath := t.TempDir()
+	state := desiredCityDoltConfigState(cityPath, config.DoltConfig{Host: "db.example.com", Port: 3307}, "hq")
+	if state.DoltMode != "server" {
+		t.Fatalf("DoltMode = %q, want server for external city", state.DoltMode)
+	}
+}
+
+func TestDesiredRigDoltConfigStateSetsServerModeForExplicitRig(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := t.TempDir()
+	rig := config.Rig{
+		Name:     "fe",
+		Path:     rigPath,
+		DoltHost: "127.0.0.1",
+		DoltPort: "4406",
+	}
+	cityState := contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "server"}
+	state := desiredRigDoltConfigState(cityPath, rig, cityState)
+	if state.DoltMode != "server" {
+		t.Fatalf("DoltMode = %q, want server for explicit rig", state.DoltMode)
+	}
+}
+
+func TestInheritedRigDoltConfigStatePropagatesDoltMode(t *testing.T) {
+	rigPath := t.TempDir()
+	cases := []struct {
+		name         string
+		cityDoltMode string
+		wantDoltMode string
+	}{
+		{"managed city with server mode", "server", "server"},
+		{"canonical city with server mode", "server", "server"},
+		{"city with no dolt mode", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityState := contract.ConfigState{
+				EndpointOrigin: contract.EndpointOriginManagedCity,
+				DoltMode:       tc.cityDoltMode,
+			}
+			state := inheritedRigDoltConfigState(rigPath, "fe", cityState)
+			if state.DoltMode != tc.wantDoltMode {
+				t.Fatalf("DoltMode = %q, want %q", state.DoltMode, tc.wantDoltMode)
+			}
+		})
+	}
+}
+
+func TestManagedCityDoltEnsuresServerModeInConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(cityPath, ".beads", "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("issue_prefix: hq\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	state := desiredCityDoltConfigState(cityPath, config.DoltConfig{}, "hq")
+	if _, err := contract.EnsureCanonicalConfig(fsys.OSFS{}, cfgPath, state); err != nil {
+		t.Fatalf("EnsureCanonicalConfig: %v", err)
+	}
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	got := doltModeFromLifecycleTestYAML(t, data)
+	if got != "server" {
+		t.Fatalf("dolt.mode = %q after EnsureCanonicalConfig for managed city, want server; config:\n%s", got, data)
+	}
+}
+
+func TestPreflightCheckerReportsEligibleForManagedDoltServerMode(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq","project_id":"gc-local"}`
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	checker := contract.PreflightChecker{
+		FS:                  fsys.OSFS{},
+		Provider:            "bd",
+		BeadsLibraryVersion: "1.0.4",
+		BDContext: func(string) (contract.PreflightBDContext, error) {
+			return contract.PreflightBDContext{
+				Backend:       "dolt",
+				DoltMode:      "server",
+				BDVersion:     "1.0.4",
+				SchemaVersion: 1,
+			}, nil
+		},
+		DatabaseProjectID: func(string) (string, bool, error) {
+			return "gc-local", true, nil
+		},
+	}
+
+	result, err := checker.Check(cityPath)
+	if err != nil {
+		t.Fatalf("PreflightChecker.Check: %v", err)
+	}
+	if !result.NativeStoreEligible {
+		t.Fatalf("NativeStoreEligible = false for managed Dolt server mode; checks=%+v", result.Checks)
+	}
+}
+
+func TestScopeWithNoDoltModeKeepsDoltModeAbsent(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(rigPath, ".beads", "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("issue_prefix: fe\nbackup.enabled: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityState := contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: ""}
+	rigState := inheritedRigDoltConfigState(rigPath, "fe", cityState)
+	if rigState.DoltMode != "" {
+		t.Fatalf("DoltMode = %q from empty city, want empty", rigState.DoltMode)
+	}
+
+	rigState.IssuePrefix = "fe"
+	rigState.EndpointStatus = contract.EndpointStatusVerified
+	if _, err := contract.EnsureCanonicalConfig(fsys.OSFS{}, cfgPath, rigState); err != nil {
+		t.Fatalf("EnsureCanonicalConfig: %v", err)
+	}
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if mode := doltModeFromLifecycleTestYAMLOrEmpty(data); mode != "" {
+		t.Fatalf("dolt.mode = %q after EnsureCanonicalConfig with empty DoltMode, want absent; config:\n%s", mode, data)
+	}
+
+	_ = cityPath
+}
+
+// doltModeFromLifecycleTestYAML reads the nested dolt.mode key from a YAML
+// config. It fails the test if the key is absent or the YAML is invalid.
+func doltModeFromLifecycleTestYAML(t *testing.T, data []byte) string {
+	t.Helper()
+	mode := doltModeFromLifecycleTestYAMLOrEmpty(data)
+	if mode == "" {
+		t.Fatalf("dolt.mode missing from config:\n%s", data)
+	}
+	return mode
+}
+
+// doltModeFromLifecycleTestYAMLOrEmpty reads the nested dolt.mode key from YAML,
+// returning "" when the key is absent.
+func doltModeFromLifecycleTestYAMLOrEmpty(data []byte) string {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil || doc.Kind == 0 || len(doc.Content) == 0 {
+		return ""
+	}
+	root := doc.Content[0]
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == "dolt" && root.Content[i+1].Kind == yaml.MappingNode {
+			doltNode := root.Content[i+1]
+			for j := 0; j+1 < len(doltNode.Content); j += 2 {
+				if doltNode.Content[j].Value == "mode" {
+					return doltNode.Content[j+1].Value
+				}
+			}
+		}
+	}
+	return ""
+}

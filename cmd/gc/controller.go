@@ -549,11 +549,22 @@ func sendControllerCommandWithTimeouts(cityPath, command string, dialTimeout, wr
 	return []byte(strings.TrimSpace(scanner.Text())), nil
 }
 
+// controllerAlive's dial/write/read budget for the ping probe. Tests that
+// stand up a real controller.sock listener + accept goroutine (rather than
+// mocking controllerAlive itself) override these to absorb goroutine
+// scheduling delays under host contention; production keeps them tight so a
+// genuinely dead controller is detected quickly.
+var (
+	controllerProbeDialTimeout  = 500 * time.Millisecond
+	controllerProbeWriteTimeout = 500 * time.Millisecond
+	controllerProbeReadTimeout  = 2 * time.Second
+)
+
 // controllerAlive checks whether a controller is running by connecting
 // to the controller.sock and sending a "ping". Returns the PID if alive,
 // or 0 if not reachable.
 func controllerAlive(cityPath string) int {
-	resp, err := sendControllerCommandWithTimeouts(cityPath, "ping", 500*time.Millisecond, 500*time.Millisecond, 2*time.Second)
+	resp, err := sendControllerCommandWithTimeouts(cityPath, "ping", controllerProbeDialTimeout, controllerProbeWriteTimeout, controllerProbeReadTimeout)
 	if err != nil {
 		return 0
 	}

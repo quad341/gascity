@@ -691,10 +691,78 @@ func TestRegisterCityWithSupervisorNameOverrideHydratesLockedImportCache(t *test
 	assertPublicGastownSyntheticCache(t, gcHome)
 }
 
+// withGenerousControllerProbeTimeouts widens controllerAlive's dial/write/read
+// budget for tests that exercise a real controller.sock listener + accept
+// goroutine (rather than mocking controllerAlive itself). Under host
+// contention (e.g. a 6-way parallel shard run spawning many real
+// supervisor-adjacent goroutines), the accept goroutine's Accept/Read/Write
+// chain can be scheduled later than controllerAlive's tight production
+// timeouts allow, producing a false "not alive" result that sends these
+// tests down the slow ~60s real-registration path instead of the fast
+// standalone-conflict branch they mean to exercise (gastownhall/gascity#3847).
+func withGenerousControllerProbeTimeouts(t *testing.T) {
+	t.Helper()
+	oldDial := controllerProbeDialTimeout
+	oldWrite := controllerProbeWriteTimeout
+	oldRead := controllerProbeReadTimeout
+	controllerProbeDialTimeout = 2 * time.Second
+	controllerProbeWriteTimeout = 2 * time.Second
+	controllerProbeReadTimeout = 20 * time.Second
+	t.Cleanup(func() {
+		controllerProbeDialTimeout = oldDial
+		controllerProbeWriteTimeout = oldWrite
+		controllerProbeReadTimeout = oldRead
+	})
+}
+
+// TestControllerAliveSurvivesDelayedAcceptWithGenerousTimeouts guards the fix
+// for gastownhall/gascity#3847: a real accept goroutine that is scheduled
+// later than controllerAlive's production read deadline (2s) must still be
+// detected once the probe timeouts are widened, rather than producing a
+// false "not alive" result.
+func TestControllerAliveSurvivesDelayedAcceptWithGenerousTimeouts(t *testing.T) {
+	withGenerousControllerProbeTimeouts(t)
+
+	root := shortSocketTempDir(t, "gc-ctl-delay-")
+	cityPath := filepath.Join(root, "bright-lights")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close() //nolint:errcheck // test cleanup
+
+	go func() {
+		// Simulate scheduler-starvation delay before the goroutine gets to
+		// accept the connection: longer than controllerAlive's tight
+		// production read timeout (2s), well within the generous override.
+		time.Sleep(3 * time.Second)
+		conn, acceptErr := lis.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck // test cleanup
+		buf := make([]byte, 32)
+		n, _ := conn.Read(buf)
+		if strings.Contains(string(buf[:n]), "ping") {
+			conn.Write([]byte("4242\n")) //nolint:errcheck // best-effort reply
+		}
+	}()
+
+	if pid := controllerAlive(cityPath); pid != 4242 {
+		t.Fatalf("controllerAlive = %d, want 4242 despite a delayed accept", pid)
+	}
+}
+
 func TestRegisterCityWithSupervisorRejectsStandaloneController(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
 
+	withGenerousControllerProbeTimeouts(t)
 	root := shortSocketTempDir(t, "gc-ctl-")
 
 	cityPath := filepath.Join(root, "bright-lights")
@@ -852,6 +920,7 @@ func TestRegisterCityWithSupervisorRejectsStandaloneControllerForStoppedManagedC
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
 
+	withGenerousControllerProbeTimeouts(t)
 	root := shortSocketTempDir(t, "gc-ctl-")
 
 	cityPath := filepath.Join(root, "bright-lights")
@@ -970,6 +1039,7 @@ func TestRegisterCityWithSupervisorRejectsStandaloneControllerDuringSupervisorSt
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
 
+	withGenerousControllerProbeTimeouts(t)
 	root := shortSocketTempDir(t, "gc-ctl-")
 
 	cityPath := filepath.Join(root, "bright-lights")

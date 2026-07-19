@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/pgauth"
+	"github.com/gastownhall/gascity/internal/warmup"
 )
 
 // scrubAmbientPostgresEnv ensures resolver tier 3/5 (process env) cannot
@@ -206,6 +207,79 @@ func TestPostgresAuthCheck_CanFix_ReturnsFalse(t *testing.T) {
 	if check.CanFix() {
 		t.Fatal("CanFix() = true; want false")
 	}
+}
+
+func TestPostgresAuthCheck_WarmupEligibleReturnsTrue(t *testing.T) {
+	check := &PostgresAuthCheck{}
+	if !check.WarmupEligible() {
+		t.Fatal("WarmupEligible() = false; want true")
+	}
+}
+
+func TestPostgresAuthCheck_SoleFailureMail_Subject(t *testing.T) {
+	check := &PostgresAuthCheck{}
+	subject, body := check.SoleFailureMail(warmup.WarmupReport{
+		Failures: []warmup.WarmupCheckResult{{
+			Scope:   "city",
+			Check:   check.Name(),
+			Status:  doctor.StatusError,
+			Message: "no password resolvable",
+		}},
+	})
+
+	if subject != WarmupMailSubject {
+		t.Fatalf("subject = %q; want %q", subject, WarmupMailSubject)
+	}
+	if body == "" {
+		t.Fatal("body is empty; want non-empty custom mail body")
+	}
+}
+
+func TestPostgresAuthCheck_SoleFailureMail_Body(t *testing.T) {
+	check := &PostgresAuthCheck{}
+	report := warmup.WarmupReport{
+		Failures: []warmup.WarmupCheckResult{
+			{Scope: "rigs/zeta", Check: check.Name(), Status: doctor.StatusWarning, Message: "password from parent shell env"},
+			{Scope: "rigs/beta", Check: check.Name(), Status: doctor.StatusError, Message: "no password resolvable"},
+			{Scope: "city", Check: check.Name(), Status: doctor.StatusError, Message: "credentials file mode 0644 (group/other readable)"},
+			{Scope: "rigs/alpha", Check: check.Name(), Status: doctor.StatusWarning, Message: "password from parent shell env"},
+		},
+	}
+
+	_, body := check.SoleFailureMail(report)
+
+	t.Run("Header", func(t *testing.T) {
+		want := "4 PG-backed scope(s) failed credential resolution before agents started:\n"
+		if !strings.HasPrefix(body, want) {
+			t.Fatalf("body header = %q; want prefix %q", body, want)
+		}
+	})
+
+	t.Run("PerScopeLines", func(t *testing.T) {
+		lines := strings.Split(body, "\n")
+		want := []string{
+			"✗ city — credentials file mode 0644 (group/other readable)",
+			"✗ rigs/beta — no password resolvable",
+			"⚠ rigs/alpha — password from parent shell env",
+			"⚠ rigs/zeta — password from parent shell env",
+		}
+		if len(lines) < 6 {
+			t.Fatalf("body split into %d lines; want at least 6:\n%s", len(lines), body)
+		}
+		for i, wantLine := range want {
+			if got := lines[i+2]; got != wantLine {
+				t.Fatalf("line %d = %q; want %q\nfull body:\n%s", i+2, got, wantLine, body)
+			}
+		}
+	})
+
+	t.Run("Footer", func(t *testing.T) {
+		want := "\nRun `gc doctor --explain-postgres-auth` for the resolution table per scope.\n" +
+			"Fix before agents try to bd-write or expect EAUTH on first PG operation.\n"
+		if !strings.HasSuffix(body, want) {
+			t.Fatalf("body footer mismatch\n got:\n%s\nwant suffix:\n%s", body, want)
+		}
+	})
 }
 
 // TestPostgresAuthCheck_RenderExtras_NoScopesPrintsHint locks §4.6.

@@ -209,16 +209,47 @@ func bdQueryEphemeralStatusQuietShell(status string) string {
 	return bdQueryEphemeralStatusShell(status) + ` 2>/dev/null`
 }
 
-func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeHoldLabels bool) string {
-	body := selector +
-		` | select(((.issue_type // .type // "") != "epic"))` +
-		` | select(([ (.dependencies // [])[]` +
-		` | select((.type // .dep_type // "") as $t | ($t == "blocks" or $t == "waits-for" or $t == "conditional-blocks"))` +
-		` | select((.status // .depends_on_status // "") != "closed") ] | length) == 0)`
+// ephemeralReadyBaseSelectorJQ composes the selector clauses shared by every
+// ephemeral ready-tier filter: the caller's own assignee/routing selector,
+// plus the epic exclusion and optional hold-label exclusion every variant
+// applies alike. Dependency gating is layered on top by each caller, since
+// `bd query --json` exposes only a `dependency_count` scalar — never a
+// `dependencies` array — which is precise enough to prove "definitely no
+// dependencies" but not to resolve whether a nonzero count is still open.
+func ephemeralReadyBaseSelectorJQ(selector string, excludeHoldLabels bool) string {
+	body := selector + ` | select(((.issue_type // .type // "") != "epic"))`
 	if excludeHoldLabels {
 		body += excludeHoldLabelsJQClause()
 	}
-	filter := `[.[] | ` + body + `]` + ` | sort_by(.created_at // "")`
+	return body
+}
+
+// legacyEphemeralReadyFilterJQ is the fast path: it withholds any candidate
+// with a nonzero dependency_count outright, since bd query --json carries no
+// detail on whether those dependencies are still open. dependency_count == 0
+// is a belt-and-braces prefilter, not the sole gate — ephemeralAssignedReadyProbeScript
+// pairs it with ephemeralReadyDependencyCandidateFilterJQ's real bd show
+// enrichment for the dependency_count > 0 case, so a step whose dependencies
+// have since all closed is still reachable instead of withheld forever.
+func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeHoldLabels bool) string {
+	body := ephemeralReadyBaseSelectorJQ(selector, excludeHoldLabels) +
+		` | select(((.dependency_count // 0) == 0))`
+	filter := `[.[] | ` + body + `]` + ` | sort_by(.created_at // "", .id // "")`
+	if limit > 0 {
+		filter += ` | .[:` + strconv.Itoa(limit) + `]`
+	}
+	return filter
+}
+
+// ephemeralReadyDependencyCandidateFilterJQ is the slow-path complement to
+// legacyEphemeralReadyFilterJQ: it surfaces the candidates the fast path
+// withheld (dependency_count > 0) so the caller can enrich them with a real
+// bd show --json call via inProgressBlockedByEnrichmentScript and decide
+// readiness precisely, instead of leaving them permanently unservable.
+func ephemeralReadyDependencyCandidateFilterJQ(selector string, limit int, excludeHoldLabels bool) string {
+	body := ephemeralReadyBaseSelectorJQ(selector, excludeHoldLabels) +
+		` | select(((.dependency_count // 0) > 0))`
+	filter := `[.[] | ` + body + `]` + ` | sort_by(.created_at // "", .id // "")`
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
@@ -332,7 +363,7 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 		`[ -z "$id" ] && continue; ` +
 		`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScript("r") +
+		inProgressBlockedByEnrichmentScript(true) +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("id", topo) +
 		`done; `
@@ -361,27 +392,31 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 // block readiness. Status interpretation is left to the shared Go filter:
 // any non-closed blocker counts.
 //
-// The same serve gate also skips a candidate parked on a canonical dispatch
-// hold (beadmeta.DispatchHoldLabels), read off the candidate row this tier
-// already holds — no extra bd call (gas-kg6). A held bead has no blocking
-// dependency, so the blocked_by gate alone let it through and the tier
-// re-served it on every tick; because the tier short-circuits with `exit 0`,
-// that also starved the ready tiers below it, and a worker that correctly
-// parked its bead could never reach its own ready queue. The hold dimension is
-// the same defect class as the dependency dimension above, so it shares the
-// same fall-through.
+// When checkHold is true, the same serve gate also skips a candidate parked
+// on a canonical dispatch hold (beadmeta.DispatchHoldLabels), read off the
+// candidate row this tier already holds — no extra bd call (gas-kg6). A held
+// bead has no blocking dependency, so the blocked_by gate alone let it
+// through and the tier re-served it on every tick; because the tier
+// short-circuits with `exit 0`, that also starved the ready tiers below it,
+// and a worker that correctly parked its bead could never reach its own
+// ready queue. The hold dimension is the same defect class as the dependency
+// dimension above, so it shares the same fall-through.
 //
-// Scope (ga-5736js): this is the WORK-SERVING decision only. The assignee-scoped
-// probes that answer "does a session still need to exist" —
+// Scope (ga-5736js): the hold check is the WORK-SERVING decision only. The
+// assignee-scoped probes that answer "does a session still need to exist" —
 // ephemeralAssignedReadyProbeScript here and filterReadyByAssignee in
 // cmd/gc/dispatch_control_ready.go — stay hold-transparent by design so a held
 // assignment still keeps its owner visible to demand and recovery accounting.
+// Those callers pass checkHold=false, which omits every `.labels` reference
+// from the generated script — TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels
+// pins the omission, not just the outcome.
 //
 // Enrichment is fail-open: a failed or unparseable `bd show` / `bd list`
 // degrades to the stock behavior of serving the candidate unchanged, never to
 // dropping it, so a malformed or log-prefixed bd stdout can never disable
-// crash recovery. The hold count fails open the same way.
-func inProgressBlockedByEnrichmentScript(shellVar string) string {
+// crash recovery. When checkHold is true the hold count fails open the same
+// way.
+func inProgressBlockedByEnrichmentScript(checkHold bool) string {
 	const blockingDepsJQ = `[.[0].dependencies[]? | ` +
 		`select(.dependency_type == "blocks" or .dependency_type == "waits-for" or ` +
 		`.dependency_type == "conditional-blocks") | {id, status}]`
@@ -389,26 +424,31 @@ func inProgressBlockedByEnrichmentScript(shellVar string) string {
 
 	const enrichJQ = `map(. + {blocked_by: $bb})`
 
-	v := `$` + shellVar
-	// The enriched payload lands in a scratch var derived from shellVar so the
-	// candidate itself is never clobbered: if jq fails (non-JSON or
-	// log-prefixed `bd list` stdout) the original is served unchanged.
-	enrichedVar := shellVar + `_enriched`
-	e := `$` + enrichedVar
-	return `bid=$(printf "%s" "` + v + `" | jq -r ".[0].id // empty" 2>/dev/null); ` +
+	holdCheck := ""
+	holdCond := ""
+	if checkHold {
+		holdCheck = `nheld=$(printf "%s" "$r" | jq -r ` + shellquote.Quote(heldLabelCountJQ()) + ` 2>/dev/null); ` +
+			`[ -z "$nheld" ] && nheld=0; `
+		holdCond = ` && [ "$nheld" = "0" ]`
+	}
+
+	// Every caller stages its candidate JSON into $r before invoking this
+	// script; the enriched payload lands in $r_enriched so the candidate
+	// itself is never clobbered if jq fails (non-JSON or log-prefixed
+	// `bd list` stdout) — the original is then served unchanged.
+	return `bid=$(printf "%s" "$r" | jq -r ".[0].id // empty" 2>/dev/null); ` +
 		`bb="[]"; ` +
 		`[ -n "$bid" ] && bb=$(bd show "$bid" --json 2>/dev/null | ` +
 		`jq -c ` + shellquote.Quote(blockingDepsJQ) + ` 2>/dev/null); ` +
 		`[ -z "$bb" ] && bb="[]"; ` +
 		`nblocked=$(printf "%s" "$bb" | jq -r ` + shellquote.Quote(openBlockerCountJQ) + ` 2>/dev/null); ` +
 		`[ -z "$nblocked" ] && nblocked=0; ` +
-		`nheld=$(printf "%s" "` + v + `" | jq -r ` + shellquote.Quote(heldLabelCountJQ()) + ` 2>/dev/null); ` +
-		`[ -z "$nheld" ] && nheld=0; ` +
-		`if [ "$nblocked" = "0" ] && [ "$nheld" = "0" ]; then ` +
-		enrichedVar + `=$(printf "%s" "` + v + `" | jq -c --argjson bb "$bb" ` +
+		holdCheck +
+		`if [ "$nblocked" = "0" ]` + holdCond + `; then ` +
+		`r_enriched=$(printf "%s" "$r" | jq -c --argjson bb "$bb" ` +
 		shellquote.Quote(enrichJQ) + ` 2>/dev/null); ` +
-		`[ -n "` + e + `" ] && [ "` + e + `" != "[]" ] && ` + shellVar + `="` + e + `"; ` +
-		`printf "%s" "` + v + `" && exit 0; ` +
+		`[ -n "$r_enriched" ] && [ "$r_enriched" != "[]" ] && r="$r_enriched"; ` +
+		`printf "%s" "$r" && exit 0; ` +
 		`fi; `
 }
 
@@ -444,7 +484,7 @@ func legacyControlAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 		`[ -z "$cand" ] && continue; ` +
 		`r=$(bd list --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScript("r") +
+		inProgressBlockedByEnrichmentScript(true) +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("cand", topo) +
 		`done; ` +
@@ -480,12 +520,18 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 // yields an empty candidate and the probe falls through — it never serves raw
 // stdout, with or without the hold filter. The hold-transparent existence
 // probes (ephemeralAssignedReadyProbeScript) are out of scope per ga-5736js.
+//
+// It must also apply the same inProgressBlockedByEnrichmentScript gate before
+// serving a surviving candidate, or a blocked in_progress wisp step is
+// re-served on every hook tick (ga-qjozkw).
 func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology) string {
 	_ = topo
 	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `] | .[:1]`
 	return `r=$(` + bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
 		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScript(true) +
+		`fi; `
 }
 
 // ephemeralAssignedReadyProbeScript is the bd-1.0.4 wisp tier. It stays on
@@ -495,14 +541,27 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 // (see splitEnv.mintWispWith). The ephemeral tier only exists where the policy
 // front door put the wisp somewhere a plain read cannot see it, which is the
 // single-store city.
+//
+// It tries the fast dependency_count == 0 candidate first, then falls back to
+// a dependency_count > 0 candidate enriched via a real bd show --json call,
+// so a step whose dependencies have since all closed is still reachable —
+// see ephemeralReadyDependencyCandidateFilterJQ. The enrichment call passes
+// checkHold=false: this is an assignee-scoped existence probe, not the
+// in_progress work-serving gate, so it must stay hold-transparent (ga-5736js;
+// pinned by TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels).
 func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) string {
 	if topo.includeEphemeralReady() {
 		return ""
 	}
-	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
-	return `r=$(` + bdQueryEphemeralStatusQuietShell("open") + ` | ` +
-		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
+	fastFilter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
+	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(`select((.assignee // "") == $id)`, 1, false)
+	return `open_ephemeral=$(` + bdQueryEphemeralStatusQuietShell("open") + `); ` +
+		`r=$(printf "%s" "$open_ephemeral" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(fastFilter) + ` 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`r=$(printf "%s" "$open_ephemeral" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(slowFilter) + ` 2>/dev/null); ` +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScript(false) +
+		`fi; `
 }
 
 func poolDemandOriginGateScript() string {

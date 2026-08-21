@@ -71,7 +71,11 @@ if [[ -z "$NODE_BIN" ]]; then
 fi
 # The bundle imports node:sqlite, so the real floor is 22.5, not 20. A distro
 # node 18 on PATH dies with a bare "No such built-in module: node:sqlite".
-node_version="$("$NODE_BIN" --version 2>/dev/null || true)"
+node_version="$("$NODE_BIN" --version 2>&1)"
+node_probe_status=$?
+if (( node_probe_status != 0 )); then
+    die_config "node version probe failed: $NODE_BIN --version exited $node_probe_status${node_version:+: $node_version}"
+fi
 if ! printf '%s\n' "${node_version#v}" | awk -F. '{exit !($1 > 22 || ($1 == 22 && $2 >= 5))}'; then
     die_config "$NODE_BIN is ${node_version:-an unknown version}; the ZCode bundle needs node >= 22.5 (it imports node:sqlite) — set ZCODE_NODE_BIN"
 fi

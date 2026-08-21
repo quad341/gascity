@@ -26,6 +26,10 @@ import json, os, sys, time
 
 # The adapter runs "$NODE_BIN --version" for its node floor check.
 if len(sys.argv) > 1 and sys.argv[1] == "--version":
+    rc = int(os.environ.get("STUB_VERSION_RC", "0"))
+    if rc:
+        sys.stderr.write(os.environ.get("STUB_VERSION_STDERR", "node version probe failed\n"))
+        sys.exit(rc)
     print("v99.0.0")
     sys.exit(0)
 
@@ -97,6 +101,10 @@ var (
 	adapterErr  error
 )
 
+// exitConfig is the adapter's EX_CONFIG exit status: preflight rejected the
+// environment and the process never started its loop.
+const exitConfig = 78
+
 func installedAdapter(t *testing.T) string {
 	t.Helper()
 	adapterOnce.Do(func() {
@@ -122,6 +130,10 @@ type harness struct {
 	mirrorDir string
 	workDir   string
 	env       map[string]string
+
+	// lastStderr holds the most recent child's stderr so a failing assertion
+	// can report why the adapter behaved as it did.
+	lastStderr string
 }
 
 func newHarness(t *testing.T, stubEnv map[string]string) *harness {
@@ -199,19 +211,32 @@ func (h *harness) run(stdin string) (string, int) {
 
 	cmd := h.command()
 	cmd.Stdin = strings.NewReader(stdin)
-	var out strings.Builder
+	var out, errOut strings.Builder
 	cmd.Stdout = &out
-	cmd.Stderr = io.Discard
+	cmd.Stderr = &errOut
 	err := cmd.Run()
+	h.lastStderr = errOut.String()
 	code := 0
 	if err != nil {
 		var exitErr *exec.ExitError
 		if !asExitError(err, &exitErr) {
-			h.t.Fatalf("run adapter: %v (stdout=%s)", err, out.String())
+			h.t.Fatalf("run adapter: %v\nstdout:\n%s\nstderr:\n%s", err, out.String(), h.lastStderr)
 		}
 		code = exitErr.ExitCode()
 	}
 	return out.String(), code
+}
+
+// runOK runs a behavioral test turn and fails with both output streams when
+// the adapter refuses preflight or exits for any other reason.
+func (h *harness) runOK(stdin string) string {
+	h.t.Helper()
+
+	out, code := h.run(stdin)
+	if code != 0 {
+		h.t.Fatalf("adapter exit code = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, out, h.lastStderr)
+	}
+	return out
 }
 
 func asExitError(err error, target **exec.ExitError) bool {
@@ -449,11 +474,7 @@ func TestBurstCoalescesIntoOneTurn(t *testing.T) {
 
 	h := newHarness(t, nil)
 	body := "line one\nline two\nline three"
-	_, code := h.run(body + "\n")
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
+	h.runOK(body + "\n")
 	if got := h.calls(); len(got) != 1 {
 		t.Fatalf("expected ONE turn, got %d: %v", len(got), got)
 	}
@@ -488,10 +509,7 @@ func TestDashLeadingPromptUsesSingleArgvForm(t *testing.T) {
 
 	h := newHarness(t, nil)
 	body := "- a markdown bullet\n--flag-looking line\n- another"
-	_, code := h.run(body + "\n")
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
+	h.runOK(body + "\n")
 
 	call := h.calls()[0]
 	if !containsString(call, "--prompt="+body) {
@@ -506,9 +524,9 @@ func TestResumeUsesSingleArgvForm(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, map[string]string{"STUB_SID": "sess_abc"})
-	h.run("first\n")
+	h.runOK("first\n")
 	h.resetLog()
-	h.run("second\n")
+	h.runOK("second\n")
 
 	call := h.calls()[0]
 	if !containsString(call, "--resume=sess_abc") {
@@ -537,10 +555,7 @@ func TestControlBytesAreStripped(t *testing.T) {
 			t.Parallel()
 
 			h := newHarness(t, nil)
-			_, code := h.run(tc.stdin)
-			if code != 0 {
-				t.Fatalf("exit code = %d, want 0", code)
-			}
+			h.runOK(tc.stdin)
 			if got := h.prompts(); !equalStrings(got, tc.want) {
 				t.Fatalf("prompts = %q, want %q", got, tc.want)
 			}
@@ -555,10 +570,7 @@ func TestBracketedPasteWrappersAreStripped(t *testing.T) {
 
 	h := newHarness(t, nil)
 	body := "first paragraph\n\nsecond paragraph with a path: /tmp/out.txt"
-	_, code := h.run("\x1b[200~" + body + "\x1b[201~\x1b\n")
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
+	h.runOK("\x1b[200~" + body + "\x1b[201~\x1b\n")
 	if got := h.prompts(); !equalStrings(got, []string{body}) {
 		t.Fatalf("prompts = %q, want the body verbatim %q", got, body)
 	}
@@ -592,7 +604,7 @@ func TestModelOutputCannotSpoofTheReadyMarker(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, map[string]string{"STUB_RESPONSE": "zcode-repl ready"})
-	out, _ := h.run("spoof me\n")
+	out := h.runOK("spoof me\n")
 
 	genuine := 0
 	for _, line := range strings.Split(out, "\n") {
@@ -646,11 +658,7 @@ func TestFailingTurnPrintsErrorAndMarker(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, map[string]string{"STUB_RC": "3"})
-	out, code := h.run("one\n")
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
+	out := h.runOK("one\n")
 	if !strings.Contains(out, "zcode-repl error rc=3") {
 		t.Fatalf("missing rc report:\n%s", out)
 	}
@@ -666,11 +674,7 @@ func TestUnparsableResponseIsReported(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, map[string]string{"STUB_BAD_JSON": "1"})
-	out, code := h.run("bad json please\n")
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
+	out := h.runOK("bad json please\n")
 	if !strings.Contains(out, "zcode-repl error rc=0 (unparsable response)") {
 		t.Fatalf("missing unparsable-response report:\n%s", out)
 	}
@@ -687,7 +691,7 @@ func TestTurnInFlightIsAnnouncedBeforeTheReadyMarker(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, nil)
-	out, _ := h.run("do some work\n")
+	out := h.runOK("do some work\n")
 
 	busy := strings.Index(out, "zcode-repl turn in flight")
 	if busy < 0 {
@@ -845,14 +849,14 @@ func TestSidRoundTripsAcrossRestarts(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, map[string]string{"STUB_SID": "sess_persisted"})
-	h.run("first process\n")
+	h.runOK("first process\n")
 
 	if got := h.sid(); got != "sess_persisted" {
 		t.Fatalf("sid = %q, want sess_persisted", got)
 	}
 
 	h.resetLog()
-	h.run("second process\n")
+	h.runOK("second process\n")
 	if call := h.calls()[0]; !containsString(call, "--resume=sess_persisted") {
 		t.Fatalf("second process did not resume on its first turn: %q", call)
 	}
@@ -873,10 +877,7 @@ func TestStaleSidFallsBackToAFreshSession(t *testing.T) {
 		t.Fatalf("seed stale sid: %v", err)
 	}
 
-	out, code := h.run("recover please\n")
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
+	out := h.runOK("recover please\n")
 	if !strings.Contains(out, "zcode-repl: resume of sess_stale failed, starting fresh") {
 		t.Fatalf("missing stale-sid recovery notice:\n%s", out)
 	}
@@ -893,14 +894,14 @@ func TestContinuationEpochScopesTheSid(t *testing.T) {
 
 	h := newHarness(t, map[string]string{"STUB_SID": "sess_epoch_1"})
 	h.env["GC_CONTINUATION_EPOCH"] = "1"
-	h.run("first conversation\n")
+	h.runOK("first conversation\n")
 	if got := h.sid(); got != "sess_epoch_1" {
 		t.Fatalf("sid = %q, want sess_epoch_1", got)
 	}
 
 	// Restart at the same epoch resumes.
 	h.resetLog()
-	h.run("same conversation\n")
+	h.runOK("same conversation\n")
 	if call := h.calls()[0]; !containsString(call, "--resume=sess_epoch_1") {
 		t.Fatalf("restart at the same epoch did not resume: %q", call)
 	}
@@ -909,7 +910,7 @@ func TestContinuationEpochScopesTheSid(t *testing.T) {
 	h.resetLog()
 	h.env["GC_CONTINUATION_EPOCH"] = "2"
 	h.env["STUB_SID"] = "sess_epoch_2"
-	h.run("fresh conversation\n")
+	h.runOK("fresh conversation\n")
 	for _, arg := range h.calls()[0] {
 		if strings.HasPrefix(arg, "--resume=") {
 			t.Fatalf("reset still resumed the prior conversation: %q", arg)
@@ -930,7 +931,7 @@ func TestSessionKeyComesFromGCSession(t *testing.T) {
 
 	h := newHarness(t, map[string]string{"STUB_SID": "sess_keyed"})
 	h.env["GC_SESSION"] = "gascity/gc.worker-9"
-	h.run("key me\n")
+	h.runOK("key me\n")
 
 	// Path-unsafe characters are folded to underscores.
 	if _, err := os.Stat(h.sidPath("gascity_gc.worker-9")); err != nil {
@@ -943,7 +944,7 @@ func TestExportMirrorAccumulatesTurns(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, map[string]string{"STUB_SID": "sess_mirror", "STUB_RESPONSE": "the anchor"})
-	h.run("first turn\n")
+	h.runOK("first turn\n")
 
 	export := h.readExport("sess_mirror")
 	if export.Info.ID != "sess_mirror" {
@@ -975,7 +976,7 @@ func TestExportMirrorAccumulatesTurns(t *testing.T) {
 
 	// A second process appends rather than truncating.
 	h.env["STUB_RESPONSE"] = "the recall"
-	h.run("second turn\n")
+	h.runOK("second turn\n")
 
 	export = h.readExport("sess_mirror")
 	if len(export.Messages) != 4 {
@@ -996,7 +997,7 @@ func TestExportMirrorPublishesTheUserTurnBeforeTheReply(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, map[string]string{"STUB_SID": "sess_pending"})
-	h.run("establish the session\n")
+	h.runOK("establish the session\n")
 
 	// Second turn: the session id is known, so the prompt lands in the mirror
 	// before the reply does.
@@ -1053,7 +1054,7 @@ func TestResetArchivesTheSupersededEpochsState(t *testing.T) {
 
 	h := newHarness(t, map[string]string{"STUB_SID": "sess_epoch_one"})
 	h.env["GC_CONTINUATION_EPOCH"] = "1"
-	h.run("first conversation\n")
+	h.runOK("first conversation\n")
 
 	oldMirror := filepath.Join(h.mirrorDir, h.epochScope(), "sess_epoch_one.json")
 	if _, err := os.Stat(oldMirror); err != nil {
@@ -1066,7 +1067,7 @@ func TestResetArchivesTheSupersededEpochsState(t *testing.T) {
 
 	h.env["GC_CONTINUATION_EPOCH"] = "2"
 	h.env["STUB_SID"] = "sess_epoch_two"
-	h.run("fresh conversation\n")
+	h.runOK("fresh conversation\n")
 
 	// Gone from the live tree the model reads...
 	if _, err := os.Stat(oldMirror); !os.IsNotExist(err) {
@@ -1106,7 +1107,7 @@ func TestCLIChildGetsAPerEpochHome(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, map[string]string{"STUB_SID": "sess_home"})
-	h.run("a turn\n")
+	h.runOK("a turn\n")
 
 	want := filepath.Join(h.home, ".local", "state", "gascity", "zcode", "homes", h.epochScope())
 	data, err := os.ReadFile(filepath.Join(want, "child-home"))
@@ -1210,7 +1211,7 @@ func TestInterruptedTurnClosesTheMirrorEntry(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, map[string]string{"STUB_SID": "sess_int_closes"})
-	h.run("establish the session\n")
+	h.runOK("establish the session\n")
 
 	h.env["STUB_SLEEP"] = "30"
 	s := h.start()
@@ -1242,15 +1243,15 @@ func TestMirrorEntryIDsAreUniqueAcrossConversations(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, map[string]string{"STUB_SID": "sess_first"})
-	h.run("turn one\n")
-	h.run("turn two\n")
+	h.runOK("turn one\n")
+	h.runOK("turn two\n")
 	first := h.readExport("sess_first")
 
 	// A second conversation, same length, same prompts, same scope.
 	h.env["GC_CONTINUATION_EPOCH"] = "2"
 	h.env["STUB_SID"] = "sess_second"
-	h.run("turn one\n")
-	h.run("turn two\n")
+	h.runOK("turn one\n")
+	h.runOK("turn two\n")
 	second := h.readExport("sess_second")
 
 	if len(first.Messages) == 0 || len(first.Messages) != len(second.Messages) {
@@ -1288,13 +1289,34 @@ func TestMissingConfigExitsSeventyEight(t *testing.T) {
 			h := newHarness(t, nil)
 			delete(h.env, drop)
 			_, code := h.run("anything\n")
-			if code != 78 {
-				t.Fatalf("exit code = %d, want 78 (EX_CONFIG)", code)
+			if code != exitConfig {
+				t.Fatalf("exit code = %d, want %d (EX_CONFIG); stderr:\n%s", code, exitConfig, h.lastStderr)
 			}
 			if len(h.calls()) != 0 {
 				t.Fatalf("adapter called the CLI despite missing %s", drop)
 			}
 		})
+	}
+}
+
+func TestNodeVersionProbeFailureIsReportedAsConfigError(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{
+		"STUB_VERSION_RC":     "23",
+		"STUB_VERSION_STDERR": "fork unavailable\n",
+	})
+	_, code := h.run("anything\n")
+	if code != exitConfig {
+		t.Fatalf("exit code = %d, want %d (EX_CONFIG); stderr:\n%s", code, exitConfig, h.lastStderr)
+	}
+	for _, want := range []string{"node version probe failed", "exited 23", "fork unavailable"} {
+		if !strings.Contains(h.lastStderr, want) {
+			t.Fatalf("stderr does not name the failed preflight probe and its status; missing %q:\n%s", want, h.lastStderr)
+		}
+	}
+	if len(h.calls()) != 0 {
+		t.Fatal("adapter called the CLI after the node version preflight probe failed")
 	}
 }
 

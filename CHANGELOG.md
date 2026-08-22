@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only fail-closed answer. Pass the JSON inline (`--metadata '{"routed_to":
   "rig/agent"}'`) instead. A malformed inline body is likewise refused by name
   rather than forwarded. No in-repo caller uses the `@file.json` spelling.
+### Removed
+
+- **BREAKING: `[maintenance.dolt]` subsystem and its two API endpoints are
+  removed.** `GET /v0/city/{city}/maintenance/status` and
+  `POST /v0/city/{city}/maintenance/dolt-gc` return 404 on upgraded
+  deployments. No known deployments had `[maintenance.dolt] enabled=true`.
 
 ### Fixed
 

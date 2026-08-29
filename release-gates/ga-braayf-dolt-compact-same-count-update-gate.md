@@ -99,6 +99,14 @@ pre-existing platform-specific, opt-in live-service/persistence, unsupported
 OS, golden-regeneration, or helper-process cases. Neither diff-owned test
 skipped.
 
+The repository pre-push hook subsequently ran `make test-fast-parallel` while
+publishing this FAIL evidence. Eight of ten jobs passed; `unit-core` failed on
+two out-of-diff tests: transcript streaming omitted a turn across consecutive
+compaction boundaries (`ga-k87o1z`, filed after this run), and the known
+`TestCustomTypesCheck_TableDrift` TempDir cleanup race recurred (`ga-6pnurv`).
+This later run does not alter the full-suite counts above; it independently
+confirms that criterion 3 remains red.
+
 Raw logs:
 
 - wrapper: `/var/tmp/ga-braayf-gate.7zPen2/full-suite.log`
@@ -114,6 +122,8 @@ Raw logs:
 | `TestBdFlagManifestCurrent` | `ga-f0uceo` | Attributed. The installed `bd` exposes flags absent from `internal/bdflags`; neither the binary nor manifest is changed or reachable from this diff. |
 | `TestHumaBinary_CityCreateAsync` | `ga-lpfjhc` / beads#4566 | Attributed. Exact dirty-table schema-migration failure in throwaway city initialization; no path or mechanism overlap. |
 | `TestCleanInstallTutorialPath` | `ga-thcffg` | **Unwaived.** `gc init` stopped after step 6 and timed out after two minutes. Existing trackers cover different signatures; `ga-thcffg` was necessarily filed after this run and cannot satisfy the predating-tracker rule. |
+| `TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundaries` (later pre-push fast suite) | `ga-k87o1z` | Out of diff, but the tracker was filed after the run. This is additional unwaived failure evidence, not part of the full-suite counts. |
+| `TestCustomTypesCheck_TableDrift` (later pre-push fast suite) | `ga-6pnurv` | Known out-of-diff TempDir cleanup race. This is additional failure evidence, not part of the full-suite counts. |
 
 The run was not interrupted by disk exhaustion. Before it began, eleven
 interrupted-run `/var/tmp/gotmp/go-build*` directories older than 30 minutes

@@ -72,10 +72,14 @@ GOLANGCI_LINT_CACHE=<isolated-disk-path> make lint
 make test-ci-policy fmt-check check-gomod-replace
 make check-eventexport-isolation check-core-boundary check-docs
 sh -n internal/worker/adapters/zcode/zcode-repl
+make test-fast-parallel                              10/10 jobs PASS (pre-push)
 ```
 
 Baseline and head `shellcheck --severity=warning` each report only the same
 pre-existing `SC2115` warning at line 172; this diff adds no shellcheck finding.
+The fast pre-push sweep passed after the gate record was first committed; it is
+useful corroboration but is not the required full 40-job suite and does not cure
+the deterministic policy-lane failure.
 
 Failed required check:
 

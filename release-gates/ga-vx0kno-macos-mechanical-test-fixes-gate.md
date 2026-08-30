@@ -2,11 +2,11 @@
 
 Gate result: **FAIL**
 
-- Evaluated: 2026-08-29
-- Deploy mode: `remote`
-- Base: `origin/main@157858d9ee8bd6ab85e4a0d2128f34dc2e166a7f`
+- Evaluated: 2026-08-30
+- Deploy mode: `remote`; push target resolves to `fork`
+- Base: `origin/main@c7a92b25ebb100ccfd0f3a31cf2e865a5d7bfb1c`
 - Reviewed source: `builder/ga-bxlbi6@4441c9e404df7fff2bb28e1b41b50e34171a63b3`
-- Review bead: `ga-ll4xto` (round 2 verdict: PASS)
+- Review bead: `ga-ll4xto` (round-2 verdict: PASS)
 - Existing pull request: [#5746](https://github.com/gastownhall/gascity/pull/5746), open at the exact reviewed SHA
 - Gate evidence branch: `deploy/ga-vx0kno-gate` (evidence only; no replacement PR)
 
@@ -14,83 +14,50 @@ Gate result: **FAIL**
 
 | # | Criterion | Result | Evidence |
 |---|---|---|---|
-| 1 | Reviewer PASS present | **PASS** | `ga-ll4xto` records a round-2 PASS for the exact deploy SHA. |
-| 2 | Acceptance criteria met | **PASS** | The two herdr tests call `skipUnlessXDGPlatform`; the pidutil test probes PID 1 and fails closed when its argv is unreadable; the Linux affected-package check had no diff-owned failure; `go vet ./...` passed; and the builder explicitly flagged Darwin-only verification. This is a check of the bead's written done-when conditions, not an exception to criterion 3's stricter no-skip rule. |
-| 3 | Tests pass | **FAIL** | The documented full suite completed with 23/40 jobs PASS and 17/40 jobs FAIL. More importantly, all three changed tests are skipped on one exercised platform: pidutil skips on Linux, while both herdr tests skip on Darwin. No mayor/operator waiver exists. Four additional first-sighting failures lacked a predating tracker at run time and therefore also fail closed. Details follow. |
-| 3b | Policy/lint lane | **PASS** | `make test-ci-policy` passed; `go vet ./...` passed. |
-| 4 | No high-severity review findings open | **PASS** | The independent review reports no style or security findings, and the gate inspection found no high-severity production risk in this test-only diff. |
-| 5 | Final branch is clean | **PASS** | The reviewed source worktree was clean before this gate artifact was added; `git diff --check` on the candidate diff passed. The only gate-branch delta is this evidence file. |
-| 6 | Branch diverges cleanly from main | **PASS** | `git merge-tree --write-tree origin/main 4441c9e404df7fff2bb28e1b41b50e34171a63b3` succeeded with tree `01cf58874b51fd8ae5720fd51416cdd0e9ab97d1`; merge base is `655713ff4559c335ff17ec09c4a65f5cca2a5f27`. |
-| 7 | Single feature theme | **PASS** | The diff is two test files, 34 insertions and 11 deletions, with one theme: correcting macOS-sensitive test assumptions exposed by restoring the Mac unit package list. |
+| 1 | Reviewer PASS present | **SKIPPED** | Fail-fast after criterion 6/source-ancestry refusal. The bead still records the round-2 PASS, but this re-run does not re-score later criteria. |
+| 2 | Acceptance criteria met | **SKIPPED** | Fail-fast after criterion 6/source-ancestry refusal. |
+| 3 | Tests pass | **SKIPPED** | The documented full-suite command was intentionally not run after the cheap mandatory provenance check failed. `test_cmd_scope: not-run (fail-fast)`; no test PASS is claimed. |
+| 3a | Pre-existing failures may be attributed | **SKIPPED** | No full-suite result was produced in this re-run, so no failure attribution was attempted. |
+| 3b | Policy/lint lane | **SKIPPED** | Fail-fast after criterion 6/source-ancestry refusal. |
+| 3c | CI-config diff lane | **SKIPPED** | Fail-fast after criterion 6/source-ancestry refusal. |
+| 4 | No high-severity review findings open | **SKIPPED** | Fail-fast after criterion 6/source-ancestry refusal. |
+| 5 | Final branch is clean | **SKIPPED** | Fail-fast after criterion 6/source-ancestry refusal. |
+| 6 | Branch diverges cleanly from main | **FAIL** | The content merge is clean: `git merge-tree --write-tree origin/main 4441c9e4...` returned 0 with tree `bfd1210aa70e00d7dea8311f1a13bad237c07a2d`, merge base `655713ff4559c335ff17ec09c4a65f5cca2a5f27`. The mandatory deploy-source ancestry guard nevertheless refused with rc 21 because commit `47ad03e007c46e9e02157b209e6bf9212ef47a9e` cites none of the confirmed bead IDs `ga-vx0kno`, `ga-bxlbi6`, or `ga-ll4xto`. Its full commit message contains no bead ID, so the accepted-ID set cannot be widened legitimately. |
+| 7 | Single feature theme | **SKIPPED** | Fail-fast after criterion 6/source-ancestry refusal. |
 
-## Test evidence
+## Pre-flight and CI evidence observed
 
-`test_cmd_scope`: `full-suite`
+- PR #5746 is `OPEN`, authored by team member `quad341`, and its head is exactly
+  `4441c9e404df7fff2bb28e1b41b50e34171a63b3`.
+- The PR has only member-authored issue comments, no reviews, and no inline
+  review comments. No external contributor interaction was found.
+- Exact-SHA Mac Regression run
+  [33263203066](https://github.com/gastownhall/gascity/actions/runs/33263203066)
+  completed with overall result `failure`. Its `Mac / make test` job ran
+  `TestCmdline_FailsClosedWhenUnreadable`, and the `internal/pidutil` package
+  passed. The two herdr XDG tests were logged as skipped on Darwin, consistent
+  with their Linux-only guard. This evidence was inspected to check the mayor's
+  conditional exact-SHA waiver, but it was not used to score criterion 3 because
+  the ancestry guard had already failed and the release gate must stop there.
 
-`test_cmd`:
+## Provenance failure
 
-```text
-DOCKER_HOST=unix:///run/user/1000/podman/podman.sock TESTCONTAINERS_RYUK_DISABLED=true make test-local-full-parallel
-```
+The reviewed range contains two commits after merge base:
 
-`test_counts`: **23/40 jobs PASS, 17/40 jobs FAIL**. The full-suite runner's
-job summary does not expose an exhaustive test-event PASS/SKIP count, so none is
-inferred here. Full log: `/var/tmp/ga-vx0kno-full.log`; per-job logs:
-`/var/tmp/gc-local-tests.sRvHTQ`.
+1. `47ad03e007c46e9e02157b209e6bf9212ef47a9e` — herdr XDG test skip guard;
+   no bead ID appears in its subject or body.
+2. `4441c9e404df7fff2bb28e1b41b50e34171a63b3` — pidutil test fix;
+   cites `ga-bxlbi6` and says it pairs with `47ad03e007`.
 
-Focused Linux diagnostic, run at the exact reviewed SHA:
-
-```text
-go test -json -count=1 ./internal/pidutil/... ./internal/runtime/herdr/... -run <three changed tests>
-```
-
-`diff_tests_executed`:
-
-| Changed test | Linux result | Darwin result at exact SHA |
-|---|---|---|
-| `TestCmdline_FailsClosedWhenUnreadable` | **SKIP** — PID 1 argv is readable | PASS |
-| `TestSocketPathHonorsXDGConfigHomeOverHome` | PASS | **SKIP** — helper excludes non-Linux |
-| `TestSocketPathFallsBackToHomeConfigWhenXDGUnset` | PASS | **SKIP** — helper excludes non-Linux |
-
-The Darwin results come from the real `Mac / make test` job `99029090669` in
-workflow-dispatch run [33225744772](https://github.com/gastownhall/gascity/actions/runs/33225744772),
-which checked out the exact reviewed SHA. The two herdr tests are individually
-logged as skipped even though their package passed; the earlier review's package-
-level summary misclassified them as individual PASS results.
-
-`waiver_ref`: **none**. Neither the deploy bead nor review bead contains a
-mayor/operator waiver for these diff-owned skips. Under the release-gate
-criterion-3 convention, a justification for a platform skip is not itself a
-waiver, so this is a hard failure.
-
-## Raw full-suite failures
-
-The following failures have predating trackers and do not overlap the two-file
-candidate diff:
-
-- beads dirty-table/bootstrap signatures: `ga-lpfjhc`, with focused trackers
-  `ga-ukteq1`, `ga-ylwqm3`, and `ga-81syu4`
-- Dolt server/readiness and connection failures: `ga-piz22t`, `ga-561tqj`,
-  `ga-tr4hod`, `ga-gajll3`, `ga-thuouz`, and `ga-gm5f4e`
-- session reconciler async-start timeout: `ga-hgjlhi`
-- Dolt compact/reaper/sweep process failures: `ga-ok3q3c`, `ga-4q1evf`,
-  `ga-vbyn8v`, `ga-fawr0t`, and `ga-pfi425`
-- stale bd flag manifest: `ga-f0uceo`
-- `TestSessionEventsLive`: `ga-idsv6m` / `ga-at7jv0`
-- `DisableAndPurge` concurrent-state family: `ga-s759zk`
-
-Four signatures were first seen in this gate run. Trackers were created for
-follow-up, but because they did not predate the run they cannot be used as
-retroactive criterion-3 attribution:
-
-- `ga-s0rwap` — ACP handshake timeout loses captured stderr
-- `ga-mjv35r` — Docker session failed-start subtests receive `SIGKILL`
-- `ga-jdm83k` — personal-work formula loses its Dolt database probe connection
-- `ga-x48epi` — adopt-PR transient-retry test times out probing Dolt identity
+The content is one feature theme, but the guard's provenance contract is
+mechanical: every introduced commit must cite an accepted bead ID. Pairing prose
+in a later commit cannot repair the missing provenance on the earlier commit.
 
 ## Disposition
 
-No deploy clearance. Existing PR #5746 is left open and unchanged; no new PR is
-opened and nothing is merged. Route `ga-vx0kno` back to the builder to obtain an
-operator waiver or replace the platform skips with execution evidence that
-satisfies criterion 3, then re-run the complete deploy gate.
+No replacement PR was opened, PR #5746 was not mutated, and no deploy-clearance
+status was published. Builder action is required: recreate/amend the
+`47ad03e007` commit so its message cites `ga-bxlbi6` (or another confirmed source
+bead), preserve the exact content, and return the resulting SHA for fresh review
+and deploy evaluation. The mayor waiver `gm-wisp-r5i1tn` was scoped to
+`4441c9e404df7fff2bb28e1b41b50e34171a63b3` and does not carry to the new SHA.

@@ -222,3 +222,54 @@ func TestBeadReconcileTick_OrphanReleaseCadenceGate_StampsCompletionNotStart(t *
 			got2.Status, got2.Assignee)
 	}
 }
+
+// TestBeadReconcileTick_OrphanReleaseCadenceGate_PartialSnapshotDoesNotStamp
+// proves a due tick with a partial snapshot, where the sweep returns without
+// releasing anything, does not spend the cadence interval: the next complete
+// tick must still be due and actually release the orphan.
+func TestBeadReconcileTick_OrphanReleaseCadenceGate_PartialSnapshotDoesNotStamp(t *testing.T) {
+	store, work := orphanCadenceReleaseFixture(t)
+	cr := newOrphanCadenceTestRuntime(store)
+	// cr.orphanReleaseLast left at its zero value: never run before, due now.
+
+	partial := DesiredStateResult{
+		State:                 map[string]TemplateParams{},
+		AssignedWorkBeads:     []beads.Bead{work},
+		AssignedWorkStores:    []beads.Store{store},
+		AssignedWorkStoreRefs: []string{""},
+		StoreQueryPartial:     true,
+	}
+	cr.beadReconcileTick(context.Background(), partial, newSessionBeadSnapshot(nil), nil, false)
+
+	if !cr.orphanReleaseLast.IsZero() {
+		t.Fatalf("orphanReleaseLast = %v after a partial-snapshot tick, want zero (no sweep ran, so the interval must not be spent)", cr.orphanReleaseLast)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work after partial tick: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-dead-cadence" {
+		t.Fatalf("orphan release ran on a partial snapshot: status=%q assignee=%q, want unchanged (in_progress, worker-dead-cadence)",
+			got.Status, got.Assignee)
+	}
+
+	complete := DesiredStateResult{
+		State:                 map[string]TemplateParams{},
+		AssignedWorkBeads:     []beads.Bead{got},
+		AssignedWorkStores:    []beads.Store{store},
+		AssignedWorkStoreRefs: []string{""},
+	}
+	cr.beadReconcileTick(context.Background(), complete, newSessionBeadSnapshot(nil), nil, false)
+
+	got, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work after complete tick: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("orphan release did not run on the complete tick after a partial one: status=%q assignee=%q, want released (open, unassigned)",
+			got.Status, got.Assignee)
+	}
+	if cr.orphanReleaseLast.IsZero() {
+		t.Fatal("orphanReleaseLast still zero after a complete sweep, want stamped")
+	}
+}

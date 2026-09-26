@@ -2600,8 +2600,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// snapshot staleness otherwise produces the wake/release/retire treadmill).
 	preWakeCandidates, preWakeCandidateRefs := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
 	var released []releasedPoolAssignment
-	orphanReleaseRan := shouldRunOrphanRelease(cr.orphanReleaseNow(), cr.orphanReleaseLast, orphanReleaseMinInterval)
-	if orphanReleaseRan {
+	orphanReleaseDue := shouldRunOrphanRelease(cr.orphanReleaseNow(), cr.orphanReleaseLast, orphanReleaseMinInterval)
+	// A partial snapshot makes the sweep return without releasing anything, so
+	// such a tick must not spend the interval: the next complete tick stays due.
+	orphanReleaseRan := orphanReleaseDue && !result.snapshotQueryPartial()
+	if orphanReleaseDue {
 		released = releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), recordPhase)
 		// Stamp completion time, not the pre-call time captured above for the
 		// gate check: the sweep itself takes ~328s in production, which already
@@ -2609,7 +2612,9 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		// here would give the gate no real throttling — elapsed time from a
 		// stale start-time stamp alone already clears the interval on the very
 		// next tick (deploy-gate criterion-2 FAIL on ga-p69yam).
-		cr.orphanReleaseLast = cr.orphanReleaseNow()
+		if orphanReleaseRan {
+			cr.orphanReleaseLast = cr.orphanReleaseNow()
+		}
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments", phaseStart, map[string]any{
 		"released_count": len(released),

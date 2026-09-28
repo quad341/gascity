@@ -4022,11 +4022,48 @@ type rigStoreOpenFailure struct {
 // operator-visible log to say so. `gc ready` (readyRigLegStores) fails the whole
 // query: its entire output is a JSON array with nowhere to say it is short.
 func openStandaloneRigStores(cfg *config.City, cityPath string) (map[string]beads.Store, []rigStoreOpenFailure) {
+	return openStandaloneRigStoresWithOpener(cfg, func(rig config.Rig) (beads.Store, error) {
+		return openStoreAtForCityWithConfig(rig.Path, cityPath, cfg)
+	})
+}
+
+// rigStoreOpenResult is one rig's open outcome, collected at a
+// position-indexed slot so the merge into stores/failures stays ordered by
+// rig position regardless of which goroutine's open finishes first — the same
+// discipline readLegsConcurrently applies on the read side (ready_federation.go).
+type rigStoreOpenResult struct {
+	rig   config.Rig
+	store beads.Store
+	err   error
+}
+
+// openStandaloneRigStoresWithOpener is openStandaloneRigStores with the
+// per-rig opener injected, so a test can control per-open latency without
+// standing up a real store chain (preflight subprocess spawn, Dolt ping, ...).
+//
+// Opens run CONCURRENTLY, one goroutine per bound rig. Each open's dominant
+// cost is not the store construction itself (a struct literal — see
+// beads.NewBdStoreWithPrefix) but contract.PreflightChecker.Check, which
+// shells out to `bd context --json` and pings the Dolt server for native-store
+// eligibility — real per-rig latency paid even when the verdict is a foregone
+// "ineligible, fall back to BdStore" (e.g. a permanent bd/library version
+// skew). A sequential loop here turned that per-rig cost into a SUM across up
+// to 9 scopes (the city plus up to 8 bound rigs) rather than the MAX any one
+// caller actually waits on — this is what left `gc ready`'s wall clock
+// unmoved even after federateBeadLegs's read-side legs were made concurrent.
+// See ga-ntr7gn.
+//
+// Every goroutine writes only to its own results slot, and the opener itself
+// is already proven safe for concurrent per-scope calls: readLegsConcurrently
+// already runs concurrent reads through the same subprocess-store and
+// Dolt-pool machinery, and EnsureBuiltinRuntimeAssets (the one step here that
+// touches shared city-wide state) serializes per cityPath behind its own
+// builtinRuntimeState mutex.
+func openStandaloneRigStoresWithOpener(cfg *config.City, open func(config.Rig) (beads.Store, error)) (map[string]beads.Store, []rigStoreOpenFailure) {
 	if cfg == nil || len(cfg.Rigs) == 0 {
 		return nil, nil
 	}
-	stores := make(map[string]beads.Store, len(cfg.Rigs))
-	var failures []rigStoreOpenFailure
+	var bound []config.Rig
 	for _, rig := range cfg.Rigs {
 		// Unbound rigs (declared in city.toml but missing a
 		// .gc/site.toml binding) have an empty rig.Path;
@@ -4036,12 +4073,32 @@ func openStandaloneRigStores(cfg *config.City, cityPath string) (map[string]bead
 		if strings.TrimSpace(rig.Path) == "" {
 			continue
 		}
-		store, err := openStoreAtForCity(rig.Path, cityPath)
-		if err != nil {
-			failures = append(failures, rigStoreOpenFailure{rig: rig.Name, err: err})
+		bound = append(bound, rig)
+	}
+	if len(bound) == 0 {
+		return nil, nil
+	}
+
+	results := make([]rigStoreOpenResult, len(bound))
+	var wg sync.WaitGroup
+	wg.Add(len(bound))
+	for i, rig := range bound {
+		go func(i int, rig config.Rig) {
+			defer wg.Done()
+			store, err := open(rig)
+			results[i] = rigStoreOpenResult{rig: rig, store: store, err: err}
+		}(i, rig)
+	}
+	wg.Wait()
+
+	stores := make(map[string]beads.Store, len(bound))
+	var failures []rigStoreOpenFailure
+	for _, res := range results {
+		if res.err != nil {
+			failures = append(failures, rigStoreOpenFailure{rig: res.rig.Name, err: res.err})
 			continue
 		}
-		stores[rig.Name] = store
+		stores[res.rig.Name] = res.store
 	}
 	if len(stores) == 0 {
 		return nil, failures

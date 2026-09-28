@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -691,6 +692,93 @@ func TestRigStoreOpenPolicyDiffersByCaller(t *testing.T) {
 	}
 }
 
+// TestOpenStandaloneRigStoresReusesSuppliedConfig pins the ga-237xpr
+// discipline (prefer openStoreAtForCityWithConfig over openStoreAtForCity
+// once the caller already holds a resolved *config.City) at the
+// openStandaloneRigStores call site shared by both readyRigLegStores (gc
+// ready) and buildStandaloneRigStores (the controller).
+//
+// This site was outside ga-237xpr's original scope (that bead fixed only the
+// order-dispatch hot path): opening N bound rigs sequentially, each through
+// the reload variant, reparses the full city config (city.toml + every pack
+// include) N times even though cmdReady already loaded that exact config
+// once and passed it in. Worth fixing on its own, but it was NOT the
+// dominant cost behind ga-ntr7gn's wall-clock floor — a live remeasurement
+// after this fix alone landed showed no meaningful improvement. The real
+// dominant cost was the sequential OPEN loop itself; see
+// TestOpenStandaloneRigStoresOpensRigsConcurrently below.
+func TestOpenStandaloneRigStoresReusesSuppliedConfig(t *testing.T) {
+	cityDir := newReadyCityWithBrokenRig(t)
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+	if len(cfg.Rigs) < 2 {
+		t.Fatalf("fixture has %d rigs, want at least 2 so a per-rig reparse is distinguishable from a single fallback load", len(cfg.Rigs))
+	}
+
+	before := loadCityConfigCalls.Load()
+	stores, failures := openStandaloneRigStores(cfg, cityDir)
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("openStandaloneRigStores re-parsed city config %d times across %d rigs despite a non-nil cfg already in hand; want 0 (see ga-237xpr)", grew, len(cfg.Rigs))
+	}
+	if len(stores) == 0 && len(failures) == 0 {
+		t.Fatalf("openStandaloneRigStores returned nothing for a city with rigs configured")
+	}
+}
+
+// TestOpenStandaloneRigStoresOpensRigsConcurrently is the wall-clock
+// regression test for ga-ntr7gn's real dominant cost: opening N rig stores
+// must cost about as much as the SLOWEST open, not the sum of every open.
+//
+// The expensive step per rig is not building the beads.Store value (a struct
+// literal) but contract.PreflightChecker.Check inside
+// openStoreAtForCityWithConfig's call chain: it shells out to `bd context
+// --json` and pings the Dolt server to decide native-store eligibility, real
+// latency paid even when the verdict is a foregone "ineligible" (e.g. a
+// permanent bd/library version skew, which is this city's actual steady
+// state). That happened inside openStandaloneRigStores's sequential for
+// loop, so it dominated `gc ready`'s wall clock even after
+// federateBeadLegs's read-side legs were made concurrent — see
+// ready_federation_test.go's TestFederateBeadLegsRunsLegsConcurrently, whose
+// fix alone did not move a live measurement against gc-management (still
+// 11.4-13.5s afterward, same ballpark as the original 14266-15716ms floor).
+func TestOpenStandaloneRigStoresOpensRigsConcurrently(t *testing.T) {
+	const perRig = 100 * time.Millisecond
+	const rigCount = 5
+
+	cfg := &config.City{}
+	built := make(map[string]beads.Store, rigCount)
+	for i := 0; i < rigCount; i++ {
+		name := "rig-" + strconv.Itoa(i)
+		cfg.Rigs = append(cfg.Rigs, config.Rig{Name: name, Path: "/fake/" + name})
+		built[name] = splittest.NewWorkStore(t, name)
+	}
+
+	start := time.Now()
+	stores, failures := openStandaloneRigStoresWithOpener(cfg, func(rig config.Rig) (beads.Store, error) {
+		time.Sleep(perRig)
+		return built[rig.Name], nil
+	})
+	elapsed := time.Since(start)
+
+	if len(failures) != 0 {
+		t.Fatalf("unexpected open failures: %v", failures)
+	}
+	if len(stores) != rigCount {
+		t.Fatalf("got %d stores, want %d", len(stores), rigCount)
+	}
+
+	// A sequential opener costs rigCount*perRig (500ms). A concurrent one
+	// costs about one perRig (100ms). The budget sits well under the
+	// sequential floor while leaving generous headroom over the concurrent
+	// floor for scheduler jitter, so this fails on a regression to a
+	// sequential open loop without flaking on a loaded box.
+	if budget := rigCount * perRig / 2; elapsed >= budget {
+		t.Fatalf("openStandaloneRigStoresWithOpener took %v to open %d rigs at %v delay each; want well under %v (the sequential floor is %v) — rigs did not open concurrently", elapsed, rigCount, perRig, budget, rigCount*perRig)
+	}
+}
+
 // TestReadyUnboundRigIsSkippedOnBothSurfaces states the decision for the rig
 // declared in city.toml with NO .gc/site.toml binding, which is a different
 // shape from a rig that failed to open and is deliberately NOT promoted to an
@@ -1149,8 +1237,15 @@ func TestGcReadySteerDescribesTheFlagsItActuallyAccepts(t *testing.T) {
 // never stated one. The work legs' bead-policy layer then rewrote the zero value
 // to TierBoth and the unwrapped class leg took it literally, so the merged answer
 // was two different questions and nothing on any path could say so.
+// mu guards the shared readyTiers/listTiers slices, which every leg's copy of
+// this store points at in common (see TestReadyStatesTheSameTierOnEveryLeg).
+// federateBeadLegs and federateListBeadsWithOwner read legs concurrently, one
+// goroutine per leg, so the appends below are a genuine concurrent-writer
+// race without a lock of their own — the fixture needs to be as safe as the
+// production stores it stands in for.
 type readyTierRecordingStore struct {
 	beads.Store
+	mu         *sync.Mutex
 	readyTiers *[]beads.TierMode
 	listTiers  *[]beads.TierMode
 }
@@ -1160,12 +1255,16 @@ func (s readyTierRecordingStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead,
 	if len(query) > 0 {
 		q = query[0]
 	}
+	s.mu.Lock()
 	*s.readyTiers = append(*s.readyTiers, q.TierMode)
+	s.mu.Unlock()
 	return s.Store.Ready(query...)
 }
 
 func (s readyTierRecordingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
 	*s.listTiers = append(*s.listTiers, query.TierMode)
+	s.mu.Unlock()
 	return s.Store.List(query)
 }
 
@@ -1179,16 +1278,17 @@ func (s readyTierRecordingStore) List(query beads.ListQuery) ([]beads.Bead, erro
 // neutral default here but a narrower question the policy-wrapped legs silently
 // rewrite. Both arms are covered, because they build different query types.
 func TestReadyStatesTheSameTierOnEveryLeg(t *testing.T) {
+	var mu sync.Mutex
 	var readyTiers, listTiers []beads.TierMode
 	legs := []readyLeg{
 		readyTestLeg("city", readyTierRecordingStore{
-			Store: splittest.NewWorkStore(t, "gc"), readyTiers: &readyTiers, listTiers: &listTiers,
+			Store: splittest.NewWorkStore(t, "gc"), mu: &mu, readyTiers: &readyTiers, listTiers: &listTiers,
 		}),
 		readyTestLeg("rig frontend", readyTierRecordingStore{
-			Store: splittest.NewWorkStore(t, "ra"), readyTiers: &readyTiers, listTiers: &listTiers,
+			Store: splittest.NewWorkStore(t, "ra"), mu: &mu, readyTiers: &readyTiers, listTiers: &listTiers,
 		}),
 		readyTestLeg("graph", readyTierRecordingStore{
-			Store: splittest.NewClassStore(t, config.BeadClassGraph), readyTiers: &readyTiers, listTiers: &listTiers,
+			Store: splittest.NewClassStore(t, config.BeadClassGraph), mu: &mu, readyTiers: &readyTiers, listTiers: &listTiers,
 		}),
 	}
 

@@ -372,6 +372,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 		newEventsCmd(stdout, stderr),
 		newExtMsgCmd(stdout, stderr),
 		newTraceCmd(stdout, stderr),
+		newBreakerCmd(stdout, stderr),
 		newOrderCmd(stdout, stderr),
 		newImportCmd(stdout, stderr),
 		newConfigCmd(stdout, stderr),

@@ -242,6 +242,19 @@ func TestParseCountsRejectsMalformedFiles(t *testing.T) {
 	}
 }
 
+// TestParseCountsRejectsAZeroCallRecordWithoutMedium pins the minimum call
+// count independently of the check that medium cannot exceed calls.
+func TestParseCountsRejectsAZeroCallRecordWithoutMedium(t *testing.T) {
+	t.Parallel()
+
+	data := strings.Replace(countsFixtureTwoRecords, "calls = 1\ntagged = true", "calls = 0\ntagged = true", 1)
+	if data == countsFixtureTwoRecords {
+		t.Fatal("the fixture edit did not apply")
+	}
+	_, err := ParseCounts([]byte(data))
+	requireErrorContains(t, err, "calls = 0, want at least 1")
+}
+
 func TestParseCountsNamesTheConflictMarkerRecovery(t *testing.T) {
 	t.Parallel()
 
@@ -475,6 +488,18 @@ func TestValidateCountsAcceptsAMatchingFile(t *testing.T) {
 	if err := ValidateCounts(ledger, census, []byte(data)); err != nil {
 		t.Fatalf("ValidateCounts: %v", err)
 	}
+}
+
+// TestValidateCountsUnrenderablePathEndsWithTheProtocolOnce checks that a
+// generation failure carries the same recovery instructions as a parse failure.
+func TestValidateCountsUnrenderablePathEndsWithTheProtocolOnce(t *testing.T) {
+	t.Parallel()
+
+	path := `sample/a"b_test.go`
+	census := Census{Occurrences: []Occurrence{occurrence(path, ResourceSubprocess, false)}}
+	err := ValidateCounts(validLedger(), census, []byte(countsFixtureTwoRecords))
+	requireErrorContains(t, err, "path "+strconv.Quote(path))
+	requireFailureEnding(t, err)
 }
 
 func TestValidateCountsReportsGrowthAndStalenessPerRecord(t *testing.T) {
@@ -924,6 +949,66 @@ func TestUpdateGeneratedWritesTheCountsFileAndTheDocumentationBlock(t *testing.T
 	if err := ValidateCounts(policy, census, []byte(readFile(t, filepath.Join(root, "test", "test-resource-counts.toml")))); err != nil {
 		t.Fatalf("the generated file does not validate: %v", err)
 	}
+}
+
+// TestUpdateGeneratedKeepsTheDestinationMode checks permission preservation
+// when both generated files are replaced with new content.
+func TestUpdateGeneratedKeepsTheDestinationMode(t *testing.T) {
+	root := updateTree(t, testingDocWithBlock)
+	policy := validLedger()
+	counts := filepath.Join(root, "test", "test-resource-counts.toml")
+	doc := filepath.Join(root, "TESTING.md")
+	if err := os.WriteFile(counts, []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	modes := map[string]os.FileMode{counts: 0o640, doc: 0o664}
+	for name, mode := range modes {
+		if err := os.Chmod(name, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := updateGenerated(policy, root, cloneLedger(policy), updateCensus()); err != nil {
+		t.Fatalf("updateGenerated: %v", err)
+	}
+	for name, want := range modes {
+		info, err := os.Stat(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s mode = %v after the update, want the existing %v", filepath.Base(name), got, want)
+		}
+	}
+}
+
+// TestUpdateGeneratedGivesANewCountsFileMode0644 checks that new generated
+// counts files are readable by the group and other users.
+func TestUpdateGeneratedGivesANewCountsFileMode0644(t *testing.T) {
+	root := updateTree(t, testingDocWithBlock)
+	policy := validLedger()
+
+	if err := updateGenerated(policy, root, cloneLedger(policy), updateCensus()); err != nil {
+		t.Fatalf("updateGenerated: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(root, "test", "test-resource-counts.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Fatalf("a new counts file has mode %v, want 0644", got)
+	}
+}
+
+// TestExportedUpdateGeneratedHoldsTheLedgerToTheBootstrapPolicy checks the
+// public wrapper's policy choice independently of the injectable helper.
+func TestExportedUpdateGeneratedHoldsTheLedgerToTheBootstrapPolicy(t *testing.T) {
+	t.Parallel()
+
+	drifted := cloneLedger(bootstrapPolicy)
+	drifted.Version = 99
+	err := UpdateGenerated(t.TempDir(), drifted, Census{})
+	requireErrorContains(t, err, "ledger version = 99, bootstrap policy requires 3")
 }
 
 func TestUpdateGeneratedIsIdempotent(t *testing.T) {

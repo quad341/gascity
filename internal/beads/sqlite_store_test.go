@@ -708,6 +708,18 @@ func TestSQLiteStoreCloseStoreSerializesConcurrentCallers(t *testing.T) {
 	}
 }
 
+// TestSQLiteStoreCloseStoreKeepsBothHandles pins the handles that in-flight
+// reads and write retries may still reload after the store closes.
+func TestSQLiteStoreCloseStoreKeepsBothHandles(t *testing.T) {
+	store := openSQLiteStoreForTest(t, t.TempDir())
+	if err := store.CloseStore(); err != nil {
+		t.Fatalf("CloseStore: %v", err)
+	}
+	if store.db == nil || store.readDB == nil {
+		t.Fatalf("CloseStore cleared a handle: db nil=%v, readDB nil=%v", store.db == nil, store.readDB == nil)
+	}
+}
+
 // TestSQLiteStoreGetRacingCloseStoreReturnsAnError: CloseStore does not wait
 // for a read already in flight, so a Get whose row query holds a pooled
 // connection when the store closes finishes after it. It must report the

@@ -89,6 +89,46 @@ func TestSQLiteStoreTxRetriesAContendedBegin(t *testing.T) {
 	}
 }
 
+// TestSQLiteStoreTxRacingCloseStoreReturnsAnError closes the store during a
+// contended BEGIN's backoff. The retry must return the closed handle's error
+// without panicking or running the transaction callback.
+func TestSQLiteStoreTxRacingCloseStoreReturnsAnError(t *testing.T) {
+	store := openSQLiteStoreForTest(t, t.TempDir())
+	release := holdSQLiteWriteLock(t, store)
+	sleeps := stubSQLiteBusySleep(t, func() {
+		release()
+		if err := store.CloseStore(); err != nil {
+			t.Errorf("CloseStore during backoff: %v", err)
+		}
+	})
+
+	var panicked any
+	var err error
+	calls := 0
+	func() {
+		defer func() { panicked = recover() }()
+		err = store.Tx("racing close", func(Tx) error {
+			calls++
+			return nil
+		})
+	}()
+	if panicked != nil {
+		t.Fatalf("Tx racing CloseStore panicked: %v", panicked)
+	}
+	if err == nil {
+		t.Fatal("Tx racing CloseStore succeeded; want the closed handle's error")
+	}
+	if errors.Is(err, ErrSQLiteBusyExhausted) {
+		t.Fatalf("Tx racing CloseStore = %v, want a closed-handle error, not busy exhaustion", err)
+	}
+	if calls != 0 {
+		t.Fatalf("Tx callback ran %d times after CloseStore, want 0", calls)
+	}
+	if *sleeps != 1 {
+		t.Fatalf("Tx retried after %d backoff sleeps, want 1", *sleeps)
+	}
+}
+
 // TestSQLiteStoreTxReportsAnExhaustedBeginAsBusyExhausted covers a write lock
 // held through every retry: fn never runs, and the error matches
 // ErrSQLiteBusyExhausted, the mark of a write that committed nothing.

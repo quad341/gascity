@@ -17,16 +17,27 @@ permissions:
 jobs:
   darwin-named-test:
     if: ${{ github.repository != 'gastownhall/gascity' }}
-    name: darwin test @ ${{ matrix.label }}
-    runs-on: macos-15
+    name: darwin test @ ${{ matrix.label }} on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
+          # macos-15 (arm64) is the runner policy's GitHub-hosted Mac fallback;
+          # macos-15-intel is added because hosted arm64 capacity cancelled
+          # run 44625043579 before any runner picked it up.
           - label: reviewed-source
+            runner: macos-15
             tree: 000c0a3384289af3caf4c1e8e7a34445d68248e4
           - label: gate-merge-tree
+            runner: macos-15
+            tree: bdd921a7b44b3abddc98625185e7d12f782ac897
+          - label: reviewed-source
+            runner: macos-15-intel
+            tree: 000c0a3384289af3caf4c1e8e7a34445d68248e4
+          - label: gate-merge-tree
+            runner: macos-15-intel
             tree: bdd921a7b44b3abddc98625185e7d12f782ac897
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -67,11 +78,11 @@ jobs:
         shell: bash
         env:
           GC_FAST_UNIT: "0"
-        run: go test -json -count=1 ./internal/processgroup/... > processgroup-test-${{ matrix.label }}.json
+        run: go test -json -count=1 ./internal/processgroup/... > processgroup-test-${{ matrix.label }}-${{ matrix.runner }}.json
       - name: Upload the -json event stream
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: processgroup-test-${{ matrix.label }}
-          path: processgroup-test-${{ matrix.label }}.json
+          name: processgroup-test-${{ matrix.label }}-${{ matrix.runner }}
+          path: processgroup-test-${{ matrix.label }}-${{ matrix.runner }}.json
           if-no-files-found: error

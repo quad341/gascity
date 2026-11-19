@@ -1,0 +1,77 @@
+name: darwin-evidence
+
+# Fork-only, one-off native evidence for gascity deploy bead ga-0w51tt6s
+# (processgroup darwin EPERM fix). The Linux gate cannot see
+# TestDarwinAllZombieGroupReadsAsGone (//go:build darwin), and no upstream Mac
+# lane both runs it unskipped (GC_FAST_UNIT=0) and prints per-test results.
+# Each job checks out an exact tree BY SHA, so the tested Go tree is exactly
+# the reviewed source or the gate's merge tree, never this workflow commit.
+
+on:
+  push:
+    branches: ["fix/ga-0w51tt6s-darwin-evidence"]
+
+permissions:
+  contents: read
+
+jobs:
+  darwin-named-test:
+    if: ${{ github.repository != 'gastownhall/gascity' }}
+    name: darwin test @ ${{ matrix.label }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: reviewed-source
+            tree: 000c0a3384289af3caf4c1e8e7a34445d68248e4
+          - label: gate-merge-tree
+            tree: bdd921a7b44b3abddc98625185e7d12f782ac897
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ matrix.tree }}
+          persist-credentials: false
+      - name: Confirm the exact tree
+        shell: bash
+        run: |
+          head="$(git rev-parse HEAD)"
+          echo "HEAD=$head tree=$(git rev-parse 'HEAD^{tree}') want=${{ matrix.tree }}"
+          test "$head" = "${{ matrix.tree }}"
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Runner facts
+        shell: bash
+        run: |
+          sw_vers
+          uname -a
+          go version
+          go env GOOS GOARCH
+      - name: TestDarwinAllZombieGroupReadsAsGone, verbose, unskipped
+        shell: bash
+        env:
+          GC_FAST_UNIT: "0"
+        run: |
+          go test -v -count=1 -run '^TestDarwinAllZombieGroupReadsAsGone$' ./internal/processgroup/ 2>&1 | tee named.txt
+          grep -q -- '^--- PASS: TestDarwinAllZombieGroupReadsAsGone ' named.txt
+          if grep -q -- '--- SKIP: TestDarwinAllZombieGroupReadsAsGone' named.txt; then echo "SKIPPED"; exit 1; fi
+      - name: Whole processgroup package, verbose, unskipped
+        shell: bash
+        env:
+          GC_FAST_UNIT: "0"
+        run: go test -v -count=1 ./internal/processgroup/...
+      - name: Whole processgroup package, go test -json event stream
+        shell: bash
+        env:
+          GC_FAST_UNIT: "0"
+        run: go test -json -count=1 ./internal/processgroup/... > processgroup-test-${{ matrix.label }}.json
+      - name: Upload the -json event stream
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: processgroup-test-${{ matrix.label }}
+          path: processgroup-test-${{ matrix.label }}.json
+          if-no-files-found: error

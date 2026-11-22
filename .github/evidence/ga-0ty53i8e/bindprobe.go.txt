@@ -1,0 +1,369 @@
+// bindprobe answers one question on the host it runs on: does an ESTABLISHED
+// client socket whose local end is 127.0.0.1:P stop a listener from binding
+// 127.0.0.1:P? It builds that hold exactly the way test/dolttest's
+// holdPortWithClientSocket fixture (and internal/beads' copy of it) does: a
+// sink listener, a probe-and-close port P, then a dial to the sink from local
+// address 127.0.0.1:P. Then it tries:
+//
+//	A  net.Listen on 127.0.0.1:P with Go's defaults (Go sets SO_REUSEADDR on
+//	   every listener; dolt is a Go program and listens the same way)
+//	B  the same listen with SO_REUSEADDR cleared before bind
+//	C  net.Listen with Go's defaults while a bound, unconnected, non-listening
+//	   socket (no SO_REUSEADDR) holds 127.0.0.1:P instead
+//	D  real `dolt sql-server -H 127.0.0.1 -P P` under the client-socket hold
+//	E  real dolt under C's bound-socket hold
+//
+// Investigation ga-0ty53i8e (gascity gate tracker ga-2tucpj0k). Stdlib only:
+// run it with `go run bindprobe.go` from any directory.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+)
+
+var summary = map[string]string{}
+
+func main() {
+	summary["goos"] = runtime.GOOS
+	summary["goarch"] = runtime.GOARCH
+	summary["go"] = runtime.Version()
+	fmt.Printf("bindprobe on %s/%s %s, uid %d\n\n", runtime.GOOS, runtime.GOARCH, runtime.Version(), os.Getuid())
+
+	caseA()
+	caseB()
+	caseC()
+	doltPath, err := exec.LookPath("dolt")
+	if err != nil {
+		fmt.Println("dolt not on PATH: cases D and E not run")
+		summary["D_dolt_client_hold"] = "not-run"
+		summary["E_dolt_bound_hold"] = "not-run"
+	} else {
+		out, _ := exec.Command(doltPath, "version").CombinedOutput()
+		fmt.Printf("dolt: %s (%s)\n", doltPath, strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0])
+		caseD(doltPath)
+		caseE(doltPath)
+	}
+	data, _ := json.Marshal(summary)
+	fmt.Printf("\nSUMMARY %s\n", data)
+}
+
+// clientHold is the fixture's hold: an established client socket whose local
+// end is 127.0.0.1:port, connected to a sink listener on another port.
+type clientHold struct {
+	sink     net.Listener
+	client   net.Conn
+	port     int
+	mu       sync.Mutex
+	accepted []net.Conn
+}
+
+func newClientHold() *clientHold {
+	sink, err := net.Listen("tcp", "127.0.0.1:0")
+	must("listen for the sink", err)
+	h := &clientHold{sink: sink}
+	go func() {
+		for {
+			c, err := sink.Accept()
+			if err != nil {
+				return
+			}
+			h.mu.Lock()
+			h.accepted = append(h.accepted, c)
+			h.mu.Unlock()
+		}
+	}()
+	h.port = probePort()
+	d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: h.port}}
+	h.client, err = d.Dial("tcp", sink.Addr().String())
+	must(fmt.Sprintf("hold port %d with a client socket", h.port), err)
+	fmt.Printf("  hold: client socket %s -> %s (sink); client SO_REUSEADDR=%s\n",
+		h.client.LocalAddr(), h.client.RemoteAddr(), sockopt(h.client.(*net.TCPConn), syscall.SO_REUSEADDR))
+	if got := h.client.LocalAddr().(*net.TCPAddr).Port; got != h.port {
+		fmt.Printf("  !! client local port %d is not the held port %d\n", got, h.port)
+	}
+	return h
+}
+
+func (h *clientHold) Close() {
+	_ = h.client.Close()
+	_ = h.sink.Close()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, c := range h.accepted {
+		_ = c.Close()
+	}
+}
+
+// writeOK reports whether the held client socket still takes a write.
+func (h *clientHold) writeOK() string {
+	if _, err := h.client.Write([]byte("x")); err != nil {
+		return "write-failed: " + err.Error()
+	}
+	return "write-ok"
+}
+
+// boundHold binds a raw TCP socket to 127.0.0.1:port without SO_REUSEADDR and
+// neither listens nor connects.
+func boundHold() (fd, port int) {
+	port = probePort()
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+	must("raw socket", err)
+	err = syscall.Bind(fd, &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}})
+	must(fmt.Sprintf("raw bind 127.0.0.1:%d", port), err)
+	v, gerr := syscall.GetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR)
+	fmt.Printf("  hold: raw socket bound to 127.0.0.1:%d, not listening, not connected; SO_REUSEADDR=%d (err %v)\n", port, v, gerr)
+	return fd, port
+}
+
+func caseA() {
+	fmt.Println("CASE A: client-socket hold, then net.Listen with Go defaults on the held address")
+	h := newClientHold()
+	defer h.Close()
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(h.port))
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		fmt.Printf("  listen %s: %v (EADDRINUSE=%v)\n", addr, err, errors.Is(err, syscall.EADDRINUSE))
+		summary["A_default_listen"] = errClass(err)
+		summary["A_client_after"] = h.writeOK()
+		fmt.Println()
+		return
+	}
+	defer l.Close()
+	summary["A_default_listen"] = "bound"
+	fmt.Printf("  listen %s: BOUND; listener SO_REUSEADDR=%s\n", addr, sockopt(l.(*net.TCPListener), syscall.SO_REUSEADDR))
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	c, derr := net.DialTimeout("tcp", addr, time.Second)
+	if derr != nil {
+		fmt.Printf("  dial %s: %v\n", addr, derr)
+		summary["A_dial_listener"] = errClass(derr)
+	} else {
+		fmt.Printf("  dial %s: accepted (new connection %s -> %s)\n", addr, c.LocalAddr(), c.RemoteAddr())
+		_ = c.Close()
+		summary["A_dial_listener"] = "accepted"
+	}
+	summary["A_client_after"] = h.writeOK()
+	fmt.Printf("  held client socket after the listener bound: %s\n", summary["A_client_after"])
+	showSockets(h.port)
+	fmt.Println()
+}
+
+func caseB() {
+	fmt.Println("CASE B: client-socket hold, then a listen with SO_REUSEADDR cleared before bind")
+	h := newClientHold()
+	defer h.Close()
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(h.port))
+	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
+		var serr error
+		if err := c.Control(func(fd uintptr) {
+			serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 0)
+		}); err != nil {
+			return err
+		}
+		return serr
+	}}
+	l, err := lc.Listen(context.Background(), "tcp", addr)
+	if err != nil {
+		fmt.Printf("  listen %s without SO_REUSEADDR: %v (EADDRINUSE=%v)\n", addr, err, errors.Is(err, syscall.EADDRINUSE))
+		summary["B_listen_no_reuseaddr"] = errClass(err)
+	} else {
+		fmt.Printf("  listen %s without SO_REUSEADDR: BOUND (SO_REUSEADDR=%s)\n", addr, sockopt(l.(*net.TCPListener), syscall.SO_REUSEADDR))
+		summary["B_listen_no_reuseaddr"] = "bound"
+		_ = l.Close()
+	}
+	fmt.Println()
+}
+
+func caseC() {
+	fmt.Println("CASE C: bound-unconnected hold, then net.Listen with Go defaults on the held address")
+	fd, port := boundHold()
+	defer syscall.Close(fd)
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		fmt.Printf("  listen %s: %v (EADDRINUSE=%v)\n", addr, err, errors.Is(err, syscall.EADDRINUSE))
+		summary["C_default_listen_bound_hold"] = errClass(err)
+	} else {
+		fmt.Printf("  listen %s: BOUND\n", addr)
+		summary["C_default_listen_bound_hold"] = "bound"
+		_ = l.Close()
+	}
+	fmt.Println()
+}
+
+func caseD(doltPath string) {
+	fmt.Println("CASE D: client-socket hold, then dolt sql-server -H 127.0.0.1 -P <held port>")
+	h := newClientHold()
+	defer h.Close()
+	summary["D_dolt_client_hold"] = runDolt(doltPath, h.port)
+	summary["D_client_after"] = h.writeOK()
+	fmt.Printf("  held client socket after dolt: %s\n\n", summary["D_client_after"])
+}
+
+func caseE(doltPath string) {
+	fmt.Println("CASE E: bound-unconnected hold, then dolt sql-server -H 127.0.0.1 -P <held port>")
+	fd, port := boundHold()
+	defer syscall.Close(fd)
+	summary["E_dolt_bound_hold"] = runDolt(doltPath, port)
+	fmt.Println()
+}
+
+// runDolt starts dolt on port and reports "listening" when it accepts a
+// connection and is still running a second later, or "exited" with its log.
+func runDolt(doltPath string, port int) string {
+	dir, err := os.MkdirTemp("", "bindprobe-dolt-")
+	must("dolt temp dir", err)
+	defer os.RemoveAll(dir)
+	dataDir := filepath.Join(dir, "data")
+	rootDir := filepath.Join(dir, "root")
+	must("mkdir data", os.MkdirAll(dataDir, 0o755))
+	must("mkdir root", os.MkdirAll(rootDir, 0o755))
+	logPath := filepath.Join(dir, "dolt.log")
+	logFile, err := os.Create(logPath)
+	must("dolt log", err)
+	cmd := exec.Command(doltPath, "sql-server", "-H", "127.0.0.1", "-P", strconv.Itoa(port), "--data-dir", dataDir, "--loglevel", "warning")
+	cmd.Env = append(os.Environ(), "DOLT_ROOT_PATH="+rootDir, "DOLT_DISABLE_EVENT_FLUSH=true")
+	cmd.Stdout, cmd.Stderr = logFile, logFile
+	must("start dolt", cmd.Start())
+	_ = logFile.Close()
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	fmt.Printf("  dolt pid %d on %s\n", cmd.Process.Pid, addr)
+
+	result := "timeout"
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-exited:
+			fmt.Printf("  dolt EXITED: %v\n", err)
+			printLog(logPath)
+			return "exited"
+		default:
+		}
+		c, derr := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if derr == nil {
+			_ = c.Close()
+			select {
+			case err := <-exited:
+				fmt.Printf("  dial ok, then dolt EXITED: %v\n", err)
+				printLog(logPath)
+				return "exited-after-dial"
+			case <-time.After(time.Second):
+			}
+			fmt.Printf("  dial %s accepted and dolt still running 1s later: dolt LISTENS on the held port\n", addr)
+			showSockets(port)
+			result = "listening"
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-exited:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		<-exited
+	}
+	printLog(logPath)
+	return result
+}
+
+func printLog(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Printf("  (dolt log unreadable: %v)\n", err)
+		return
+	}
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		fmt.Println("  dolt log: (empty)")
+		return
+	}
+	fmt.Println("  dolt log:")
+	for _, line := range strings.Split(text, "\n") {
+		fmt.Printf("    | %s\n", line)
+	}
+}
+
+// showSockets prints what the OS reports for TCP sockets on port.
+func showSockets(port int) {
+	if path, err := exec.LookPath("lsof"); err == nil {
+		out, _ := exec.Command(path, "-nP", fmt.Sprintf("-iTCP:%d", port)).CombinedOutput()
+		fmt.Printf("  lsof -nP -iTCP:%d:\n", port)
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			fmt.Printf("    | %s\n", line)
+		}
+	}
+	if runtime.GOOS == "darwin" {
+		out, _ := exec.Command("netstat", "-an", "-p", "tcp").CombinedOutput()
+		needle := fmt.Sprintf(".%d ", port)
+		fmt.Printf("  netstat -an -p tcp | grep %q:\n", needle)
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.Contains(line, needle) {
+				fmt.Printf("    | %s\n", line)
+			}
+		}
+	}
+}
+
+type syscallConner interface {
+	SyscallConn() (syscall.RawConn, error)
+}
+
+func sockopt(c syscallConner, opt int) string {
+	rc, err := c.SyscallConn()
+	if err != nil {
+		return "err:" + err.Error()
+	}
+	var v int
+	var gerr error
+	if err := rc.Control(func(fd uintptr) { v, gerr = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, opt) }); err != nil {
+		return "err:" + err.Error()
+	}
+	if gerr != nil {
+		return "err:" + gerr.Error()
+	}
+	return strconv.Itoa(v)
+}
+
+func probePort() int {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	must("probe a port", err)
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+func errClass(err error) string {
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return "EADDRINUSE"
+	}
+	return "error: " + err.Error()
+}
+
+func must(what string, err error) {
+	if err != nil {
+		fmt.Printf("FATAL %s: %v\n", what, err)
+		os.Exit(2)
+	}
+}

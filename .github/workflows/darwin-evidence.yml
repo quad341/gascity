@@ -1,0 +1,114 @@
+name: darwin-evidence
+
+# Fork-only exact reviewed-head Darwin GREEN evidence for ga-4bp80f2s.
+# The test checkout is TREE; this workflow commit supplies the bind probe only.
+
+on:
+  push:
+    branches: ["evidence/ga-4bp80f2s-darwin-fix"]
+
+permissions:
+  contents: read
+
+jobs:
+  darwin-bind:
+    if: ${{ github.repository != 'gastownhall/gascity' }}
+    name: darwin bind evidence on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-15 is arm64, like the Blacksmith runners of the failing jobs;
+        # macos-15-intel is there in case hosted arm64 capacity cancels it.
+        runner: [macos-15, macos-15-intel]
+    env:
+      TREE: 4d7d8778e12536a20f0286e50e643303a8037197
+      DOLT_VERSION: "2.6.0"
+      GC_FAST_UNIT: "0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.TREE }}
+          persist-credentials: false
+      - name: Confirm the exact tree
+        shell: bash
+        run: |
+          head="$(git rev-parse HEAD)"
+          echo "HEAD=$head want=$TREE"
+          test "$head" = "$TREE"
+          echo "sqlserver_integration_test.go blob: $(git rev-parse HEAD:test/dolttest/sqlserver_integration_test.go)"
+          echo "zz_lost_dolt_port_integration_test.go blob: $(git rev-parse HEAD:internal/beads/zz_lost_dolt_port_integration_test.go)"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          path: evidence
+          sparse-checkout: .github/evidence
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Runner facts
+        shell: bash
+        run: |
+          sw_vers
+          uname -a
+          sysctl kern.osrelease kern.version
+          go version
+          go env GOOS GOARCH CGO_ENABLED
+          id
+      - name: Install dolt ${{ env.DOLT_VERSION }}
+        shell: bash
+        run: .github/scripts/install-dolt-archive.sh "$DOLT_VERSION" --cache
+      - name: "bindprobe: does a client socket's local port stop a listener's bind?"
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/out" "$RUNNER_TEMP/bindprobe"
+          cp evidence/.github/evidence/ga-0ty53i8e/bindprobe.go.txt "$RUNNER_TEMP/bindprobe/bindprobe.go"
+          shasum -a 256 "$RUNNER_TEMP/bindprobe/bindprobe.go"
+          dolt version
+          cd "$RUNNER_TEMP/bindprobe"
+          go run bindprobe.go 2>&1 | tee "$GITHUB_WORKSPACE/out/bindprobe.txt"
+      - name: Reviewed fix test/dolttest whole package, verbose
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -tags integration -count=1 -v ./test/dolttest/ 2>&1 | tee out/fix-dolttest.txt
+          grep -q -- '^--- SKIP: TestStartSQLServerRetriesWhenAClientSocketHoldsTheProbedPort ' out/fix-dolttest.txt
+          grep -q -- 'a listener can still bind .* beside the client socket that holds it' out/fix-dolttest.txt
+      - name: ICU for internal/beads (go-icu-regex CGO)
+        shell: bash
+        run: |
+          set -euo pipefail
+          icu_prefix="$(brew --prefix icu4c 2>/dev/null || true)"
+          if [ -z "$icu_prefix" ] || [ ! -d "$icu_prefix/include/unicode" ]; then
+            HOMEBREW_NO_AUTO_UPDATE=1 brew install icu4c
+            icu_prefix="$(brew --prefix icu4c)"
+          fi
+          echo "icu_prefix=$icu_prefix"
+          echo "CGO_CPPFLAGS=-I$icu_prefix/include" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=-L$icu_prefix/lib" >> "$GITHUB_ENV"
+      - name: Reviewed fix internal/beads lost-port regression, verbose
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -tags integration -count=1 -v -run '^TestStartTestDoltServerSurvivesALostProbedPort$' ./internal/beads/ 2>&1 | tee out/fix-beads.txt
+          grep -q -- '^--- SKIP: TestStartTestDoltServerSurvivesALostProbedPort ' out/fix-beads.txt
+          grep -q -- 'a listener can still bind .* beside the client socket that holds it' out/fix-beads.txt
+      - name: Verdict lines
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          for f in out/*.txt; do
+            echo "== $f"
+            grep -E -- '^(--- (PASS|FAIL|SKIP)|ok |FAIL|go test exit|SUMMARY)|sqlserver_integration_test.go|zz_lost_dolt_port' "$f" | head -60 || true
+          done
+      - name: Upload evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: darwin-bind-${{ matrix.runner }}
+          path: out/
+          if-no-files-found: error

@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func requirePrivateSocketDirectory(t *testing.T, path string) {
@@ -179,7 +178,7 @@ func TestLegacySocketRemainsVisibleWhenPrivateFallbackIsMissing(t *testing.T) {
 			if got != want {
 				t.Fatalf("legacy socket command = %q, want %q", got, want)
 			}
-		case <-time.After(testutil.ExecRaceTimeout):
+		case <-time.After(hangBudget):
 			t.Fatalf("timed out waiting for legacy socket command %q", want)
 		}
 	}

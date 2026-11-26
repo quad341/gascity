@@ -865,7 +865,7 @@ func TestInterruptPreservesBestEffortForNormalSocketProtocolError(t *testing.T) 
 		if got != "interrupt" {
 			t.Fatalf("socket command = %q, want interrupt", got)
 		}
-	case <-time.After(testutil.ExecRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("timed out waiting for interrupt command")
 	}
 }
